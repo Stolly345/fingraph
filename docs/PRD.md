@@ -212,6 +212,20 @@ only).
   it for every category without a budget, **Use** per row. Shows spent / budget with a bar (red when
   over), last month, totals, spending outside budgeted categories, uncategorised spending (→ To
   Review) and the month's projected total at the current pace. Previous months browsable.
+  - **Alerts**: *over* (spent > budget) or *near* (≥ 85% used while < 85% of the month has gone);
+    sidebar badge ("2 over" in red, else "1 near"), an Overview card, amber/red bars.
+  - **Setup wizard** (Set Up Budget… / Edit Plan…), 4 steps: pay (cycle weekly / fortnightly /
+    twice a month / monthly, next payday, gross, deductions as amount or % of gross; prefilled from a
+    detected salary — same payer ≥ 3× in 120 days at a steady rhythm and amount, payroll wording
+    preferred), other income and loan payments (median of 6 months of Loan Payments), category
+    budgets (fixed bills vs flexible), savings goal (amount or % of take-home). Shows take-home −
+    spending − loans = savings and, when short, solves take-home − loans − fixed − k·flexible = goal
+    for k and offers to trim flexible categories (to the nearest 5). Plan saved per view as JSON
+    (`budget_plan:<scope>` setting).
+  - **Your Plan** card + **12-month savings projection**: on budget (constant monthly savings) vs on
+    trend (each category's 6-month least-squares line carried forward, floored at 0) vs goal; next
+    three paydays (monthly pay keeps its day, clamped to month end). Rows note a trend of ≥ 5%
+    (min CI$ 5) a month.
 - **Combined Statement**: every transaction of the ticked accounts (default all in the workspace)
   in date order, a heading per month (in / out / net, transfers not counted, closing combined
   balance), the combined balance after each line (printed balances, else carried from the
@@ -276,7 +290,7 @@ banks, one deliberately unreadable line to show the inspector).
 
 ## 11. Quality
 
-- `cargo test --workspace`: 43 tests — five bank layouts, rollover, date inheritance, sign healing,
+- `cargo test --workspace`: 47 tests — five bank layouts, rollover, date inheritance, sign healing,
   both Pass-5 recoveries, a whole demo year, ledger (dedup, transfers, card payments, business
   expenses, backups/restore/erase, rescan keeping edits), rules and truncation matching, amount and reference rules, splits,
   attachments, coverage, directory and keywords, insights, subscriptions, exports. Plus `-- --ignored real` re-scanning the owner's
@@ -311,6 +325,7 @@ banks, one deliberately unreadable line to show the inspector).
 | Landed cost | Tags as projects; freight & duty suggestions |
 | Couldn't change charges in "owes you" | ✎ per charge opens the transaction editor; the dialog reopens with fresh totals |
 | Where's the business database? | Business Directory page: search, seen-in-statements count, keywords, Override… → rule |
+| Budget: crash on Fill, over count, 85% alert, pay-based wizard with projections | RefCell borrow held across redraw (fixed); badge + Overview card; 4-step wizard, plan, trend projection |
 | Budgeting from past spending | Budget page: 6-month median suggestions, per-view budgets, pace projection |
 | Consolidated statement | Combined Statement page: chosen accounts, months, combined balance, click to edit |
 | CUC summer bills, annual renewals | Year-over-year spike check; Annual renewals card |

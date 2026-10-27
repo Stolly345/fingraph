@@ -21,7 +21,11 @@ PDFs, backups). Full product and system reference: [`docs/PRD.md`](docs/PRD.md).
   business-expense flag, split charges (the rental's share of one receipt), and "Business owes you"
   cards that track personal money spent on the business until it's paid back.
 - **Budget**: a monthly amount per category, filled from what you usually spend (median of the last
-  six months), with this month against it, what's over, and where the month is heading.
+  six months), with this month against it, what's over, and where the month is heading. A setup
+  wizard takes your pay cycle, gross pay and deductions (pension 5%, health insurance), other income,
+  loan payments and a savings goal, does the arithmetic (and solves how much flexible spending must
+  shrink to reach the goal), and projects savings 12 months ahead on budget and on trend. Alerts when
+  a category is over or 85% used early in the month (sidebar count + Overview card).
 - **Rules** can be limited to an amount (*only when CI$ 125.00*) or match a reference number.
 - **Receipts**: drop a PDF or photo on a transaction; export the P&L with every receipt for your
   accountant.
@@ -97,7 +101,7 @@ Rescan when run from the app).
 ## Tests
 
 ```sh
-cargo test --workspace                            # 43 tests: bank layouts, healing, ledger, rules, directory, insights, exports
+cargo test --workspace                            # 47 tests: bank layouts, healing, ledger, rules, directory, insights, exports
 cargo test -p fingraph-core -- --ignored real     # also scans your statements in ~/.local/share/fingraph/documents
 cargo clippy --workspace --all-targets
 ```

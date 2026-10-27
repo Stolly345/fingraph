@@ -613,7 +613,7 @@ impl App {
         if let Some(n) = MAIN_PAGES.iter().position(|p| *p == name) {
             row.set_tooltip_text(Some(&format!("Ctrl+{}", n + 1)));
         }
-        if let Some(&key) = ["review", "changes", "subscriptions", "statements"].iter().find(|k| **k == name) {
+        if let Some(&key) = ["review", "changes", "subscriptions", "statements", "budget"].iter().find(|k| **k == name) {
             self.badges.borrow_mut().insert(key, badge);
         }
         gtk::ListBoxRow::builder().child(&row).name(name).build()
@@ -657,6 +657,8 @@ impl App {
         let missing = cov.iter().map(|c| c.months.iter().filter(|m| m.1 == fingraph_core::workflows::MonthState::Missing).count() + c.breaks.len()).sum::<usize>();
         let bad = docs.iter().filter(|d| matches!(d.reconciliation, fingraph_core::Reconciliation::Discrepancy(_))).count() + missing;
         set("statements", if bad > 0 { format!("⚠ {bad}") } else { String::new() }, bad > 0);
+        let (b, over) = budget::badge(self);
+        set("budget", b, over);
 
         // accounts: rebuilt in place, just above Setup, only when they or their balances changed
         let balances = insights::latest_balances(&rows, &docs);
@@ -838,6 +840,7 @@ fn css() {
          .amount-out { color: @error_color; font-feature-settings: 'tnum'; }
          .amount-in { color: @success_color; font-feature-settings: 'tnum'; }
          levelbar.over block.filled { background-color: @error_color; }
+         levelbar block.near { background-color: @warning_color; }
          .tnum { font-feature-settings: 'tnum'; }
          .chip { border-radius: 99px; padding: 4px 12px; }
          .bank-card { padding: 12px; min-width: 150px; }",
@@ -876,6 +879,7 @@ fn debug_shot(app: &Rc<App>) {
         Ok("report") => statements::open_first_report(app),
         Ok(d) if d.starts_with("split:") => split::dialog(app, d[6..].parse().unwrap_or(0)),
         Ok(d) if d.starts_with("owed:") => owed::debug_open(app, d[5..].parse().unwrap_or(0)),
+        Ok("budget") => budget::wizard(app, Rc::new(|| {})),
         Ok(d) if d.starts_with("tx:") => txedit::dialog(app, d[3..].parse().unwrap_or(0), None),
         Ok("preferences") => {
             preferences::show(app);
