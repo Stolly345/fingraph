@@ -130,27 +130,37 @@ ALTER TABLE transactions ADD COLUMN business_entity_id INTEGER REFERENCES entiti
 ALTER TABLE learned_rules ADD COLUMN business_entity_id INTEGER REFERENCES entities(id) ON DELETE SET NULL;
 "#];
 
-/// (name, kind, children)
+/// (name, kind, children). Missing ones are added to existing ledgers on open; lists are shown A–Z.
 const CATEGORIES: &[(&str, &str, &[&str])] = &[
-    ("Income", "Income", &["Salary", "Rental Income", "Business Income", "Interest & Dividends", "Refunds"]),
-    ("Groceries", "Expense", &[]),
-    ("Dining & Takeaway", "Expense", &[]),
-    ("Utilities", "Expense", &["Electricity", "Water", "Phone & Internet", "Gas"]),
-    ("Transport", "Expense", &["Fuel", "Taxi & Rideshare"]),
-    ("Subscriptions & Digital", "Expense", &[]),
-    ("Shopping", "Expense", &[]),
-    ("Home & Garden", "Expense", &[]),
-    ("Health & Fitness", "Expense", &[]),
-    ("Insurance", "Expense", &[]),
-    ("Bank Fees & Interest", "Expense", &[]),
-    ("Government & Fees", "Expense", &[]),
-    ("Travel", "Expense", &[]),
-    ("Repairs & Maintenance", "Expense", &[]),
-    ("Property Expense", "Expense", &[]),
-    ("Professional Services", "Expense", &[]),
+    ("Bank Fees & Interest", "Expense", &["Account Fees", "Credit Card Interest", "FX & Wire Fees", "Loan Interest"]),
+    ("Business Expense", "Expense", &["Advertising & Marketing", "Contractors & Payroll", "Licences & Permits", "Office Supplies", "Software & Tools"]),
     ("Cash Withdrawal", "Expense", &[]),
-    ("Gifts & Donations", "Expense", &[]),
+    ("Clothing & Shoes", "Expense", &[]),
+    ("Dining & Takeaway", "Expense", &["Coffee & Snacks", "Restaurants", "Takeaway & Delivery"]),
+    ("Education", "Expense", &["Books & Courses", "School Fees & Tuition"]),
+    ("Entertainment", "Expense", &["Events & Tickets", "Hobbies", "Movies & Streaming"]),
+    ("Family Expense", "Expense", &["Allowances", "Baby & Kids' Supplies", "Childcare & Nanny", "Family Support & Remittances", "Kids' Activities", "School Supplies & Uniforms"]),
+    ("Gifts & Donations", "Expense", &["Charity", "Church & Tithes", "Gifts"]),
+    ("Government & Fees", "Expense", &["Import Duty", "Stamp Duty", "Vehicle Licensing", "Work Permits & Immigration"]),
+    ("Groceries", "Expense", &["Liquor"]),
+    ("Health & Fitness", "Expense", &["Doctor & Dental", "Gym & Sports", "Optical", "Pharmacy"]),
+    ("Home & Garden", "Expense", &["Appliances", "Furniture & Decor", "Household Supplies"]),
+    ("Housing", "Expense", &["Mortgage", "Rent", "Strata Fees"]),
+    ("Income", "Income", &["Business Income", "Gifts Received", "Interest & Dividends", "Refunds", "Reimbursements", "Rental Income", "Salary", "Sales"]),
+    ("Insurance", "Expense", &["Car Insurance", "Health Insurance", "Home Insurance", "Life Insurance"]),
+    ("Loan Payments", "Transfer", &[]),
+    ("Personal Care", "Expense", &["Hair & Beauty", "Spa & Massage"]),
+    ("Pets", "Expense", &["Pet Food & Supplies", "Vet"]),
+    ("Professional Services", "Expense", &["Accounting", "Legal"]),
+    ("Property Expense", "Expense", &["Cleaning", "Landscaping", "Pest Control", "Pool Service", "Property Management"]),
+    ("Repairs & Maintenance", "Expense", &[]),
+    ("Savings & Investments", "Transfer", &[]),
+    ("Shopping", "Expense", &["Electronics", "Online Shopping"]),
+    ("Subscriptions & Digital", "Expense", &[]),
     ("Transfers", "Transfer", &[]),
+    ("Transport", "Expense", &["Car Payment", "Fuel", "Parking", "Taxi & Rideshare", "Vehicle Maintenance"]),
+    ("Travel", "Expense", &["Car Rental", "Flights", "Hotels"]),
+    ("Utilities", "Expense", &["Electricity", "Gas", "Phone & Internet", "Water"]),
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -419,12 +429,20 @@ impl Db {
         let fx = Fx::default();
         self.conn.execute("INSERT OR IGNORE INTO fx_rates VALUES ('KYD', 'USD', ?1)", [fx.kyd_to_usd.to_string()])?;
         self.conn.execute("INSERT OR IGNORE INTO fx_rates VALUES ('USD', 'KYD', ?1)", [fx.usd_to_kyd.to_string()])?;
-        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM categories", [], |r| r.get(0))?;
-        if n == 0 {
-            for (name, kind, kids) in CATEGORIES {
-                self.conn.execute("INSERT INTO categories (name, parent_id, kind) VALUES (?1, NULL, ?2)", params![name, kind])?;
-                let pid = self.conn.last_insert_rowid();
-                for k in *kids {
+        // add whatever's missing, so older ledgers pick up new categories; nothing is renamed or removed
+        let find = |name: &str, parent: Option<i64>| -> Result<Option<i64>> {
+            Ok(self.conn.query_row("SELECT id FROM categories WHERE name = ?1 AND parent_id IS ?2", params![name, parent], |r| r.get(0)).optional()?)
+        };
+        for (name, kind, kids) in CATEGORIES {
+            let pid = match find(name, None)? {
+                Some(id) => id,
+                None => {
+                    self.conn.execute("INSERT INTO categories (name, parent_id, kind) VALUES (?1, NULL, ?2)", params![name, kind])?;
+                    self.conn.last_insert_rowid()
+                }
+            };
+            for k in *kids {
+                if find(k, Some(pid))?.is_none() {
                     self.conn.execute("INSERT INTO categories (name, parent_id, kind) VALUES (?1, ?2, ?3)", params![k, pid, kind])?;
                 }
             }
@@ -1036,7 +1054,11 @@ impl Db {
     // ---------------------------------------------------------------- categories & rules
 
     pub fn categories(&self) -> Result<Vec<Category>> {
-        let mut st = self.conn.prepare("SELECT id, name, parent_id, kind FROM categories ORDER BY COALESCE(parent_id, id), parent_id IS NOT NULL, name")?;
+        // A–Z by top-level category, each followed by its own sub-categories A–Z
+        let mut st = self.conn.prepare(
+            "SELECT c.id, c.name, c.parent_id, c.kind FROM categories c LEFT JOIN categories p ON p.id = c.parent_id
+             ORDER BY COALESCE(p.name, c.name) COLLATE NOCASE, COALESCE(p.id, c.id), c.parent_id IS NOT NULL, c.name COLLATE NOCASE",
+        )?;
         let rows = st.query_map([], |r| Ok(Category { id: r.get(0)?, name: r.get(1)?, parent_id: r.get(2)?, kind: cat_kind(&r.get::<_, String>(3)?) }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -1046,6 +1068,10 @@ impl Db {
     }
 
     pub fn add_category(&self, name: &str, parent_id: Option<i64>, kind: CategoryKind) -> Result<i64> {
+        let taken: i64 = self.conn.query_row("SELECT COUNT(*) FROM categories WHERE name = ?1 COLLATE NOCASE AND parent_id IS ?2", params![name.trim(), parent_id], |r| r.get(0))?;
+        if taken > 0 {
+            return Err(Error(format!("“{name}” already exists")));
+        }
         let k = match kind {
             CategoryKind::Income => "Income",
             CategoryKind::Expense => "Expense",
@@ -1387,6 +1413,28 @@ mod tests {
         assert_eq!(kirk(business).len(), before.len());
         db.set_business(&[before[0].id], None).unwrap();
         assert_eq!(kirk(personal).len(), 1);
+    }
+
+    #[test]
+    fn categories_are_alphabetical_and_older_ledgers_get_new_ones() {
+        let db = Db::open_in_memory().unwrap();
+        let cats = db.categories().unwrap();
+        let tops: Vec<&str> = cats.iter().filter(|c| c.parent_id.is_none()).map(|c| c.name.as_str()).collect();
+        let mut sorted = tops.clone();
+        sorted.sort_by_key(|s| s.to_lowercase());
+        assert_eq!(tops, sorted);
+        // every sub-category sits right under its parent
+        for (i, c) in cats.iter().enumerate() {
+            if let Some(p) = c.parent_id {
+                assert!(cats[..i].iter().rev().find(|x| x.parent_id.is_none()).is_some_and(|x| x.id == p), "{}", c.name);
+            }
+        }
+        let fam = db.category_id("Family Expense").unwrap().unwrap();
+        assert!(cats.iter().any(|c| c.parent_id == Some(fam) && c.name == "Childcare & Nanny"));
+        // reopening (an older ledger) adds nothing twice
+        let n = cats.len();
+        db.seed().unwrap();
+        assert_eq!(db.categories().unwrap().len(), n);
     }
 
     #[test]

@@ -256,7 +256,24 @@ pub fn onboarding(app: &Rc<App>) {
 
 // ──────────────────────────────────────────────────────────────── Smart Triage
 
-const QUICK: [&str; 10] = ["Groceries", "Dining & Takeaway", "Utilities", "Shopping", "Transport", "Repairs & Maintenance", "Property Expense", "Health & Fitness", "Bank Fees & Interest", "Income"];
+/// The one-tap answers, A–Z (the suggestion, when there is one, goes first).
+const QUICK: [&str; 15] = [
+    "Bank Fees & Interest",
+    "Business Expense",
+    "Dining & Takeaway",
+    "Entertainment",
+    "Family Expense",
+    "Groceries",
+    "Health & Fitness",
+    "Home & Garden",
+    "Housing",
+    "Income",
+    "Property Expense",
+    "Repairs & Maintenance",
+    "Shopping",
+    "Transport",
+    "Utilities",
+];
 
 fn total_text(g: &TriageGroup) -> String {
     g.totals.iter().map(|(c, v)| fmt_money(v.abs(), *c)).collect::<Vec<_>>().join(" + ")

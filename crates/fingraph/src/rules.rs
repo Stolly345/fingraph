@@ -23,6 +23,18 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     rules.set_header_suffix(Some(&suffix));
     page.add(&subs);
     page.add(&rules);
+    let cats = adw::PreferencesGroup::builder().title("Categories").description("Shown A–Z everywhere. Add your own; sub-categories roll up into their parent on the dashboard.").build();
+    let add_cat = adw::ButtonRow::builder().title("Add a Category…").start_icon_name("list-add-symbolic").build();
+    cats.add(&add_cat);
+    page.add(&cats);
+    {
+        let w = Rc::downgrade(app);
+        add_cat.connect_activated(move |_| {
+            if let Some(a) = w.upgrade() {
+                category_dialog(&a);
+            }
+        });
+    }
     let sub_rows: Rc<std::cell::RefCell<Vec<gtk::Widget>>> = Default::default();
     let rule_rows: Rc<std::cell::RefCell<Vec<gtk::Widget>>> = Default::default();
     {
@@ -232,6 +244,43 @@ fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
             Err(e) => a.toast(&e.to_string()),
         }
         a.refresh();
+    });
+    d.present(Some(&app.win));
+}
+
+fn category_dialog(app: &Rc<App>) {
+    let tops: Vec<_> = app.categories().into_iter().filter(|c| c.parent_id.is_none()).collect();
+    let name = adw::EntryRow::builder().title("Name").build();
+    let mut parents = vec!["None — a top-level category".to_string()];
+    parents.extend(tops.iter().map(|c| format!("Under {}", c.name)));
+    let parent = adw::ComboRow::builder().title("Sits under").model(&gtk::StringList::new(&parents.iter().map(String::as_str).collect::<Vec<_>>())).build();
+    let kind = adw::ComboRow::builder().title("Kind").subtitle("Transfers never count as spending").model(&gtk::StringList::new(&["Expense", "Income", "Transfer"])).build();
+    let g = adw::PreferencesGroup::new();
+    g.add(&name);
+    g.add(&parent);
+    g.add(&kind);
+    let d = adw::AlertDialog::new(Some("New Category"), None);
+    d.set_extra_child(Some(&g));
+    d.add_responses(&[("cancel", "Cancel"), ("ok", "Add")]);
+    d.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+    let w = Rc::downgrade(app);
+    d.connect_response(None, move |_, r| {
+        let Some(a) = w.upgrade() else { return };
+        let n = name.text().trim().to_string();
+        if r != "ok" || n.is_empty() {
+            return;
+        }
+        use fingraph_core::db::CategoryKind;
+        // a sub-category takes its parent's kind
+        let p = (parent.selected() as usize).checked_sub(1).and_then(|i| tops.get(i));
+        let k = p.map(|p| p.kind).unwrap_or([CategoryKind::Expense, CategoryKind::Income, CategoryKind::Transfer][kind.selected() as usize]);
+        match a.db.add_category(&n, p.map(|p| p.id), k) {
+            Ok(_) => {
+                a.toast(&format!("Added “{n}”"));
+                a.refresh();
+            }
+            Err(_) => a.toast(&format!("“{n}” already exists there")),
+        }
     });
     d.present(Some(&app.win));
 }
