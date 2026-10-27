@@ -1141,6 +1141,16 @@ impl Db {
         Ok(n)
     }
 
+/// Run every learned rule again (oldest first, so newer answers win), never touching rows you
+    /// confirmed by hand. Returns how many rows changed.
+    pub fn reapply_rules(&self) -> Result<usize> {
+        let mut n = 0;
+        for r in self.rules()? {
+            n += self.apply_rule(&r, false)?;
+        }
+        Ok(n)
+    }
+
     pub fn delete_rule(&self, id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM learned_rules WHERE id = ?1", [id])?;
         Ok(())

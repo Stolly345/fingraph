@@ -58,9 +58,17 @@ impl Rule {
         match self.kind {
             RuleKind::NormalizedTokens => {
                 let stem = merchant_stem(raw, memo);
-                let words: Vec<&str> = stem.split(' ').collect();
                 let pat = merchant_stem(&self.pattern, "");
-                !pat.is_empty() && pat.split(' ').all(|p| words.contains(&p))
+                if pat.is_empty() {
+                    return false;
+                }
+                // the same well-known service however the bank printed it (HBO MAX / PAYPAL *HBOMAX)
+                if known_key(&pat).is_some() && known_key(&pat) == known_key(&stem) {
+                    return true;
+                }
+                // every pattern word appears, allowing for names the bank cut short (HELP / HEL / HE)
+                let words: Vec<&str> = stem.split(' ').collect();
+                pat.split(' ').enumerate().all(|(i, p)| words.iter().any(|w| word_match(p, w, i == 0)))
             }
             RuleKind::Substring => {
                 let hay = format!("{raw} {memo}").to_uppercase();
@@ -70,6 +78,36 @@ impl Rule {
             RuleKind::Exact => raw.trim().eq_ignore_ascii_case(self.pattern.trim()),
         }
     }
+}
+
+/// Two words name the same thing: equal, or one is the other cut short. The first word of a name
+/// must share at least 5 letters, so "KIRK MARKET" never matches "KIRK HOME CENTRE" this way.
+fn word_match(a: &str, b: &str, first: bool) -> bool {
+    if a == b {
+        return true;
+    }
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    short.len() >= if first { 5 } else { 2 } && long.starts_with(short)
+}
+
+/// Same merchant, as printed on two different statements: word by word, allowing truncation
+/// (`DISCOVERYDI HELP` = `DISCOVERYDI HEL` = `DISCOVERYDI HE`), or the same well-known service.
+pub fn same_merchant(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    if known_key(a).is_some() && known_key(a) == known_key(b) {
+        return true;
+    }
+    let (wa, wb): (Vec<&str>, Vec<&str>) = (a.split(' ').collect(), b.split(' ').collect());
+    let n = wa.len().min(wb.len());
+    n > 0 && wa[0].len() >= 3 && (0..n).all(|i| word_match(wa[i], wb[i], i == 0))
+}
+
+/// Which well-known merchant a stem names, if any. Short keys must be whole words ("FLOW" ≠ "FLOWERS").
+fn known_key(stem: &str) -> Option<&'static str> {
+    let words: Vec<&str> = stem.split(' ').collect();
+    KNOWN.iter().find(|(key, _, _)| if key.len() <= 4 { words.contains(key) } else { stem.contains(key) }).map(|k| k.1)
 }
 
 pub fn regex_ok(pattern: &str) -> bool {
@@ -169,6 +207,14 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("ESSO", "Esso", "Transport"),
     ("CAYMAN CABS", "Cayman Cabs", "Transport"),
     ("HBO", "HBO Max", "Subscriptions & Digital"),
+    ("HBOMAX", "HBO Max", "Subscriptions & Digital"),
+    ("DISCOVERY", "Discovery+", "Subscriptions & Digital"),
+    ("DISNEY", "Disney+", "Subscriptions & Digital"),
+    ("PARAMOUNT", "Paramount+", "Subscriptions & Digital"),
+    ("PEACOCK", "Peacock", "Subscriptions & Digital"),
+    ("APPLE.COM", "Apple", "Subscriptions & Digital"),
+    ("ICLOUD", "Apple iCloud", "Subscriptions & Digital"),
+    ("PRIME VIDEO", "Prime Video", "Subscriptions & Digital"),
     ("NETFLIX", "Netflix", "Subscriptions & Digital"),
     ("SPOTIFY", "Spotify", "Subscriptions & Digital"),
     ("YOUTUBE", "YouTube Premium", "Subscriptions & Digital"),
@@ -214,10 +260,10 @@ pub fn looks_like_transfer(raw: &str, memo: &str) -> bool {
 /// A friendlier payee and a category suggestion (by name) for a stem.
 pub fn known_merchant(stem: &str, raw: &str) -> (String, Option<&'static str>) {
     let hay = format!("{stem} {}", raw.to_uppercase());
-    for &(key, name, cat) in KNOWN {
-        if hay.contains(key) {
-            return (name.to_string(), Some(cat));
-        }
+    // the stem names it, or (for longer keys) the raw text does, e.g. "SALARY" in a generic row
+    let words: Vec<&str> = stem.split(' ').collect();
+    if let Some(&(_, name, cat)) = KNOWN.iter().find(|(key, _, _)| if key.len() <= 4 { words.contains(key) || hay.split(|c: char| !c.is_alphanumeric() && c != '.').any(|w| w == *key) } else { hay.contains(key) }) {
+        return (name.to_string(), Some(cat));
     }
     if FEE_HINT.is_match(&hay) {
         return (title_case(stem), Some("Bank Fees & Interest"));
@@ -281,10 +327,26 @@ pub struct TriageGroup {
 
 /// Group uncategorised transactions by merchant stem; the biggest groups first.
 pub fn triage_groups(items: &[TriageInput]) -> Vec<TriageGroup> {
-    let mut by: BTreeMap<String, Vec<&TriageInput>> = BTreeMap::new();
+    let mut exact: BTreeMap<String, Vec<&TriageInput>> = BTreeMap::new();
     for it in items {
-        by.entry(merchant_stem(&it.raw, &it.memo)).or_default().push(it);
+        exact.entry(merchant_stem(&it.raw, &it.memo)).or_default().push(it);
     }
+    // one card per merchant, however each statement spelled it; the commonest spelling names it
+    let mut clusters: Vec<Vec<(String, Vec<&TriageInput>)>> = Vec::new();
+    for (stem, v) in exact {
+        match clusters.iter_mut().find(|c| c.iter().any(|(s, _)| same_merchant(s, &stem))) {
+            Some(c) => c.push((stem, v)),
+            None => clusters.push(vec![(stem, v)]),
+        }
+    }
+    let by: BTreeMap<String, Vec<&TriageInput>> = clusters
+        .into_iter()
+        .map(|mut c| {
+            c.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(b.0.len().cmp(&a.0.len())));
+            let name = c[0].0.clone();
+            (name, c.into_iter().flat_map(|(_, v)| v).collect())
+        })
+        .collect();
     let mut out: Vec<TriageGroup> = by
         .into_iter()
         .map(|(stem, v)| {
@@ -302,7 +364,7 @@ pub fn triage_groups(items: &[TriageInput]) -> Vec<TriageGroup> {
             let excluded = v.iter().any(|t| NOT_SUBSCRIPTION.is_match(&format!("{} {}", t.raw, t.memo)) || is_bank_fee(&t.raw, &t.memo));
             let kind = if v.iter().any(|t| looks_like_transfer(&t.raw, &t.memo)) {
                 TriageKind::Transfer
-            } else if all_out && !excluded && (SUBSCRIPTION_HINT.is_match(&stem) || (cad.is_some() && same_price && v.len() >= 3 && cat != Some("Utilities"))) {
+            } else if all_out && !excluded && (SUBSCRIPTION_HINT.is_match(&stem) || cat == Some("Subscriptions & Digital") || (cad.is_some() && same_price && v.len() >= 3 && cat != Some("Utilities"))) {
                 TriageKind::Subscription
             } else {
                 TriageKind::Merchant
@@ -358,6 +420,29 @@ mod tests {
         assert_eq!(merchant_stem("KIRK MARKET/BACK-UP 1, GEORGE TOWN", "Ref 1694275484"), "KIRK MARKET BACK UP");
         assert_eq!(title_case("FOSTER'S FOOD FAIR"), "Foster's Food Fair");
         assert_eq!(known_merchant("CUC", "CUC WEB PMT").0, "Caribbean Utilities Company");
+    }
+
+    #[test]
+    fn truncated_names_are_one_merchant() {
+        let stem = |m: &str| merchant_stem("POS PURCHASE", m);
+        let (a, b, c) = (stem("PAYPAL *DISCOVERYDI HELP.4029357733 US"), stem("PAYPAL *DISCOVERYDI HEL 4029357733 US"), merchant_stem("PAYPAL *DISCOVERYDI HE, 4029357733 (9.35 KYD)", ""));
+        assert!(same_merchant(&a, &b) && same_merchant(&a, &c) && same_merchant(&b, &c), "{a} / {b} / {c}");
+        assert!(same_merchant("HBO MAX HBOMAX.COM", "HBOMAX HELP"));
+        assert!(!same_merchant("KIRK MARKET", "KIRK HOME CENTRE"));
+        assert!(!same_merchant("FLOW", "FLOWERS BY JANE"));
+        // a rule learned from one spelling covers the others
+        let r = Rule { pattern: c.clone(), category_id: Some(17), ..Default::default() };
+        assert!(r.matches("POS PURCHASE", "PAYPAL *DISCOVERYDI HELP.4029357733 US"));
+        assert!(r.matches("POS PURCHASE", "PAYPAL *DISCOVERYDI HEL 4029357733 US"));
+        assert!(!r.matches("POS PURCHASE", "KIRK MARKET"));
+        // and triage asks once
+        let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        let t = |id, date, memo: &str| TriageInput { id, entity_id: 1, posted: date, raw: "POS PURCHASE".into(), memo: memo.into(), amount: "-9.42".parse().unwrap(), currency: Currency::KYD, account: "Chq".into() };
+        let g = triage_groups(&[t(1, d(5, 28), "PAYPAL *DISCOVERYDI HELP.4029357733 US"), t(2, d(7, 28), "PAYPAL *DISCOVERYDI HELP.4029357733 US"), t(3, d(8, 31), "PAYPAL *DISCOVERYDI HEL 4029357733 US")]);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].count, 3);
+        assert_eq!(g[0].suggested_payee, "Discovery+");
+        assert_eq!(g[0].kind, TriageKind::Subscription);
     }
 
     #[test]

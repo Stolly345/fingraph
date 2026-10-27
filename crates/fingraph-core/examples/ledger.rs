@@ -1,4 +1,4 @@
-//! `cargo run -p fingraph-core --example ledger -- reset|rescan`: the app's Reset Learning and
+//! `cargo run -p fingraph-core --example ledger -- reset|rescan|reapply`: the app's Reset Learning and
 //! Rescan All Statements, on the default ledger, from a terminal.
 
 use fingraph_core::db::Db;
@@ -12,7 +12,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (n, txs, missing) = db.rescan_all()?;
                 println!("rescan: {n} statements, {txs} transactions, missing {missing:?}");
             }
-            other => eprintln!("unknown command {other} (reset, rescan)"),
+            "reapply" => println!("reapply: {} transactions updated", db.reapply_rules()?),
+            other => eprintln!("unknown command {other} (reset, rescan, reapply)"),
         }
     }
     Ok(())
