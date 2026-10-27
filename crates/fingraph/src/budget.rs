@@ -570,6 +570,27 @@ fn amount_text(d: Decimal) -> String {
     if d.is_zero() { String::new() } else { d.round_dp(2).normalize().to_string() }
 }
 
+/// One category on the wizard's spending step.
+struct CatLine {
+    cat: Category,
+    entry: gtk::Entry,
+    row: adw::ActionRow,
+    /// Usually, a month.
+    usual: Option<Decimal>,
+    /// Shown fortnightly: (the text we put in, the monthly figure it came from).
+    memo: RefCell<Option<(String, String)>>,
+}
+
+impl CatLine {
+    /// The monthly budget typed (or converted from fortnightly); `None` = no budget.
+    fn monthly(&self, fortnightly: bool) -> Option<Decimal> {
+        let text = self.entry.text();
+        let from_memo = self.memo.borrow().as_ref().filter(|(shown, _)| fortnightly && *shown == text.as_str()).and_then(|(_, m)| parse_user(m));
+        let v = from_memo.or_else(|| parse_user(&text).map(|d| if fortnightly { (d.abs() * Decimal::from(26) / Decimal::from(12)).round_dp(2) } else { d.abs() }))?;
+        (!v.is_zero()).then_some(v)
+    }
+}
+
 fn step_page(title: &str, intro: &str) -> (gtk::ScrolledWindow, gtk::Box) {
     let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(12).margin_bottom(18).margin_start(24).margin_end(24).build();
     let h = heading(title);
@@ -662,27 +683,44 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
         "Each category starts at what you usually spend (the median of your last six months) or the budget you already have. Change any of them; leave one empty for no budget. Fixed bills are marked — the savings step only trims the flexible ones.",
     );
     let (usual, subs_m, one_off) = usual(&s, m);
+    // Monthly | Fortnightly: what the amounts below mean (saved as monthly either way)
+    let units = gtk::Box::builder().css_classes(["linked"]).halign(gtk::Align::Start).build();
+    let monthly_b = gtk::ToggleButton::builder().label("Monthly").active(true).build();
+    let fortnight_b = gtk::ToggleButton::builder().label("Fortnightly").group(&monthly_b).build();
+    units.append(&monthly_b);
+    units.append(&fortnight_b);
+    b3.append(&units);
+    let fortnightly = Rc::new(Cell::new(false));
     let lb = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
-    let cat_entries: Rc<Vec<(Category, gtk::Entry)>> = Rc::new(
+    let cat_entries: Rc<Vec<CatLine>> = Rc::new(
         s.cats
             .iter()
             .filter(|c| s.budgets.contains_key(&c.id) || usual.contains_key(&c.name))
             .map(|c| {
                 let u = usual.get(&c.name).copied();
-                let r = adw::ActionRow::builder()
-                    .title(glib::markup_escape_text(&c.name))
-                    .subtitle(format!("{}{}", if core::is_fixed(&c.name) { "Fixed bill" } else { "Flexible" }, u.map(|u| format!(" · {}", usual_text(&c.name, u, subs_m, one_off, ccy))).unwrap_or_default()))
-                    .build();
+                let r = adw::ActionRow::builder().title(glib::markup_escape_text(&c.name)).build();
                 let e = gtk::Entry::builder().placeholder_text(ccy.symbol()).width_chars(9).valign(gtk::Align::Center).input_purpose(gtk::InputPurpose::Number).build();
                 e.set_text(&amount_text(s.budgets.get(&c.id).copied().or(u).unwrap_or_default()));
                 r.add_suffix(&e);
                 lb.append(&r);
-                (c.clone(), e)
+                CatLine { cat: c.clone(), entry: e, row: r, usual: u, memo: RefCell::default() }
             })
             .collect(),
     );
+    // each row's note, in the chosen unit
+    let subtitles = {
+        let (cat_entries, fortnightly) = (cat_entries.clone(), fortnightly.clone());
+        move || {
+            let k = if fortnightly.get() { Decimal::from(12) / Decimal::from(26) } else { Decimal::ONE };
+            for l in cat_entries.iter() {
+                let note = l.usual.map(|u| format!(" · {}", usual_text(&l.cat.name, (u * k).round_dp(2), (subs_m * k).round_dp(2), (one_off * k).round_dp(2), ccy))).unwrap_or_default();
+                l.row.set_subtitle(&format!("{}{note}", if core::is_fixed(&l.cat.name) { "Fixed bill" } else { "Flexible" }));
+            }
+        }
+    };
+    subtitles();
     b3.append(&lb);
-    let spend_total = gtk::Label::builder().xalign(0.0).css_classes(["heading", "tnum"]).build();
+    let spend_total = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["heading", "tnum"]).build();
     b3.append(&spend_total);
 
     // ── 4. savings
@@ -704,7 +742,7 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
 
     // read every field into a plan + budgets, and redo the sums
     let read = {
-        let (cycle, next_pay, gross, deds, other_in, loans, goal, cat_entries) = (cycle.clone(), next_pay.clone(), gross.clone(), deds.clone(), other_in.clone(), loans.clone(), goal.clone(), cat_entries.clone());
+        let (cycle, next_pay, gross, deds, other_in, loans, goal, cat_entries, fortnightly) = (cycle.clone(), next_pay.clone(), gross.clone(), deds.clone(), other_in.clone(), loans.clone(), goal.clone(), cat_entries.clone(), fortnightly.clone());
         Rc::new(move || -> (Plan, Vec<(i64, Option<Decimal>)>) {
             let mut p = Plan {
                 cycle: PayCycle::ALL[(cycle.selected() as usize).min(3)],
@@ -723,7 +761,7 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
                 currency: Some(ccy),
                 ..Default::default()
             };
-            let budgets: Vec<(i64, Option<Decimal>)> = cat_entries.iter().map(|(c, e)| (c.id, parse_user(&e.text()).map(|d| d.abs()).filter(|d| !d.is_zero()))).collect();
+            let budgets: Vec<(i64, Option<Decimal>)> = cat_entries.iter().map(|l| (l.cat.id, l.monthly(fortnightly.get()))).collect();
             p.savings_goal = match parse_amount(&goal.text()) {
                 Some((v, true)) => (p.monthly_income() * v / Decimal::ONE_HUNDRED).round_dp(0),
                 Some((v, false)) => v,
@@ -749,9 +787,16 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
                 p.cycle.per_year()
             ));
             let total: Decimal = budgets.iter().filter_map(|b| b.1).sum();
-            let fixed: Decimal = cat_entries.iter().zip(&budgets).filter(|((c, _), _)| core::is_fixed(&c.name)).filter_map(|(_, b)| b.1).sum();
+            let fixed: Decimal = cat_entries.iter().zip(&budgets).filter(|(l, _)| core::is_fixed(&l.cat.name)).filter_map(|(_, b)| b.1).sum();
             let flexible = total - fixed;
-            spend_total.set_label(&format!("Spending budget {} a month — fixed bills {}, flexible {}", money(total), money(fixed), money(flexible)));
+            let fn_ = |d: Decimal| money((d * Decimal::from(12) / Decimal::from(26)).round_dp(2));
+            spend_total.set_label(&format!(
+                "Spending budget {} a month ({} a fortnight) — fixed bills {}, flexible {} a month",
+                money(total),
+                fn_(total),
+                money(fixed),
+                money(flexible)
+            ));
             let save = p.monthly_savings(total);
             let mut lines = vec![
                 format!("  Take-home per month        {:>14}", money(p.monthly_income())),
@@ -850,15 +895,45 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
         let r = recalc.clone();
         cycle.connect_selected_notify(move |_| r());
     }
-    for (_, e) in cat_entries.iter() {
+    for l in cat_entries.iter() {
         let r = recalc.clone();
-        e.connect_changed(move |_| r());
+        l.entry.connect_changed(move |_| r());
+    }
+    {
+        let (cat_entries, fortnightly, recalc) = (cat_entries.clone(), fortnightly.clone(), recalc.clone());
+        fortnight_b.connect_toggled(move |b| {
+            if b.is_active() == fortnightly.get() {
+                return;
+            }
+            // convert what's typed, remembering the monthly figure so switching back is exact
+            let to_fn = b.is_active();
+            for l in cat_entries.iter() {
+                let monthly = l.monthly(!to_fn);
+                let text = match (to_fn, monthly) {
+                    (true, Some(v)) => {
+                        let t = amount_text((v * Decimal::from(12) / Decimal::from(26)).round_dp(2));
+                        *l.memo.borrow_mut() = Some((t.clone(), amount_text(v)));
+                        t
+                    }
+                    (false, Some(v)) => amount_text(v),
+                    (_, None) => String::new(),
+                };
+                l.entry.set_text(&text);
+                if !to_fn {
+                    *l.memo.borrow_mut() = None;
+                }
+            }
+            fortnightly.set(to_fn);
+            subtitles();
+            recalc();
+        });
     }
     {
         let (cat_entries, factor) = (cat_entries.clone(), factor.clone());
         scale.connect_clicked(move |_| {
             let Some(k) = factor.get() else { return };
-            for (_, e) in cat_entries.iter().filter(|(c, _)| !core::is_fixed(&c.name)) {
+            for l in cat_entries.iter().filter(|l| !core::is_fixed(&l.cat.name)) {
+                let e = &l.entry;
                 if let Some(v) = parse_user(&e.text()) {
                     // down to the nearest 5
                     let five = Decimal::from(5);

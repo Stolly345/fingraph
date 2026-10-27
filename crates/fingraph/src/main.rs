@@ -895,6 +895,7 @@ fn debug_shot(app: &Rc<App>) {
     let steps: u32 = std::env::var("FINGRAPH_SHOT_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let n = Rc::new(Cell::new(0u32));
     let scrolled = Cell::new(false);
+    let clicked = Cell::new(0usize);
     glib::timeout_add_local(std::time::Duration::from_secs(wait), move || {
         if n.get() < steps {
             n.set(n.get() + 1);
@@ -915,6 +916,27 @@ fn debug_shot(app: &Rc<App>) {
             let dlg = find(&root, &|w| w.downcast_ref::<adw::Dialog>().cloned());
             let scope: gtk::Widget = dlg.map(|d| d.upcast()).unwrap_or_else(|| a.stack.visible_child().unwrap_or(root.clone()));
             if let Some(b) = find(&scope, &|w| w.downcast_ref::<gtk::Button>().filter(|b| b.has_css_class("suggested-action") && b.is_mapped()).cloned()) {
+                b.emit_clicked();
+            }
+            return glib::ControlFlow::Continue;
+        }
+        // FINGRAPH_CLICK=label[,label…]: then click buttons with those labels, one per tick
+        if let Some(label) = std::env::var("FINGRAPH_CLICK").ok().and_then(|l| l.split(',').nth(clicked.get()).map(str::to_string)) {
+            clicked.set(clicked.get() + 1);
+            fn find_button(w: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+                if let Some(b) = w.downcast_ref::<gtk::Button>().filter(|b| b.is_mapped() && b.label().as_deref() == Some(label)) {
+                    return Some(b.clone());
+                }
+                let mut c = w.first_child();
+                while let Some(ch) = c {
+                    if let Some(x) = find_button(&ch, label) {
+                        return Some(x);
+                    }
+                    c = ch.next_sibling();
+                }
+                None
+            }
+            if let Some(b) = find_button(&a.win.clone().upcast(), &label) {
                 b.emit_clicked();
             }
             return glib::ControlFlow::Continue;

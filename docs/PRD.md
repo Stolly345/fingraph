@@ -218,7 +218,8 @@ only).
     twice a month / monthly, next payday, gross, deductions as amount or % of gross; prefilled from a
     detected salary — same payer ≥ 3× in 120 days at a steady rhythm and amount, payroll wording
     preferred), other income and loan payments (median of 6 months of Loan Payments), category
-    budgets (fixed bills vs flexible), savings goal (amount or % of take-home). Shows take-home −
+    budgets (fixed bills vs flexible; a Monthly | Fortnightly switch shows them per fortnight —
+    × 12 ÷ 26 — and saves monthly, exactly, when unchanged), savings goal (amount or % of take-home). Shows take-home −
     spending − loans = savings and, when short, solves take-home − loans − fixed − k·flexible = goal
     for k and offers to trim flexible categories (to the nearest 5). Plan saved per view as JSON
     (`budget_plan:<scope>` setting).
@@ -283,7 +284,7 @@ banks, one deliberately unreadable line to show the inspector).
   development sit beside the ledger as `ledger-backup-2026-10-27-*.db`.
 - Terminal: `cargo run -p fingraph-core --example ledger -- reset|rescan|reapply|cards`.
 - Debug builds only: `FINGRAPH_SHOT=out.png` (with `FINGRAPH_DB`, `FINGRAPH_DEMO`, `FINGRAPH_VIEW`,
-  `FINGRAPH_DIALOG` (`triage|onboarding|report|preferences|split:<id>|owed:<id>`), `FINGRAPH_PAGE`, `FINGRAPH_SHOT_STEPS`, `FINGRAPH_SCROLL`) renders the window to
+  `FINGRAPH_DIALOG` (`triage|onboarding|report|preferences|split:<id>|owed:<id>`), `FINGRAPH_PAGE`, `FINGRAPH_SHOT_STEPS`, `FINGRAPH_SCROLL`, `FINGRAPH_CLICK=label,label…` clicks buttons in turn) renders the window to
   a PNG for visual checks without a person at the screen.
 
 ---
@@ -325,6 +326,7 @@ banks, one deliberately unreadable line to show the inspector).
 | Landed cost | Tags as projects; freight & duty suggestions |
 | Couldn't change charges in "owes you" | ✎ per charge opens the transaction editor; the dialog reopens with fresh totals |
 | Where's the business database? | Business Directory page: search, seen-in-statements count, keywords, Override… → rule |
+| Monthly / fortnightly in the wizard's spending step | Toggle; amounts convert at 26 fortnights ÷ 12 months, saved monthly |
 | "Subscriptions CI$ 860 a month" in the budget vs CI$ 161 on Subscriptions | The category also holds one-off digital purchases; its suggestion is now active subscriptions + the usual one-offs, labelled as such. Gross shown per payday and per month |
 | Budget: crash on Fill, over count, 85% alert, pay-based wizard with projections | RefCell borrow held across redraw (fixed); badge + Overview card; 4-step wizard, plan, trend projection |
 | Budgeting from past spending | Budget page: 6-month median suggestions, per-view budgets, pace projection |
