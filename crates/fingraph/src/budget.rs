@@ -195,7 +195,7 @@ const SUBS: &str = "Subscriptions & Digital";
 /// your active subscriptions' monthly cost (as on the Subscriptions page) plus the usual one-off
 /// digital purchases (apps, domains, downloads), since a median of the two mixed reads as "subscriptions".
 /// Also returns (subscriptions a month, other digital a month) for labelling.
-fn usual(s: &Snap, m: NaiveDate) -> (BTreeMap<String, Decimal>, Decimal, Decimal) {
+pub(crate) fn usual(s: &Snap, m: NaiveDate) -> (BTreeMap<String, Decimal>, Decimal, Decimal) {
     let mut out = suggest(&s.rows, m, MONTHS, s.ccy, &s.fx, &s.parents);
     let subs: Decimal = fingraph_core::insights::subscriptions(&s.rows, s.ccy, &s.fx, today()).iter().filter(|x| x.active).map(|x| x.monthly).sum();
     let others: Vec<TxRow> = s.rows.iter().filter(|t| !t.is_subscription).cloned().collect();
@@ -1160,7 +1160,8 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
     let s = Rc::new(snap(app));
     let (ccy, m) = (s.ccy, month_start(today()));
     let money = move |d: Decimal| fmt_money(d, ccy);
-    let detected = core::detect_salary(&s.rows, today());
+    // pay is looked for up to the newest statement: they arrive a month late
+    let detected = core::detect_salary(&s.rows, data_through(app));
     let existing = s.plan.clone();
     let start = existing.clone().unwrap_or_else(|| {
         let mut p = Plan { currency: Some(ccy), loan_payments: usual_loans(&s, m), ..Default::default() };

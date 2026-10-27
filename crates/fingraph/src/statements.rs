@@ -187,12 +187,14 @@ pub fn choose_files(app: &Rc<App>) {
 /// Scan off the main thread, store on it. Called for drops, the file chooser, `fingraph file.pdf`
 /// and the onboarding walkthrough (which passes `on_each` to show live results).
 pub fn import_paths(app: &Rc<App>, paths: Vec<PathBuf>) {
-    import_paths_with(app, paths, None);
+    import_paths_with(app, paths, None, None);
 }
 
 pub type OnEach = Rc<dyn Fn(&str, Result<(&ScanResult, &db::ImportReport), String>)>;
 
-pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnEach>) {
+/// `on_done` replaces the summary toast and the jump to triage (the Getting Started guide runs
+/// those steps itself).
+pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnEach>, on_done: Option<crate::Refresh>) {
     let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))).collect();
     if paths.is_empty() {
         app.toast("Only PDF statements can be imported");
@@ -258,6 +260,9 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
         }
         let Some(a) = w.upgrade() else { return };
         a.reload_entities();
+        if let Some(f) = on_done {
+            return f();
+        }
         if files > 0 {
             let msg = format!("Imported {inserted} transactions from {files} statement{} · {reconciled} reconciled", if files == 1 { "" } else { "s" });
             let waiting = a.db.uncategorized_count(&a.entity_ids()).unwrap_or(0) > 0;
@@ -297,13 +302,41 @@ pub fn watch(app: &Rc<App>) {
 }
 
 fn sweep(app: &Rc<App>, dir: &std::path::Path) {
-    let pdfs: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))).collect();
-    check(app, pdfs);
+    check(app, pdfs_in(dir));
+}
+
+/// Every PDF in a folder and the folders inside it (people file statements by bank or by year).
+pub fn pdfs_in(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for p in std::fs::read_dir(&d).into_iter().flatten().flatten().map(|e| e.path()) {
+            if p.is_dir() {
+                todo.push(p);
+            } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// What the watcher remembers a file by: path, size and time.
+fn seen_key(p: &std::path::Path) -> Option<String> {
+    std::fs::metadata(p).ok().map(|m| format!("{}|{}|{:?}", p.display(), m.len(), m.modified().ok()))
+}
+
+/// Files already read some other way (the Getting Started guide), so the watcher doesn't scan them again.
+pub fn remember_seen(app: &App, paths: &[PathBuf]) {
+    let mut seen: std::collections::HashSet<String> = app.db.setting("watch_seen").and_then(|j| serde_json_lite(&j)).unwrap_or_default();
+    seen.extend(paths.iter().filter_map(|p| seen_key(p)));
+    let _ = app.db.set_setting("watch_seen", &seen.iter().map(|s| format!("{s}\n")).collect::<String>());
 }
 
 /// Seen before (by path, size and time) → skip; otherwise scan, and import only real statements.
 fn check(app: &Rc<App>, paths: Vec<PathBuf>) {
-    let key = |p: &std::path::Path| std::fs::metadata(p).ok().map(|m| format!("{}|{}|{:?}", p.display(), m.len(), m.modified().ok()));
+    let key = |p: &std::path::Path| seen_key(p);
     let seen: std::collections::HashSet<String> = app.db.setting("watch_seen").and_then(|j| serde_json_lite(&j)).unwrap_or_default();
     let todo: Vec<(PathBuf, String)> = paths.into_iter().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))).filter_map(|p| Some((p.clone(), key(&p)?))).filter(|(_, k)| !seen.contains(k)).collect();
     if todo.is_empty() {

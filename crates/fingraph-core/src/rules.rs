@@ -178,6 +178,15 @@ static NOISE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .collect()
 });
 
+/// Who a payment is from or to, ignoring reference numbers: a bank that prints a new reference on
+/// every deposit ("100000727, ISLAND AIR DIR PAY") still reads as one payer. For spotting rhythms
+/// (pay, bills); rules keep matching on `merchant_stem`.
+pub fn payer_key(raw: &str, memo: &str) -> String {
+    let stem = merchant_stem(raw, memo);
+    let kept: Vec<&str> = stem.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty() && !w.chars().any(|c| c.is_ascii_digit())).collect();
+    if kept.is_empty() { stem } else { kept.join(" ") }
+}
+
 /// `POS PURCHASE` / `FOSTER'S FOOD FAIR #12 CAMANA BAY` → `FOSTER'S FOOD FAIR`. Upper-case words, single-spaced.
 pub fn merchant_stem(raw: &str, memo: &str) -> String {
     let raw = raw.trim();
@@ -454,6 +463,7 @@ mod tests {
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].count, 3);
         assert_eq!(g[0].suggested_payee, "Discovery+");
+        assert_eq!(payer_key("ELECTRONIC CREDIT", "100000727, Island Air Dir Pay Cr"), payer_key("ELECTRONIC CREDIT", "100000928, Island Air Dir Pay Cr"));
         assert_eq!(g[0].kind, TriageKind::Subscription);
     }
 

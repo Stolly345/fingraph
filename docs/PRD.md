@@ -1,6 +1,6 @@
 # FinGraph — PRD / System Reference
 
-**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.0 `.deb`
+**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.1 `.deb`
 **Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Status:** in daily personal use; not published
 
 > Single source of truth for what FinGraph is, how it's built, and why it behaves the way it does.
@@ -83,6 +83,7 @@ property. Three ways of using the app shaped the layout:
 | `fingraph-core/src/prefs.rs` | Preferences (stored in the ledger, so they travel with backups) |
 | `fingraph-core/src/demo.rs` | Simulated statements for all five banks (tests + Load Demo Data) |
 | `fingraph/src/*.rs` | One file per page/dialog; `charts.rs` is the Cairo chart widget |
+| `fingraph/src/guide.rs` | Getting Started: the eight-step guided setup (first run and main menu) |
 
 Text and positions come from poppler's `pdftotext -bbox` (no font metadata; geometry does the work).
 `examples/scan.rs` prints a scanner report; `examples/ledger.rs` runs reset / rescan / reapply / cards
@@ -360,17 +361,59 @@ categories) · Workspaces & accounts (rename, currency, add, delete; rename, mov
 Data (ledger location, automatic backups before risky changes — last ten kept, back up / restore,
 export everything, erase all).
 
-**First run**: walkthrough (workspaces → banks & statements with live detection → triage) and
-**Load Demo Data** (a year of simulated Personal + property-business statements across all five
-banks, one deliberately unreadable line to show the inspector).
+**Getting Started** (`guide.rs`; opens on first run, and from the main menu → Getting Started; also
+after Erase All). A dialog with the eight steps listed on the left — ticked when their work is done
+(from the ledger, not from clicks), any of them reachable at any time — and Back / Next below. It
+remembers the step you were on (`guide_step`); closing it early is fine.
+1. **Welcome** — what FinGraph does, the five-step routine with honest timings, privacy, "a month at
+   a time" (no bank feeds in Cayman), and Load Demo Data with the warning that it mixes with real
+   statements (clear it with Erase All, which now clears budgets, goals and the other v4–v6 tables too).
+2. **Who It's For** — the household workspace, an optional business/rental one, and the display
+   currency; renames the existing workspaces rather than adding duplicates.
+3. **Download Statements** — which banks (five known + "another bank", remembered as
+   `guide_banks`); for each, where to look (generic: Statements / eStatements, PDF — no invented
+   menu paths); what to get: every account incl. each card, the PDF statement not a CSV or history
+   export (it has the balances FinGraph proves against), 12 months (≥ 6), the files as the bank
+   gives them (no print-to-PDF or scans). An unknown bank is pointed at Bank Profiles → New from Sample.
+4. **One Folder** — use `~/Documents/Bank Statements` (created) or choose any folder; shows how
+   many PDFs it holds and how many are new; Open in Files and Look Again; how to drag files over
+   from Downloads; **Check this folder for new statements** (the watched folder; subfolders are
+   read too, now that `pdfs_in` is recursive). Continue needs at least one PDF (or statements already).
+5. **Read Them** — reads every file not read before (by path, size and time) with a progress bar
+   and one row per file (bank, accounts, period, transactions, Adds up / Off by / Couldn't read),
+   then: statements · accounts · transactions and the date span; money in and out with a monthly
+   average (transfers between your own accounts left out); statements that didn't add up and how to
+   fix them (Scan Pass Report → Convert); months covered per account (● ◐ ○) and what to do about
+   gaps; Read Again. Files read here are remembered so the watcher doesn't scan them again, and the
+   usual post-import triage jump is skipped (`import_paths_with(.., on_done)`).
+6. **Sort Transactions** — how many were sorted automatically, how many are moves between your own
+   accounts (never income or spending), how many wait; then the To Review cards inline, one at a
+   time, the biggest money first, with Skip This One and a running count; stopping is fine (the
+   rest wait in To Review).
+7. **Your Budget** — what you usually spend per category (Uncategorized shown apart, as "isn't
+   sorted yet"), the pay found in the statements, a warning under three months of statements, the
+   four setup steps, and Set Up My Budget… (the budget wizard opens over the guide and moves it on
+   when saved).
+8. **Every Month** — the routine: download last month's statements into the folder (read on the
+   next start when watched), Monthly Close, Outlook in between; Net Worth, Subscriptions, a calendar
+   reminder for the 5th. Finish starts watching the folder and shows the Overview.
+
+Fixes found while testing the guide on the owner's real statements:
+- **Budget suggestions** use only months the statements cover completely (months before the first
+  statement or after the last are unknown, not zero); with less than one whole month, the partial ones.
+- **Pay detection** looks back from the newest statement (not today), groups deposits ignoring
+  reference numbers (`rules::payer_key`: "100000727, ISLAND AIR…" and "100000928, ISLAND AIR…" are
+  one payer), and needs only half the deposits near the usual amount (a bonus, refunds or a penny
+  test under the same wording no longer hide the salary). Regular payments (Outlook, bills
+  checklist) and non-monthly bill ideas group the same way.
 
 ---
 
 ## 10. Packaging & operations
 
-- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.0-1_amd64.deb` (binary, desktop entry with
+- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.1-1_amd64.deb` (binary, desktop entry with
   PDF "Open With", icon; depends on poppler-utils, GTK 4, libadwaita).
-- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.0-1_amd64.deb`.
+- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.1-1_amd64.deb`.
 - Data: `~/.local/share/fingraph/ledger.db` (+ `statements/`, `backups/`). Hand backups made during
   development sit beside the ledger as `ledger-backup-2026-10-27-*.db`.
 - Terminal: `cargo run -p fingraph-core --example ledger -- reset|rescan|reapply|cards`.
@@ -382,7 +425,7 @@ banks, one deliberately unreadable line to show the inspector).
 
 ## 11. Quality
 
-- `cargo test --workspace`: 59 tests (0.2.0 added rollovers/moves/history, non-monthly bills,
+- `cargo test --workspace`: 61 tests (the guide release added whole-month suggestions and salary-with-a-bonus; 0.2.0 added rollovers/moves/history, non-monthly bills,
   watchlists and closes, Age of Money incl. a hand-checked FIFO case, the bills checklist incl.
   missed vs not-yet-seen, forecasts and their checks, net worth, goal status, avalanche vs snowball,
   rate estimates, the guesser's held-out accuracy, manage links) — earlier: — five bank layouts, rollover, date inheritance, sign healing,

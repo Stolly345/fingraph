@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::db::{DocumentRow, TxRow};
 use crate::insights::{add_months, latest_balances, month_start, value};
-use crate::rules::{cadence, merchant_stem, title_case};
+use crate::rules::{cadence, merchant_stem, payer_key, title_case};
 use crate::{Currency, Fx};
 
 fn month_end(m: NaiveDate) -> NaiveDate {
@@ -137,7 +137,7 @@ fn median(mut v: Vec<Decimal>) -> Decimal {
 pub fn regulars(rows: &[TxRow], upto: NaiveDate) -> Vec<Regular> {
     let mut by: BTreeMap<(i64, String, bool), Vec<&TxRow>> = BTreeMap::new();
     for t in rows.iter().filter(|t| t.posted <= upto) {
-        by.entry((t.account_id, merchant_stem(&t.raw_description, &t.memo), t.amount.is_sign_positive())).or_default().push(t);
+        by.entry((t.account_id, payer_key(&t.raw_description, &t.memo), t.amount.is_sign_positive())).or_default().push(t);
     }
     let mut out = Vec::new();
     for ((account_id, stem, _), mut v) in by {
@@ -294,7 +294,7 @@ pub fn forecast(rows: &[TxRow], docs: &[DocumentRow], until: NaiveDate) -> Vec<F
         let other: Decimal = mine
             .iter()
             .filter(|t| t.posted >= since && t.posted <= start)
-            .filter(|t| !regular_ids.contains(&(merchant_stem(&t.raw_description, &t.memo), t.amount.is_sign_positive())))
+            .filter(|t| !regular_ids.contains(&(payer_key(&t.raw_description, &t.memo), t.amount.is_sign_positive())))
             .map(|t| t.amount)
             .sum();
         let span = (start - mine.iter().map(|t| t.posted).filter(|d| *d >= since).min().unwrap_or(start)).num_days().max(30);

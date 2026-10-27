@@ -9,6 +9,7 @@ mod close;
 mod dashboard;
 mod directory;
 mod export;
+mod guide;
 mod outlook;
 mod owed;
 mod preferences;
@@ -118,7 +119,7 @@ impl App {
         menu.append_section(None, &s1);
         let s2 = gio::Menu::new();
         s2.append(Some("Preferences"), Some("win.preferences"));
-        s2.append(Some("Welcome Tour"), Some("win.welcome"));
+        s2.append(Some("Getting Started"), Some("win.welcome"));
         menu.append_section(None, &s2);
         let s3 = gio::Menu::new();
         s3.append(Some("About FinGraph"), Some("win.about"));
@@ -298,7 +299,7 @@ impl App {
 
         let shot = cfg!(debug_assertions) && std::env::var_os("FINGRAPH_SHOT").is_some();
         if !shot && app.db.setting("onboarded").is_none() {
-            wizard::onboarding(&app);
+            guide::open(&app);
         }
         #[cfg(debug_assertions)]
         debug_shot(&app);
@@ -336,7 +337,7 @@ impl App {
         }
         add("retriage", Rc::new(wizard::reset_and_retriage));
         add("fx", Rc::new(|a| a.fx_dialog()));
-        add("welcome", Rc::new(wizard::onboarding));
+        add("welcome", Rc::new(guide::open));
         add(
             "about",
             Rc::new(|a| {
@@ -886,6 +887,9 @@ fn css() {
          .tile-slate { background: linear-gradient(to bottom, #8e98a6, #6b7584); }
          .tnum { font-feature-settings: 'tnum'; }
          .chip { border-radius: 99px; padding: 4px 12px; }
+         .guide-num { min-width: 24px; min-height: 24px; border-radius: 99px; font-weight: 700; font-size: 0.9em; background: alpha(@window_fg_color, 0.10); }
+         .guide-num.done { background: alpha(@success_color, 0.20); color: @success_color; }
+         .guide-card { padding: 18px; }
          .bank-card { padding: 12px; min-width: 150px; }",
     );
     if let Some(d) = gdk::Display::default() {
@@ -918,7 +922,8 @@ fn debug_shot(app: &Rc<App>) {
     }
     match std::env::var("FINGRAPH_DIALOG").as_deref() {
         Ok("triage") => wizard::triage(app),
-        Ok("onboarding") => wizard::onboarding(app),
+        Ok("onboarding") => guide::open_at(app, 0),
+        Ok(d) if d.starts_with("guide:") => guide::open_at(app, d[6..].parse().unwrap_or(0)),
         Ok("report") => statements::open_first_report(app),
         Ok(d) if d.starts_with("split:") => split::dialog(app, d[6..].parse().unwrap_or(0)),
         Ok(d) if d.starts_with("owed:") => owed::debug_open(app, d[5..].parse().unwrap_or(0)),

@@ -779,7 +779,7 @@ fn erase_dialog(app: &Rc<App>, prefs: &adw::PreferencesDialog) {
                 prefs.close();
                 a.reload_entities();
                 a.toast("Erased");
-                crate::wizard::onboarding(&a);
+                crate::guide::open_at(&a, 0);
             }
             Err(e) => a.toast(&e.to_string()),
         }

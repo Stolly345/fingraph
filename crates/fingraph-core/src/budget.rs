@@ -2,7 +2,7 @@
 //! to the view it was set in (one workspace, or a consolidated set), so Personal and the business
 //! keep their own.
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use rusqlite::params;
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
@@ -56,22 +56,27 @@ impl Db {
     }
 }
 
-/// What each top-level category usually costs a month: the median over the `n` whole months before
-/// `month` (months with no spending count as zero, so a one-off doesn't become a habit), rounded up
-/// to the next 10. Categories with nothing in those months are left out.
+/// What each top-level category usually costs a month: the median over the `n` months before
+/// `month` that the statements cover completely (a month with no spending in a category counts as
+/// zero, so a one-off doesn't become a habit; months before the first statement or after the last
+/// aren't zero, they're unknown, and are left out), rounded up to the next 10. With less than one
+/// whole month of statements, the partial months are used. Categories with nothing are left out.
 pub fn suggest(rows: &[TxRow], month: NaiveDate, n: i32, ccy: Currency, fx: &Fx, parents: &BTreeMap<i64, String>) -> BTreeMap<String, Decimal> {
     let month = month_start(month);
+    let Some((first, last)) = crate::insights::data_span(rows) else { return BTreeMap::new() };
+    let months: Vec<(NaiveDate, NaiveDate)> = (1..=n).map(|i| add_months(month, -i)).map(|from| (from, add_months(from, 1).pred_opt().unwrap_or(from))).filter(|(f, t)| *t >= first && *f <= last).collect();
+    // ponytail: a statement period that starts on the 2nd still makes its first month partial; fine for a median
+    let whole: Vec<(NaiveDate, NaiveDate)> = months.iter().copied().filter(|(f, t)| *f >= month_start(first) && (first.day() <= 3 || *f > first) && *t <= last).collect();
+    let months = if whole.is_empty() { months } else { whole };
     let mut per: BTreeMap<String, Vec<Decimal>> = BTreeMap::new();
-    for i in 1..=n {
-        let from = add_months(month, -i);
-        let to = add_months(from, 1).pred_opt().unwrap_or(from);
-        for (cat, v) in by_category(rows, from, to, ccy, fx, parents) {
+    for (from, to) in &months {
+        for (cat, v) in by_category(rows, *from, *to, ccy, fx, parents) {
             per.entry(cat).or_default().push(v);
         }
     }
     per.into_iter()
         .filter_map(|(cat, mut v)| {
-            v.resize(n as usize, Decimal::ZERO);
+            v.resize(months.len(), Decimal::ZERO);
             v.sort();
             let mid = v.len() / 2;
             let m = if v.len() % 2 == 0 { (v[mid - 1] + v[mid]) / Decimal::TWO } else { v[mid] };
@@ -279,16 +284,29 @@ pub struct Salary {
 }
 
 /// The likeliest salary: money in, not a transfer, from the same payer at least three times in the
-/// last 120 days at a steady rhythm and a steady amount (within 15%). Salary-categorised or
-/// payroll-worded deposits win, then the biggest per month.
+/// last 120 days at a steady rhythm, at a steady amount — at least half of them within 15% of the
+/// usual one, so a bonus, a refund or a bank's penny test under the same wording doesn't hide it. Salary-categorised or payroll-worded deposits win,
+/// then the biggest per month. `today` should be the newest statement's date.
 pub fn detect_salary(rows: &[TxRow], today: NaiveDate) -> Option<Salary> {
     let since = today - chrono::Duration::days(120);
     let mut by: BTreeMap<String, Vec<&TxRow>> = BTreeMap::new();
     for t in rows.iter().filter(|t| t.posted >= since && t.amount > Decimal::ZERO && !t.is_transfer() && t.split_seq.is_none()) {
-        by.entry(crate::rules::merchant_stem(&t.raw_description, &t.memo)).or_default().push(t);
+        by.entry(crate::rules::payer_key(&t.raw_description, &t.memo)).or_default().push(t);
     }
     let mut best: Option<((bool, Decimal), Salary)> = None;
     for v in by.values_mut().filter(|v| v.len() >= 3) {
+        // the usual amount, and only the deposits near it
+        let mut amounts: Vec<Decimal> = v.iter().map(|t| t.amount).collect();
+        amounts.sort();
+        let usual = amounts[amounts.len() / 2];
+        let near = |t: &TxRow| (t.amount - usual).abs() <= usual * Decimal::new(15, 2);
+        if v.iter().filter(|t| near(t)).count() * 2 < v.len() {
+            continue;
+        }
+        v.retain(|t| near(t));
+        if v.len() < 3 {
+            continue;
+        }
         v.sort_by_key(|t| t.posted);
         let mut gaps: Vec<i64> = v.windows(2).map(|w| (w[1].posted - w[0].posted).num_days()).collect();
         gaps.sort_unstable();
@@ -301,11 +319,6 @@ pub fn detect_salary(rows: &[TxRow], today: NaiveDate) -> Option<Salary> {
             _ => continue,
         };
         let last = v[v.len() - 1];
-        let amounts: Vec<Decimal> = v.iter().map(|t| t.amount).collect();
-        let (lo, hi) = (amounts.iter().min().copied().unwrap_or_default(), amounts.iter().max().copied().unwrap_or_default());
-        if hi > lo * Decimal::new(115, 2) {
-            continue;
-        }
         let words = format!("{} {} {}", last.raw_description, last.clean_payee, last.category_name.clone().unwrap_or_default()).to_uppercase();
         let salaryish = ["SALARY", "PAYROLL", "WAGES", "PAYCHEQUE", "PAYCHECK"].iter().any(|w| words.contains(w)) && !words.contains("SHARES");
         let monthly = last.amount * cycle.per_year() / Decimal::from(12);
@@ -573,7 +586,7 @@ pub struct FundIdea {
 pub fn fund_ideas(rows: &[TxRow], ccy: Currency, fx: &Fx, today: NaiveDate) -> Vec<FundIdea> {
     let mut by: BTreeMap<String, Vec<&TxRow>> = BTreeMap::new();
     for t in rows.iter().filter(|t| t.amount.is_sign_negative() && !t.is_transfer() && t.split_seq.is_none()) {
-        by.entry(crate::rules::merchant_stem(&t.raw_description, &t.memo)).or_default().push(t);
+        by.entry(crate::rules::payer_key(&t.raw_description, &t.memo)).or_default().push(t);
     }
     let idea = |stem: &str, last: &TxRow, cadence: i64| {
         let every = if cadence >= 300 { 12 } else { 3 };
@@ -768,6 +781,30 @@ mod tests {
     }
 
     #[test]
+    fn a_bonus_doesnt_hide_the_salary() {
+        let db = Db::open_in_memory().unwrap();
+        db.load_demo().unwrap();
+        let mut t = db.transactions(&TxFilter::default()).unwrap().into_iter().find(|t| !t.is_transfer() && t.amount > Decimal::ZERO).unwrap();
+        t.category_name = None;
+        t.raw_description = "ELECTRONIC CREDIT".into();
+        t.clean_payee = String::new();
+        let pay = |day: u32, mo: u32, amt: &str| {
+            let mut x = t.clone();
+            x.posted = NaiveDate::from_ymd_opt(2026, mo, day).unwrap();
+            x.amount = d(amt);
+            x
+        };
+        // every two weeks, with one bonus payday
+        // (the owner's real pattern: a bonus, two refunds and a penny test under the same wording)
+        let rows = vec![
+            pay(29, 5, "2720.64"), pay(11, 6, "2720.64"), pay(23, 6, "297.00"), pay(23, 6, "297.00"), pay(25, 6, "2720.64"), pay(9, 7, "2720.64"), pay(24, 7, "2720.64"),
+            pay(7, 8, "4122.51"), pay(21, 8, "2720.64"), pay(4, 9, "0.01"), pay(4, 9, "2720.64"),
+        ];
+        let s = detect_salary(&rows, NaiveDate::from_ymd_opt(2026, 9, 15).unwrap()).expect("the salary");
+        assert_eq!((s.amount, s.cycle), (d("2720.64"), PayCycle::Fortnightly));
+    }
+
+    #[test]
     fn finds_the_demo_salary() {
         let db = Db::open_in_memory().unwrap();
         db.load_demo().unwrap();
@@ -775,6 +812,27 @@ mod tests {
         let s = detect_salary(&rows, NaiveDate::from_ymd_opt(2026, 10, 27).unwrap()).expect("a salary");
         println!("{s:?}");
         assert!(s.amount > Decimal::ZERO);
+    }
+
+    #[test]
+    fn suggestions_use_only_months_the_statements_cover() {
+        let db = Db::open_in_memory().unwrap();
+        db.load_demo().unwrap();
+        let fx = db.fx().unwrap();
+        let all = db.categories().unwrap();
+        let parents: BTreeMap<i64, String> = all.iter().filter_map(|c| Some((c.id, all.iter().find(|p| Some(p.id) == c.parent_id)?.name.clone()))).collect();
+        // statements from 18 May to 15 Sep: only June, July and August are whole
+        let (a, b) = (NaiveDate::from_ymd_opt(2026, 5, 18).unwrap(), NaiveDate::from_ymd_opt(2026, 9, 15).unwrap());
+        let rows: Vec<TxRow> = db.transactions(&TxFilter { split_lines: true, ..Default::default() }).unwrap().into_iter().filter(|t| t.posted >= a && t.posted <= b).collect();
+        let month = |m: u32| {
+            let f = NaiveDate::from_ymd_opt(2026, m, 1).unwrap();
+            by_category(&rows, f, month_end(f), Currency::KYD, &fx, &parents).into_iter().find(|c| c.0 == "Groceries").map(|c| c.1).unwrap_or_default()
+        };
+        let mut v = [month(6), month(7), month(8)];
+        v.sort();
+        let want = (v[1] / Decimal::TEN).ceil() * Decimal::TEN;
+        let got = suggest(&rows, NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(), 6, Currency::KYD, &fx, &parents);
+        assert_eq!(got["Groceries"], want);
     }
 
     #[test]

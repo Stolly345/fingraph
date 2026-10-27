@@ -69,7 +69,7 @@ wins for that transaction.
 ```sh
 sudo apt install poppler-utils libgtk-4-dev libadwaita-1-dev
 cargo deb -p fingraph
-sudo apt install ./target/debian/fingraph_0.2.0-1_amd64.deb
+sudo apt install ./target/debian/fingraph_0.2.1-1_amd64.deb
 ```
 
 Or run from source: `cargo run -p fingraph --release`. Main menu → **Load Demo Data** imports a
@@ -77,9 +77,14 @@ simulated year (Personal + a property business, all five banks, KYD and USD) to 
 
 ## Using it
 
-1. Drop statements on **Statements** (or set a watched folder in Preferences → Import).
-2. Answer **To Review**. Each answer becomes a rule.
-3. Check **Overview** and **What Changed**; click any account in the sidebar for its breakdown.
+The first time, **Getting Started** walks you through it (it's in the main menu any time after):
+download your PDF statements, put them in one folder, let FinGraph read them, sort what it didn't
+recognise, and set up a budget. After that, once a month:
+
+1. Save last month's statements into the folder (FinGraph reads them when it opens), or drop them on
+   **Statements**.
+2. Run **Monthly Close** on the Budget page.
+3. Between statements, **Outlook** shows where balances are heading and what's safe to spend.
 
 Shortcuts: Ctrl+1 … Ctrl+9 for the main pages, Ctrl+F search, Ctrl+O import, Ctrl+, preferences.
 

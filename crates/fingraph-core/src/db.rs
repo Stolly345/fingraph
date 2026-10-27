@@ -620,7 +620,10 @@ impl Db {
     pub fn erase_all(&self) -> Result<()> {
         let prefs = self.setting("preferences");
         let tx = self.conn.unchecked_transaction()?;
-        for t in ["transactions", "documents", "accounts", "learned_rules", "entities", "settings"] {
+        for t in [
+            "transactions", "documents", "accounts", "learned_rules", "entities", "settings", "splits", "reimbursements", "attachments", "budgets", "budget_history", "budget_moves", "sinking_funds",
+            "month_closes", "manual_values", "manual_items", "goal_entries", "goals",
+        ] {
             tx.execute(&format!("DELETE FROM {t}"), [])?;
         }
         tx.commit()?;
@@ -1962,8 +1965,11 @@ mod tests {
         let biz = db.entity_by_name("Business — Property").unwrap().unwrap();
         db.delete_entity(biz).unwrap();
         assert!(db.transactions(&TxFilter::default()).unwrap().len() < n);
+        db.set_budget("1", 1, Some((Decimal::from(100), Currency::KYD))).unwrap();
         db.erase_all().unwrap();
         assert!(db.entities().unwrap().is_empty() && db.transactions(&TxFilter::default()).unwrap().is_empty());
+        // budgets and the rest go too, so demo data leaves nothing behind
+        assert!(db.budgets("1").unwrap().is_empty());
         db.restore_from(&backup).unwrap();
         assert_eq!(db.transactions(&TxFilter::default()).unwrap().len(), n);
         let _ = std::fs::remove_dir_all(&dir);
