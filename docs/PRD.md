@@ -223,7 +223,7 @@ Thresholds, chart months, hidden cards and categories left out of spending are p
 chosen set) at the top; Overview, To Review *(count)*, What Changed *(count)*, Transactions,
 Combined Statement, Subscriptions *(monthly cost)*, Statements *(⚠ when one doesn't balance)*, Reports & Export
 (Ctrl+1–7; Combined Statement Ctrl+8); **Accounts** — each with its last verified balance (owed in red), opening its overview;
-**Setup** — Rules & Categories, Bank Profiles, Preferences (Ctrl+,). The header shows only the
+**Setup** — Rules & Categories, Business Directory, Bank Profiles, Preferences (Ctrl+,). The header shows only the
 controls a page uses (date range, KYD | USD). Reopens on the last page.
 
 **Pages**: Transactions (virtualised grid, search Ctrl+F, account/category filters, inline category,
@@ -303,6 +303,7 @@ banks, one deliberately unreadable line to show the inspector).
 | Receipts | Local attachments by drop or button; P&L with receipts export |
 | Landed cost | Tags as projects; freight & duty suggestions |
 | Couldn't change charges in "owes you" | ✎ per charge opens the transaction editor; the dialog reopens with fresh totals |
+| Where's the business database? | Business Directory page: search, seen-in-statements count, keywords, Override… → rule |
 | Consolidated statement | Combined Statement page: chosen accounts, months, combined balance, click to edit |
 | CUC summer bills, annual renewals | Year-over-year spike check; Annual renewals card |
 
@@ -319,6 +320,7 @@ banks, one deliberately unreadable line to show the inspector).
 - Receipts are files, not OCR'd; the P&L-with-receipts export is a folder, not one merged PDF.
 - A recorded repayment can't be undone from the UI yet (core has `undo_reimbursement`).
 - No OCR for scanned PDFs; no font metadata from the PDF.
-- The directory isn't browsable in the app; additions are rules or file edits.
+- The directory is read-only in the app (Business Directory page); additions are rules or edits to
+  `merchants.tsv` plus a rebuild.
 - The Python prototype's ledger was never migrated (statements re-imported instead).
 - Not committed to a remote; no CI.

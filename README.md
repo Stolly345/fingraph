@@ -41,7 +41,7 @@ wins for that transaction.
 | Path | What |
 |---|---|
 | `crates/fingraph-core` | No GUI: scanner (`parser/`), ledger (`db.rs`), rules & triage (`rules.rs`), directory (`merchants.rs`, `data/merchants.tsv`), splits/reimbursements/attachments/coverage (`workflows.rs`), insights, exports, preferences, demo statements |
-| `crates/fingraph` | The app: one file per page (`dashboard`, `review`, `changes`, `transactions`, `account`, `statements`, `rules`, `profiles`, `export`, `preferences`, `wizard`, `split`, `owed`, `statement`, `txedit`), Cairo charts in `charts.rs` |
+| `crates/fingraph` | The app: one file per page (`dashboard`, `review`, `changes`, `transactions`, `account`, `statements`, `rules`, `profiles`, `export`, `preferences`, `wizard`, `split`, `owed`, `statement`, `txedit`, `directory`), Cairo charts in `charts.rs` |
 | `packaging/` | Desktop entry (PDF "Open With") and icon |
 | `docs/PRD.md` | Product and system reference |
 
@@ -76,7 +76,8 @@ HOME GAS|HOMEGAS	Home Gas	Gas
 Keywords match whole words (punctuation and apostrophes ignored, a trailing S allowed); the earliest
 match in the statement text wins, then the longest. Never add a generic word on its own. `fallback`
 marks a payment platform (Google, Apple) that gives way to the service it billed. Rebuild after
-editing. For a one-off, answering in To Review (or a rule) is quicker and always wins.
+editing. Browse it in the app under **Setup → Business Directory** (search, how often each
+business appears in your statements, keyword guesses, and **Override…** to make your own rule). For a one-off, answering in To Review (or a rule) is quicker and always wins.
 
 ## Terminal tools
 

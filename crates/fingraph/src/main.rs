@@ -5,6 +5,7 @@ mod account;
 mod changes;
 mod charts;
 mod dashboard;
+mod directory;
 mod export;
 mod owed;
 mod preferences;
@@ -201,6 +202,7 @@ impl App {
         let (e, er) = export::build(&app);
         let (r, rr) = rules::build(&app, rules::Part::Rules);
         let (p, pr) = profiles::build(&app);
+        let (dir, dirr) = directory::build(&app);
         let (ac, acr) = account::build(&app);
         // an account's overview is reached from its row under Accounts, not listed itself
         app.stack.add_titled(&ac, Some("account"), "Account");
@@ -215,6 +217,7 @@ impl App {
             ("statements", "Statements", "x-office-document-symbolic", st, str_),
             ("export", "Reports & Export", "document-save-symbolic", e, er),
             ("rules", "Rules & Categories", "edit-find-replace-symbolic", r, rr),
+            ("directory", "Business Directory", "system-search-symbolic", dir, dirr),
             ("profiles", "Bank Profiles", "preferences-system-symbolic", p, pr),
         ];
         for (name, title, icon, w, refresh) in pages {

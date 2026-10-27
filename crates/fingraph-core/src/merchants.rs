@@ -12,6 +12,13 @@ pub struct Merchant {
     pub fallback: bool,
 }
 
+impl Merchant {
+    /// The words it matches on, as written in the directory (for showing, not matching).
+    pub fn keys(&self) -> Vec<String> {
+        self.keys.iter().map(|k| k.join(" ")).collect()
+    }
+}
+
 /// Upper-case words with apostrophes dropped and other punctuation as spaces:
 /// `A.L. THOMPSON'S, GEORGETOWN` → `A L THOMPSONS GEORGETOWN`.
 pub fn tokens(s: &str) -> Vec<String> {
@@ -61,7 +68,7 @@ pub fn lookup(text: &str) -> Option<&'static Merchant> {
 
 /// (keyword, category). A keyword ending in `*` matches any word starting with it
 /// (INSURANCE* catches INSURANCEBROKERS). Whole words only, so MKT never matches MKTPL.
-const KEYWORDS: &[(&str, &str)] = &[
+pub const KEYWORDS: &[(&str, &str)] = &[
     ("DIGITAL|DGTL|DIGI|SOFTWARE|SAAS|APP STORE|APPS|SUBSCRIPTION|SUBSCR|STREAMING|VPN|HOSTING|DOMAINS", "Subscriptions & Digital"),
     ("MARKET|MKT|SUPERMARKET|SUPERMKT|SUPER MARKET|GROCERY|GROCERIES|GROCER|FOOD FAIR|SUPERCENTRE|SUPERCENTER|MINI MART|MINIMART", "Groceries"),
     ("PHARMACY|PHARM*|CHEMIST|DRUGSTORE|DRUG STORE", "Pharmacy"),
