@@ -221,6 +221,15 @@ pub fn is_bank_fee(raw: &str, memo: &str) -> bool {
     FEE_HINT.is_match(raw) || FEE_HINT.is_match(memo)
 }
 
+static CARD_PAYMENT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(card payment|card pmt|credit card (payment|pmt)|visa (payment|pmt)|mastercard (payment|pmt)|amex (payment|pmt)|american express (payment|pmt)|cc (payment|pmt)|payment received|payment - thank you|payment thank you|autopay payment|online payment thank you)\b").unwrap()
+});
+
+/// Wording that says a credit card is being paid (or received a payment).
+pub fn is_card_payment(text: &str) -> bool {
+    CARD_PAYMENT.is_match(text)
+}
+
 pub fn looks_like_transfer(raw: &str, memo: &str) -> bool {
     TRANSFER_HINT.is_match(raw) || TRANSFER_HINT.is_match(memo)
 }

@@ -161,7 +161,7 @@ const CATEGORIES: &[(&str, &str, &[&str])] = &[
     ("Savings & Investments", "Transfer", &[]),
     ("Shopping", "Expense", &["Electronics", "Online Shopping"]),
     ("Subscriptions & Digital", "Expense", &[]),
-    ("Transfers", "Transfer", &[]),
+    ("Transfers", "Transfer", &["Credit Card Payments"]),
     ("Transport", "Expense", &["Car Payment", "Fuel", "Parking", "Taxi & Rideshare", "Vehicle Maintenance"]),
     ("Travel", "Expense", &["Car Rental", "Flights", "Hotels"]),
     ("Utilities", "Expense", &["Electricity", "Gas", "Phone & Internet", "Water"]),
@@ -876,6 +876,7 @@ impl Db {
         }
         tx.commit()?;
         self.match_transfers()?;
+        self.mark_card_payments()?;
         self.mark_recurring()?;
         rep.auto_categorized += self.apply_directory()?;
         Ok(rep)
@@ -1371,7 +1372,8 @@ impl Db {
         for r in self.rules()? {
             n += self.apply_rule(&r, false)?;
         }
-        Ok(n + self.apply_directory()?)
+        self.match_transfers()?;
+        Ok(n + self.mark_card_payments()? + self.apply_directory()?)
     }
 
     /// File uncategorized charges from businesses in the merchant directory (and, if allowed in
@@ -1418,6 +1420,9 @@ impl Db {
         let fx = self.fx()?;
         let rows: Vec<TxRow> = self.transactions(&TxFilter::default())?.into_iter().filter(|t| t.transfer_peer.is_none()).collect();
         let transfer_cat = self.category_id("Transfers")?;
+        // "Transfer to 2197": the account whose last four digits the description names is the likely other side
+        let last4: std::collections::HashMap<i64, String> = self.accounts()?.into_iter().map(|a| (a.id, a.account_number_masked.trim_start_matches('•').to_string())).collect();
+        let names = |a: &TxRow, b: &TxRow| last4.get(&b.account_id).is_some_and(|l| l.len() == 4 && names_account(&crate::merchants::tokens(&format!("{} {}", a.raw_description, a.memo)), l));
         let mut used = std::collections::HashSet::new();
         let mut pairs = Vec::new();
         for a in rows.iter().filter(|t| t.amount.is_sign_negative()) {
@@ -1427,8 +1432,8 @@ impl Db {
             let best = rows
                 .iter()
                 .filter(|b| b.amount.is_sign_positive() && b.account_id != a.account_id && !used.contains(&b.id))
-                .filter(|b| (b.posted - a.posted).num_days().abs() <= 4)
-                .filter(|b| rules::looks_like_transfer(&a.raw_description, &a.memo) || rules::looks_like_transfer(&b.raw_description, &b.memo))
+                .filter(|b| (b.posted - a.posted).num_days().abs() <= 5)
+                .filter(|b| rules::looks_like_transfer(&a.raw_description, &a.memo) || rules::looks_like_transfer(&b.raw_description, &b.memo) || names(a, b))
                 .filter(|b| {
                     if a.currency == b.currency {
                         a.amount.abs() == b.amount
@@ -1437,7 +1442,7 @@ impl Db {
                         (conv - b.amount).abs() <= conv * Decimal::new(2, 2)
                     }
                 })
-                .min_by_key(|b| ((b.posted - a.posted).num_days().abs(), (b.amount - a.amount.abs()).abs()));
+                .min_by_key(|b| (!names(a, b), (b.posted - a.posted).num_days().abs(), (b.amount - a.amount.abs()).abs()));
             if let Some(b) = best {
                 used.insert(a.id);
                 used.insert(b.id);
@@ -1455,6 +1460,65 @@ impl Db {
         }
         tx.commit()?;
         Ok(pairs.len())
+    }
+
+    /// Recognise payments to your credit cards: money out of a bank account whose description names
+    /// one of your cards' last four digits ("Transfer to 2197") or says it pays a card ("VISA PMT",
+    /// "CARD PAYMENT"), and payments received on a card account. Filed under Transfers › Credit Card
+    /// Payments, so they're never spending, even when the card's own statement isn't imported.
+    /// A transaction you filed as something else by hand is left alone. Returns how many changed.
+    pub fn mark_card_payments(&self) -> Result<usize> {
+        let Some(cat) = self.category_id("Credit Card Payments")? else { return Ok(0) };
+        let transfers = self.category_id("Transfers")?;
+        let accts = self.accounts()?;
+        let cards: Vec<(i64, String)> = accts
+            .iter()
+            .filter(|a| a.account_type == AccountType::CreditCard)
+            .map(|a| (a.id, a.account_number_masked.trim_start_matches('•').to_string()))
+            .filter(|(_, l)| l.len() == 4)
+            .collect();
+        let is_card = |id: i64| accts.iter().any(|a| a.id == id && a.account_type == AccountType::CreditCard);
+        let rows = self.transactions(&TxFilter::default())?;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut n = 0;
+        for t in &rows {
+            if t.review == ReviewStatus::Confirmed && t.category_id.is_some() && t.category_id != transfers && t.category_id != Some(cat) {
+                continue;
+            }
+            let text = format!("{} {}", t.raw_description, t.memo);
+            let words = crate::merchants::tokens(&text);
+            let pays_card = if is_card(t.account_id) {
+                t.amount.is_sign_positive() && (rules::is_card_payment(&text) || t.transfer_peer.is_some_and(|p| rows.iter().any(|o| o.id == p && !is_card(o.account_id))))
+            } else {
+                t.amount.is_sign_negative()
+                    && (rules::is_card_payment(&text) || (rules::looks_like_transfer(&t.raw_description, &t.memo) && cards.iter().any(|(id, l4)| *id != t.account_id && names_account(&words, l4))))
+            };
+            if !pays_card {
+                continue;
+            }
+            // name the card it paid, unless you renamed the payee yourself
+            let card = if is_card(t.account_id) {
+                None
+            } else {
+                cards.iter().find(|(id, l4)| *id != t.account_id && names_account(&words, l4)).and_then(|(id, _)| accts.iter().find(|a| a.id == *id))
+            };
+            let lower = t.clean_payee.to_lowercase();
+            let default_payee = lower.is_empty() || ["transfer", "pc transfer", "internet", "mobile ob"].iter().any(|p| lower.starts_with(p));
+            let payee = match card {
+                Some(c) if default_payee => Some(format!("Payment to {}", c.name)),
+                None if default_payee && is_card(t.account_id) => Some("Card payment received".to_string()),
+                _ => None,
+            };
+            if t.category_id != Some(cat) {
+                n += 1;
+            }
+            tx.execute(
+                "UPDATE transactions SET category_id = ?2, clean_payee = COALESCE(?3, clean_payee), review_status = CASE WHEN review_status = 'Confirmed' THEN 'Confirmed' ELSE 'AutoCategorized' END WHERE id = ?1",
+                params![t.id, cat, payee],
+            )?;
+        }
+        tx.commit()?;
+        Ok(n)
     }
 
     pub fn unlink_transfer(&self, id: i64) -> Result<()> {
@@ -1546,6 +1610,12 @@ impl Db {
         }
         Ok(n)
     }
+}
+
+/// The description names an account: its last four digits on their own ("Transfer to 2197") or as the
+/// end of a full card/account number ("Transfer to 10785 19544403575").
+fn names_account(words: &[String], last4: &str) -> bool {
+    words.iter().any(|w| w == last4 || (w.len() >= 8 && w.ends_with(last4) && w.bytes().all(|b| b.is_ascii_digit())))
 }
 
 /// `USD 145.00` style original from an FX memo line we stored.
@@ -1741,6 +1811,34 @@ mod tests {
         db.save_prefs(&p).unwrap();
         db.reset_learning(&[]).unwrap();
         assert_eq!(db.apply_directory().unwrap(), 0);
+    }
+
+    #[test]
+    fn card_payments_are_recognised_with_or_without_the_card_statement() {
+        let db = Db::open_in_memory().unwrap();
+        db.load_demo().unwrap();
+        let cc = db.category_id("Credit Card Payments").unwrap();
+        // Scotiabank side ("TRANSFER TO BUTTERFIELD VISA 7710") and Butterfield side ("PAYMENT RECEIVED")
+        let out = db.transactions(&TxFilter { search: "BUTTERFIELD VISA 7710".into(), ..Default::default() }).unwrap();
+        let back = db.transactions(&TxFilter { search: "PAYMENT RECEIVED".into(), ..Default::default() }).unwrap();
+        assert_eq!(out.len(), 12);
+        assert!(out.iter().chain(&back).all(|t| t.category_id == cc && t.is_transfer()), "{:?}", out.iter().chain(&back).find(|t| t.category_id != cc));
+        // never spending
+        let fx = db.fx().unwrap();
+        let rows = db.transactions(&TxFilter::default()).unwrap();
+        assert!(crate::insights::by_category(&rows, chrono::NaiveDate::MIN, chrono::NaiveDate::MAX, Currency::KYD, &fx, &Default::default()).iter().all(|(k, _)| k != "Credit Card Payments"));
+        // without the card statement: the payment still names the card, so it's still recognised
+        let card = db.accounts().unwrap().into_iter().find(|a| a.account_number_masked == "••7710").unwrap();
+        db.conn.execute("DELETE FROM transactions WHERE account_id = ?1", [card.id]).unwrap();
+        db.conn.execute("UPDATE transactions SET category_id = NULL, transfer_peer_tx_id = NULL WHERE memo LIKE '%VISA 7710%'", []).unwrap();
+        assert!(db.mark_card_payments().unwrap() >= 12);
+        let named = db.transactions(&TxFilter { search: "BUTTERFIELD VISA 7710".into(), ..Default::default() }).unwrap();
+        assert!(named.iter().all(|t| t.category_id == cc));
+        // a card named by its full number
+        let words = crate::merchants::tokens("PC TRANSFER DEBIT Transfer to 10785 19544403575");
+        assert!(names_account(&words, "3575") && !names_account(&words, "0785"));
+        // a transfer to your own savings account isn't a card payment
+        assert!(db.transactions(&TxFilter { search: "RBC SAVINGS 3390".into(), ..Default::default() }).unwrap().iter().all(|t| t.category_id != cc));
     }
 
     #[test]

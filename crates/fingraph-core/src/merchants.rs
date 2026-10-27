@@ -8,6 +8,8 @@ pub struct Merchant {
     keys: Vec<Vec<String>>,
     pub name: String,
     pub category: String,
+    /// A payment platform (GOOGLE, APPLE.COM/BILL): used only when nothing more specific matches.
+    pub fallback: bool,
 }
 
 /// Upper-case words with apostrophes dropped and other punctuation as spaces:
@@ -28,7 +30,8 @@ pub static DIRECTORY: LazyLock<Vec<Merchant>> = LazyLock::new(|| {
         .filter_map(|l| {
             let mut f = l.split('\t');
             let (keys, name, category) = (f.next()?, f.next()?, f.next()?);
-            Some(Merchant { keys: keys.split('|').map(tokens).filter(|k| !k.is_empty()).collect(), name: name.trim().into(), category: category.trim().into() })
+            let fallback = f.next().is_some_and(|x| x.trim() == "fallback");
+            Some(Merchant { keys: keys.split('|').map(tokens).filter(|k| !k.is_empty()).collect(), name: name.trim().into(), category: category.trim().into(), fallback })
         })
         .collect()
 });
@@ -51,7 +54,7 @@ pub fn lookup(text: &str) -> Option<&'static Merchant> {
     let words = &words;
     DIRECTORY
         .iter()
-        .flat_map(|m| m.keys.iter().filter_map(move |k| hit(words, k).map(|at| ((std::cmp::Reverse(at), k.len(), k.iter().map(String::len).sum::<usize>()), m))))
+        .flat_map(|m| m.keys.iter().filter_map(move |k| hit(words, k).map(|at| ((!m.fallback, std::cmp::Reverse(at), k.len(), k.iter().map(String::len).sum::<usize>()), m))))
         .max_by_key(|(score, _)| *score)
         .map(|(_, m)| m)
 }
@@ -158,6 +161,17 @@ mod tests {
         assert_eq!(name("AMAZON MKTPLACE PMTS, AMZN.COM/BILL"), Some(("Amazon", "Online Shopping")));
         assert_eq!(name("WAL-MART SUPERCENTER 5854, MIAMI"), Some(("Walmart", "Shopping")));
         assert_eq!(name("TORTUGA GREENERY, GEORGE TOWN"), None);
+        // a platform gives way to the service it billed for
+        assert_eq!(name("GOOGLE *YouTubePremium g.co/helppay#"), Some(("YouTube", "Subscriptions & Digital")));
+        assert_eq!(name("PP*GOOGLE FLIGHTRADAR24 4029357733 US"), Some(("Flightradar24", "Subscriptions & Digital")));
+        assert_eq!(name("GOOGLE *Google One"), Some(("Google One", "Subscriptions & Digital")));
+        assert_eq!(name("GOOGLE *TEMPORARY HOLD"), Some(("Google", "Subscriptions & Digital")));
+        assert_eq!(name("APPLE.COM/BILL 866-712-7753"), Some(("Apple", "Subscriptions & Digital")));
+        assert_eq!(name("NORDVPN.COM AMSTERDAM"), Some(("NordVPN", "Subscriptions & Digital")));
+        assert_eq!(name("PROTON AG GENEVA"), Some(("Proton", "Subscriptions & Digital")));
+        assert_eq!(name("TARGET 00012345 MIAMI FL"), Some(("Target", "Shopping")));
+        assert_eq!(name("BEST BUY 00123"), Some(("Best Buy", "Electronics")));
+        assert_eq!(name("STEAM CLEANING CO"), None);
     }
 
     #[test]

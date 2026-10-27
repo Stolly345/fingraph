@@ -1,8 +1,9 @@
 # FinGraph merchant directory: Cayman businesses and common online services.
-# KEYWORDS<TAB>Name<TAB>Category — keywords are matched as whole words against the statement text
+# KEYWORDS<TAB>Name<TAB>Category[<TAB>fallback] — keywords are matched as whole words against the statement text
 # (case, apostrophes and punctuation ignored; a trailing S is allowed). Alternatives are separated
 # by |. When several entries match, the one with the longest keyword wins, so
 # "FOSTERS PHARMACY" beats "FOSTERS". Categories must exist in FinGraph's category list.
+# `fallback` marks a payment platform (GOOGLE, APPLE.COM/BILL): it applies only when no other entry matches.
 # Never add a generic word on its own (MARKET, CAYMAN, GRILL, CAMANA BAY): it would catch other merchants.
 
 # ── Groceries & liquor
@@ -88,14 +89,6 @@ LOCAL LOGIC	Local Logic	Clothing & Shoes
 ARABUS	Arabus	Clothing & Shoes
 WATERCOLORS	Watercolors	Clothing & Shoes
 SPORTS SUPREMO	Sports Supremo	Shopping
-MYUS	MyUS (shipping)	Online Shopping
-EBAY	eBay	Online Shopping
-TEMU	Temu	Online Shopping
-SHEIN	Shein	Online Shopping
-WALMART|WAL MART	Walmart	Shopping
-TARGET COM	Target	Online Shopping
-ALIEXPRESS	AliExpress	Online Shopping
-ETSY	Etsy	Online Shopping
 
 # ── Amazon: the store is shopping, its digital services are subscriptions
 AMAZON|AMZN|AMAZON COM|AMZN COM|AMAZON MKTPL|AMZN MKTP|AMAZON MKTPLACE|AMAZON MARKETPLACE	Amazon	Online Shopping
@@ -382,7 +375,6 @@ AIR CANADA	Air Canada	Flights
 SOUTHWEST AIR|SOUTHWES	Southwest	Flights
 UNITED AIR|UNITED COM	United	Flights
 COPA AIR	Copa Airlines	Flights
-EXPEDIA	Expedia	Flights
 RITZ CARLTON	Ritz-Carlton Grand Cayman	Hotels
 KIMPTON|SEAFIRE	Kimpton Seafire	Hotels
 WESTIN	Westin Grand Cayman	Hotels
@@ -394,8 +386,6 @@ SUNSHINE SUITES	Sunshine Suites	Hotels
 WYNDHAM	Wyndham	Hotels
 HYATT	Hyatt	Hotels
 COMPASS POINT	Compass Point	Hotels
-AIRBNB	Airbnb	Hotels
-BOOKING COM	Booking.com	Hotels
 
 # ── Home services
 MOLLY MAID	Molly Maid	Cleaning
@@ -407,35 +397,233 @@ BUG BUSTERS|BUGBUSTERS	Bug Busters	Pest Control
 PURGE WASTE WATER	Purge Waste Water	Repairs & Maintenance
 POLAR AIR	Polar Air	Repairs & Maintenance
 
-# ── Online services & subscriptions
-HBO|HBOMAX|HBO MAX	HBO Max	Subscriptions & Digital
-NETFLIX	Netflix	Subscriptions & Digital
-SPOTIFY	Spotify	Subscriptions & Digital
-YOUTUBE|YOUTUBEPREMIUM	YouTube Premium	Subscriptions & Digital
-GOOGLE ONE	Google One	Subscriptions & Digital
-GOOGLE WORKSPACE	Google Workspace	Subscriptions & Digital
-EXPRESSVPN	ExpressVPN	Subscriptions & Digital
-NORDVPN	NordVPN	Subscriptions & Digital
-ADOBE	Adobe	Subscriptions & Digital
-HULU|HLU	Hulu	Subscriptions & Digital
-DISCOVERY|DISCOVERYDI	Discovery+	Subscriptions & Digital
-DISNEY|DISNEYPLUS	Disney+	Subscriptions & Digital
-PARAMOUNT	Paramount+	Subscriptions & Digital
-PEACOCK	Peacock	Subscriptions & Digital
-APPLE COM|ICLOUD|APPLE COM BILL	Apple	Subscriptions & Digital
-ANTHROPIC|CLAUDE AI	Anthropic	Subscriptions & Digital
-OPENAI|CHATGPT	OpenAI	Subscriptions & Digital
-MICROSOFT|MSFT	Microsoft	Subscriptions & Digital
-DROPBOX	Dropbox	Subscriptions & Digital
-CLOUDFLARE	Cloudflare	Subscriptions & Digital
-SIGNAL	Signal	Subscriptions & Digital
-YAHOO MAIL|YAHOO	Yahoo	Subscriptions & Digital
-LINKEDIN	LinkedIn	Subscriptions & Digital
+# ── Online retailers & marketplaces
+WALMART|WAL MART|WALMART COM	Walmart	Shopping
+TARGET|TARGET COM|TARGET CORP	Target	Shopping
+COSTCO|COSTCO WHSE|COSTCO COM	Costco	Shopping
+SAMS CLUB|SAMSCLUB	Sam's Club	Shopping
+BEST BUY|BESTBUY|BESTBUY COM	Best Buy	Electronics
+NEWEGG	Newegg	Electronics
+B&H PHOTO|BH PHOTO|B H PHOTO	B&H Photo	Electronics
+APPLE STORE|APPLE ONLINE STORE	Apple Store	Electronics
+DELL	Dell	Electronics
+HOME DEPOT|HOMEDEPOT	The Home Depot	Home & Garden
+LOWES|LOWE S	Lowe's	Home & Garden
+WAYFAIR	Wayfair	Furniture & Decor
+IKEA	IKEA	Furniture & Decor
+OVERSTOCK	Overstock	Furniture & Decor
+BED BATH	Bed Bath & Beyond	Home & Garden
+EBAY	eBay	Online Shopping
+ETSY	Etsy	Online Shopping
+TEMU	Temu	Online Shopping
+SHEIN	Shein	Clothing & Shoes
+ALIEXPRESS|ALIBABA	AliExpress	Online Shopping
+WISH COM	Wish	Online Shopping
+CHEWY|CHEWY COM	Chewy	Pet Food & Supplies
+ZAPPOS	Zappos	Clothing & Shoes
+NORDSTROM	Nordstrom	Clothing & Shoes
+MACYS	Macy's	Clothing & Shoes
+OLD NAVY	Old Navy	Clothing & Shoes
+GAP COM|GAP STORE	Gap	Clothing & Shoes
+H&M|H M HENNES|HM COM	H&M	Clothing & Shoes
+ZARA	Zara	Clothing & Shoes
+NIKE|NIKE COM	Nike	Clothing & Shoes
+ADIDAS	Adidas	Clothing & Shoes
+ASOS	ASOS	Clothing & Shoes
+SEPHORA COM	Sephora	Hair & Beauty
+ULTA	Ulta Beauty	Hair & Beauty
+CVS|CVS PHARMACY	CVS	Pharmacy
+WALGREENS	Walgreens	Pharmacy
+IHERB	iHerb	Health & Fitness
+VITACOST	Vitacost	Health & Fitness
+MYUS|MYUS COM	MyUS (shipping)	Online Shopping
+SHIPITO	Shipito	Online Shopping
+ARAMEX	Aramex	Online Shopping
+FEDEX	FedEx	Online Shopping
+UPS STORE|UPS COM	UPS	Online Shopping
+DHL	DHL	Online Shopping
+SHOPIFY	Shopify store	Online Shopping
+SQUARESPACE	Squarespace	Subscriptions & Digital
+WIX COM|WIX	Wix	Subscriptions & Digital
+GODADDY	GoDaddy	Subscriptions & Digital
+NAMECHEAP	Namecheap	Subscriptions & Digital
+
+# ── Google: Google Play / plain GOOGLE are fallbacks, so the service named after them wins
+GOOGLE|GOOGLE COM|GOOGLE PLAY|GOOGLE PAY	Google	Subscriptions & Digital	fallback
+GOOGLE ONE|GOOGLE STORAGE|GOOGLE ONE AI	Google One	Subscriptions & Digital
+GOOGLE WORKSPACE|GSUITE|G SUITE|GOOGLE GSUITE	Google Workspace	Subscriptions & Digital
+YOUTUBE|YOUTUBEPREMIUM|YOUTUBE PREMIUM|YOUTUBE MUSIC|YOUTUBE TV|YOUTUBETV	YouTube	Subscriptions & Digital
+GOOGLE FI|GOOGLE FIBER	Google Fi	Phone & Internet
+GOOGLE NEST|NEST AWARE	Google Nest Aware	Subscriptions & Digital
+FITBIT	Fitbit Premium	Subscriptions & Digital
+GOOGLE CLOUD|GCP	Google Cloud	Subscriptions & Digital
+GOOGLE DOMAINS	Google Domains	Subscriptions & Digital
+GOOGLE ADS|ADWORDS	Google Ads	Advertising & Marketing
+GOOGLE GEMINI|GEMINI	Google Gemini	Subscriptions & Digital
+GOOGLE STORE	Google Store	Electronics
+
+# ── Apple: APPLE.COM/BILL is the App Store / iCloud / Apple One
+APPLE COM|APPLE COM BILL|ITUNES	Apple	Subscriptions & Digital	fallback
+ICLOUD|APPLE ICLOUD	Apple iCloud+	Subscriptions & Digital
+APPLE MUSIC	Apple Music	Subscriptions & Digital
+APPLE TV	Apple TV+	Subscriptions & Digital
+APPLE ONE	Apple One	Subscriptions & Digital
+APPLE ARCADE	Apple Arcade	Subscriptions & Digital
+
+# ── Microsoft & Amazon services
+MICROSOFT|MSFT|MICROSOFT 365|OFFICE 365|MS 365	Microsoft 365	Subscriptions & Digital
+XBOX|XBOX LIVE|GAME PASS	Xbox Game Pass	Subscriptions & Digital
+ONEDRIVE	OneDrive	Subscriptions & Digital
+OUTLOOK	Outlook	Subscriptions & Digital
+AMAZON WEB SERVICES|AWS	Amazon Web Services	Subscriptions & Digital
+TWITCH	Twitch	Subscriptions & Digital
+
+# ── VPNs & privacy
+NORDVPN|NORD VPN|NORDSEC|NORD SECURITY	NordVPN	Subscriptions & Digital
+EXPRESSVPN|EXPRESS VPN	ExpressVPN	Subscriptions & Digital
+SURFSHARK	Surfshark	Subscriptions & Digital
+PROTONVPN|PROTON VPN	Proton VPN	Subscriptions & Digital
+PROTON|PROTON AG|PROTONMAIL|PROTON MAIL	Proton	Subscriptions & Digital
+CYBERGHOST	CyberGhost	Subscriptions & Digital
+PRIVATE INTERNET ACCESS|PIA VPN|PRIVATEINTERNETACCESS	Private Internet Access	Subscriptions & Digital
+IPVANISH	IPVanish	Subscriptions & Digital
+MULLVAD	Mullvad VPN	Subscriptions & Digital
+WINDSCRIBE	Windscribe	Subscriptions & Digital
+ATLAS VPN	Atlas VPN	Subscriptions & Digital
+HOTSPOT SHIELD	Hotspot Shield	Subscriptions & Digital
+TUNNELBEAR	TunnelBear	Subscriptions & Digital
+PUREVPN	PureVPN	Subscriptions & Digital
 INCOGNI	Incogni	Subscriptions & Digital
-FLIGHTRADAR24|FLIGHTRADAR	Flightradar24	Subscriptions & Digital
-RECRAFT	Recraft	Subscriptions & Digital
-HEINLEIN HOSTING	Heinlein Hosting	Subscriptions & Digital
+DELETEME|DELETE ME	DeleteMe	Subscriptions & Digital
+AURA COM	Aura	Subscriptions & Digital
+NORTON|NORTONLIFELOCK|GEN DIGITAL	Norton	Subscriptions & Digital
+MCAFEE	McAfee	Subscriptions & Digital
+BITDEFENDER	Bitdefender	Subscriptions & Digital
+MALWAREBYTES	Malwarebytes	Subscriptions & Digital
+KASPERSKY	Kaspersky	Subscriptions & Digital
+1PASSWORD|ONEPASSWORD	1Password	Subscriptions & Digital
+LASTPASS	LastPass	Subscriptions & Digital
+BITWARDEN	Bitwarden	Subscriptions & Digital
+DASHLANE	Dashlane	Subscriptions & Digital
+
+# ── Email & productivity
+YAHOO|YAHOO MAIL	Yahoo Mail	Subscriptions & Digital
+FASTMAIL	Fastmail	Subscriptions & Digital
+ZOHO	Zoho	Subscriptions & Digital
+TUTANOTA|TUTA	Tuta Mail	Subscriptions & Digital
+HEY COM|HEY EMAIL	HEY	Subscriptions & Digital
+AOL	AOL	Subscriptions & Digital
+GMX	GMX	Subscriptions & Digital
+ICLOUD MAIL	iCloud Mail	Subscriptions & Digital
+SUPERHUMAN	Superhuman	Subscriptions & Digital
+HEINLEIN HOSTING|MAILBOX ORG	Mailbox.org	Subscriptions & Digital
+NOTION	Notion	Subscriptions & Digital
+EVERNOTE	Evernote	Subscriptions & Digital
+TODOIST	Todoist	Subscriptions & Digital
+DROPBOX	Dropbox	Subscriptions & Digital
+BOX COM	Box	Subscriptions & Digital
+ZOOM|ZOOM US|ZOOM COM	Zoom	Subscriptions & Digital
+SLACK	Slack	Subscriptions & Digital
+CANVA	Canva	Subscriptions & Digital
+GRAMMARLY	Grammarly	Subscriptions & Digital
+DOCUSIGN	DocuSign	Subscriptions & Digital
+ADOBE|ADOBE SYSTEMS|ADOBE INC	Adobe	Subscriptions & Digital
+AUTODESK	Autodesk	Subscriptions & Digital
+QUICKBOOKS|INTUIT	QuickBooks	Subscriptions & Digital
+XERO	Xero	Subscriptions & Digital
+LINKEDIN	LinkedIn	Subscriptions & Digital
+GITHUB	GitHub	Subscriptions & Digital
+JETBRAINS	JetBrains	Subscriptions & Digital
+DIGITALOCEAN|DIGITAL OCEAN	DigitalOcean	Subscriptions & Digital
+CLOUDFLARE	Cloudflare	Subscriptions & Digital
+BACKBLAZE	Backblaze	Subscriptions & Digital
 SIMPLEFIN	SimpleFIN	Subscriptions & Digital
+SIGNAL	Signal	Subscriptions & Digital
+TELEGRAM	Telegram	Subscriptions & Digital
+WHATSAPP	WhatsApp	Subscriptions & Digital
+
+# ── AI
+ANTHROPIC|CLAUDE AI	Anthropic (Claude)	Subscriptions & Digital
+OPENAI|CHATGPT	OpenAI (ChatGPT)	Subscriptions & Digital
+MIDJOURNEY	Midjourney	Subscriptions & Digital
+PERPLEXITY	Perplexity	Subscriptions & Digital
+CURSOR|ANYSPHERE	Cursor	Subscriptions & Digital
+ELEVENLABS	ElevenLabs	Subscriptions & Digital
+RECRAFT	Recraft	Subscriptions & Digital
+GITHUB COPILOT	GitHub Copilot	Subscriptions & Digital
+
+# ── Streaming, music, news, reading
+NETFLIX	Netflix	Subscriptions & Digital
+HBO|HBOMAX|HBO MAX|MAX COM	HBO Max	Subscriptions & Digital
+DISNEY|DISNEYPLUS|DISNEY PLUS	Disney+	Subscriptions & Digital
+HULU|HLU	Hulu	Subscriptions & Digital
+DISCOVERY|DISCOVERYDI|DISCOVERY PLUS	Discovery+	Subscriptions & Digital
+PARAMOUNT|PARAMOUNTPLUS	Paramount+	Subscriptions & Digital
+PEACOCK	Peacock	Subscriptions & Digital
+ESPN|ESPN PLUS	ESPN+	Subscriptions & Digital
+DAZN	DAZN	Subscriptions & Digital
+FUBO|FUBOTV	Fubo	Subscriptions & Digital
+SLING	Sling TV	Subscriptions & Digital
+CRUNCHYROLL	Crunchyroll	Subscriptions & Digital
+STARZ	Starz	Subscriptions & Digital
+SHOWTIME	Showtime	Subscriptions & Digital
+BRITBOX	BritBox	Subscriptions & Digital
+NFL GAME PASS|NFLPLUS|NFL PLUS	NFL+	Subscriptions & Digital
+NBA LEAGUE PASS|NBA COM	NBA League Pass	Subscriptions & Digital
+SPOTIFY	Spotify	Subscriptions & Digital
+TIDAL	Tidal	Subscriptions & Digital
+DEEZER	Deezer	Subscriptions & Digital
+PANDORA	Pandora	Subscriptions & Digital
+SIRIUSXM|SIRIUS XM	SiriusXM	Subscriptions & Digital
+SOUNDCLOUD	SoundCloud	Subscriptions & Digital
+PATREON	Patreon	Subscriptions & Digital
+SUBSTACK	Substack	Subscriptions & Digital
+MEDIUM COM	Medium	Subscriptions & Digital
+NYTIMES|NY TIMES|NEW YORK TIMES	New York Times	Subscriptions & Digital
+WSJ|WALL STREET JOURNAL|DOW JONES	Wall Street Journal	Subscriptions & Digital
+WASHINGTON POST|WAPO	Washington Post	Subscriptions & Digital
+ECONOMIST	The Economist	Subscriptions & Digital
+BLOOMBERG	Bloomberg	Subscriptions & Digital
+CAYMAN COMPASS	Cayman Compass	Subscriptions & Digital
+SCRIBD|EVERAND	Scribd	Subscriptions & Digital
+KOBO	Kobo	Subscriptions & Digital
+DUOLINGO	Duolingo	Subscriptions & Digital
+MASTERCLASS	MasterClass	Subscriptions & Digital
+COURSERA	Coursera	Books & Courses
+UDEMY	Udemy	Books & Courses
+SKILLSHARE	Skillshare	Books & Courses
+CALM COM	Calm	Subscriptions & Digital
+HEADSPACE	Headspace	Subscriptions & Digital
+STRAVA	Strava	Subscriptions & Digital
+PELOTON	Peloton	Subscriptions & Digital
+MYFITNESSPAL	MyFitnessPal	Subscriptions & Digital
+FLIGHTRADAR24|FLIGHTRADAR	Flightradar24	Subscriptions & Digital
+FOREFLIGHT	ForeFlight	Subscriptions & Digital
+
+# ── Games
+STEAMPOWERED|STEAM GAMES|STEAM PURCHASE|STEAMGAMES	Steam	Hobbies
+PLAYSTATION|SONY INTERACTIVE|PSN	PlayStation	Subscriptions & Digital
+NINTENDO	Nintendo	Hobbies
+EPIC GAMES	Epic Games	Hobbies
+ROBLOX	Roblox	Hobbies
+EA COM|ELECTRONIC ARTS	EA	Hobbies
+BLIZZARD|BATTLE NET	Blizzard	Hobbies
+
+# ── Delivery & rides abroad
+DOORDASH	DoorDash	Takeaway & Delivery
+GRUBHUB	Grubhub	Takeaway & Delivery
+INSTACART	Instacart	Groceries
+
+# ── Travel booking
+BOOKING COM	Booking.com	Hotels
+AIRBNB	Airbnb	Hotels
+VRBO	Vrbo	Hotels
+EXPEDIA	Expedia	Flights
+HOTELS COM	Hotels.com	Hotels
+PRICELINE	Priceline	Hotels
+AGODA	Agoda	Hotels
+KAYAK	Kayak	Flights
+TRIP COM	Trip.com	Flights
 
 # ── Income
 SALARY|DIR PAY	Salary	Salary
