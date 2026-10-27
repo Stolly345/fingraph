@@ -265,6 +265,8 @@ pub struct TriageGroup {
     /// Per currency, so a KYD and a USD charge are never added together.
     pub totals: BTreeMap<Currency, Decimal>,
     pub typical_amount: Decimal,
+    /// Every charge was for exactly the same amount.
+    pub same_amount: bool,
     pub currency: Currency,
     pub cadence: Option<i64>,
     pub sample: String,
@@ -310,6 +312,7 @@ pub fn triage_groups(items: &[TriageInput]) -> Vec<TriageGroup> {
                 count: v.len(),
                 totals,
                 typical_amount: latest.amount,
+                same_amount: v.windows(2).all(|w| w[0].amount == w[1].amount && w[0].currency == w[1].currency),
                 currency: latest.currency,
                 cadence: cad,
                 sample: if latest.memo.is_empty() { latest.raw.clone() } else { format!("{} — {}", latest.raw, latest.memo) },

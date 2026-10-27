@@ -768,6 +768,74 @@ impl Db {
         Ok(())
     }
 
+    /// Every imported statement file: (sha256, filename, workspace). Demo statements are left out.
+    pub fn statement_files(&self) -> Result<Vec<(String, String, i64)>> {
+        let mut st = self.conn.prepare(
+            "SELECT d.sha256_hash, d.filename, a.entity_id FROM documents d JOIN accounts a ON a.id = d.account_id
+             WHERE d.section_index = 0 AND d.sha256_hash NOT LIKE 'demo-%' ORDER BY d.period_end, d.id",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Swap a statement for a fresh scan of it: its old sections and transactions go, the new ones
+    /// come in through the normal import (rules applied, transfers re-matched).
+    pub fn replace_statement(&self, entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult) -> Result<ImportReport> {
+        self.conn.execute("DELETE FROM documents WHERE sha256_hash = ?1", [sha256])?;
+        self.import_scan(entity_id, filename, sha256, scan)
+    }
+
+    /// Re-read every statement whose PDF can still be found with the current scanner and profiles.
+    /// Returns (statements rescanned, transactions imported, files that couldn't be found).
+    pub fn rescan_all(&self) -> Result<(usize, usize, Vec<String>)> {
+        let profiles = self.profiles()?;
+        let scanner = crate::parser::MultiPassScanner::new(&profiles);
+        let (mut n, mut txs, mut missing) = (0, 0, Vec::new());
+        for (sha, name, entity) in self.statement_files()? {
+            let Some(path) = stored_pdf(&sha, &name) else {
+                missing.push(name);
+                continue;
+            };
+            let scan = scanner.scan_pdf(&path)?;
+            txs += self.replace_statement(entity, &name, &sha, &scan)?.inserted;
+            n += 1;
+        }
+        Ok((n, txs, missing))
+    }
+
+    /// Forget what triage and manual edits taught: rules, categories, payee names and subscription
+    /// flags in these workspaces (all of them when empty). Transfers matched between your own
+    /// accounts stay matched. Returns how many transactions are back in triage.
+    pub fn reset_learning(&self, entity_ids: &[i64]) -> Result<usize> {
+        let all: Vec<i64> = self.entities()?.iter().map(|e| e.id).collect();
+        let scope: Vec<i64> = if entity_ids.is_empty() { all.clone() } else { entity_ids.to_vec() };
+        let everything = all.iter().all(|e| scope.contains(e));
+        let rows = self.transactions(&TxFilter { entity_ids: scope.clone(), ..Default::default() })?;
+        let tx = self.conn.unchecked_transaction()?;
+        for e in &scope {
+            tx.execute("DELETE FROM learned_rules WHERE entity_id = ?1", [e])?;
+        }
+        if everything {
+            tx.execute("DELETE FROM learned_rules", [])?;
+        }
+        let mut n = 0;
+        for t in &rows {
+            let stem = rules::merchant_stem(&t.raw_description, &t.memo);
+            let payee = rules::known_merchant(&stem, &t.raw_description).0;
+            if t.transfer_peer.is_some() {
+                tx.execute("UPDATE transactions SET clean_payee = ?2, is_subscription = 0 WHERE id = ?1", params![t.id, payee])?;
+            } else {
+                tx.execute(
+                    "UPDATE transactions SET category_id = NULL, clean_payee = ?2, is_subscription = 0, review_status = 'NeedsReview' WHERE id = ?1",
+                    params![t.id, payee],
+                )?;
+                n += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// The Inspector's 1-click fix: turn a skipped line into a transaction, then re-check the statement.
     pub fn convert_skipped_line(&self, doc_id: i64, line_index: usize, posted: NaiveDate, amount: Decimal, description: &str) -> Result<i64> {
         let (diag, mut report) = self.document_report(doc_id)?;
@@ -1134,6 +1202,32 @@ impl Db {
     }
 }
 
+/// Where imported PDFs are kept, named by their SHA-256, so statements can be rescanned later.
+pub fn statements_dir() -> std::path::PathBuf {
+    crate::data_dir().join("statements")
+}
+
+/// Keep a copy of an imported PDF (no-op when it's already there).
+pub fn keep_pdf(src: &Path, sha256: &str) -> Result<()> {
+    let dir = statements_dir();
+    std::fs::create_dir_all(&dir)?;
+    let dst = dir.join(format!("{sha256}.pdf"));
+    if !dst.exists() {
+        std::fs::copy(src, &dst)?;
+    }
+    Ok(())
+}
+
+/// A statement's PDF: our kept copy, else a file of the same name and contents in the data folder.
+pub fn stored_pdf(sha256: &str, filename: &str) -> Option<std::path::PathBuf> {
+    let kept = statements_dir().join(format!("{sha256}.pdf"));
+    if kept.exists() {
+        return Some(kept);
+    }
+    let old = crate::data_dir().join("documents").join(filename);
+    (file_sha256(&old).ok().as_deref() == Some(sha256)).then_some(old)
+}
+
 /// `USD 145.00` style original from an FX memo line we stored.
 fn parse_fx_memo(memo: &str) -> Option<(Currency, Decimal)> {
     let i = memo.find("FX original ")?;
@@ -1205,6 +1299,22 @@ mod tests {
         assert!(n >= 24, "{n}");
         let left = db.transactions(&TxFilter { search: "CUC WEB".into(), uncategorized_only: true, ..Default::default() }).unwrap();
         assert!(left.is_empty());
+    }
+
+    #[test]
+    fn reset_learning_sends_everything_but_transfers_back_to_triage() {
+        let db = Db::open_in_memory().unwrap();
+        db.load_demo().unwrap();
+        let before = db.uncategorized_count(&[]).unwrap();
+        let cat = db.category_id("Groceries").unwrap();
+        db.learn(&Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: "KIRK MARKET".into(), clean_payee: Some("Kirk".into()), category_id: cat, is_subscription: true, is_transfer: false, expected_cadence: None, entity_id: None }).unwrap();
+        assert!(db.uncategorized_count(&[]).unwrap() < before);
+        db.reset_learning(&[]).unwrap();
+        assert!(db.rules().unwrap().is_empty());
+        let rows = db.transactions(&TxFilter::default()).unwrap();
+        assert!(rows.iter().all(|t| !t.is_subscription && (t.transfer_peer.is_some() || t.category_id.is_none())));
+        assert!(rows.iter().any(|t| t.transfer_peer.is_some()), "transfer pairs survive");
+        assert!(db.uncategorized_count(&[]).unwrap() >= before);
     }
 
     #[test]

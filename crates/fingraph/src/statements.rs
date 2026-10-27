@@ -176,6 +176,10 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
             match scanned {
                 Ok((scan, sha)) => match a.db.import_scan(entity, &name, &sha, &scan) {
                     Ok(rep) => {
+                        // kept so the statement can be rescanned after a scanner or profile change
+                        if let Err(e) = db::keep_pdf(&p, &sha) {
+                            a.toast(&format!("{name}: couldn't keep a copy for rescanning ({e})"));
+                        }
                         files += 1;
                         inserted += rep.inserted;
                         reconciled += scan.is_reconciled() as usize;
@@ -212,6 +216,53 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
             }
         }
     });
+}
+
+/// Re-read every statement with the current scanner and profiles, after asking.
+pub fn rescan_all(app: &Rc<App>) {
+    let d = adw::AlertDialog::new(
+        Some("Rescan All Statements?"),
+        Some("Every statement is read again with the current scanner and bank profiles. Learned rules are re-applied, but categories you set by hand on single transactions are lost."),
+    );
+    d.add_responses(&[("cancel", "Cancel"), ("go", "Rescan")]);
+    d.set_response_appearance("go", adw::ResponseAppearance::Suggested);
+    let w = Rc::downgrade(app);
+    d.connect_response(None, move |_, r| {
+        let Some(a) = w.upgrade() else { return };
+        if r != "go" {
+            return;
+        }
+        let files = a.db.statement_files().unwrap_or_default();
+        let profiles = a.db.profiles().unwrap_or_default();
+        let w = Rc::downgrade(&a);
+        glib::spawn_future_local(async move {
+            let (mut n, mut txs, mut missing) = (0, 0, Vec::new());
+            for (sha, name, entity) in files {
+                let Some(path) = db::stored_pdf(&sha, &name) else {
+                    missing.push(name);
+                    continue;
+                };
+                let profiles = profiles.clone();
+                let scan = gio::spawn_blocking(move || MultiPassScanner::new(&profiles).scan_pdf(&path).map_err(|e| e.to_string())).await.unwrap_or_else(|_| Err("scanner crashed".into()));
+                let Some(a) = w.upgrade() else { return };
+                match scan.and_then(|s| a.db.replace_statement(entity, &name, &sha, &s).map_err(|e| e.to_string())) {
+                    Ok(rep) => {
+                        n += 1;
+                        txs += rep.inserted;
+                    }
+                    Err(e) => a.toast(&format!("{name}: {e}")),
+                }
+            }
+            let Some(a) = w.upgrade() else { return };
+            a.reload_entities();
+            let mut msg = format!("Rescanned {n} statements · {txs} transactions");
+            if !missing.is_empty() {
+                msg += &format!(" · {} not found (re-import them)", missing.len());
+            }
+            a.toast(&msg);
+        });
+    });
+    d.present(Some(&app.win));
 }
 
 #[cfg(debug_assertions)]

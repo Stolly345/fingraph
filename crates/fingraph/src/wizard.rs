@@ -259,7 +259,17 @@ pub fn onboarding(app: &Rc<App>) {
 const QUICK: [&str; 10] = ["Groceries", "Dining & Takeaway", "Utilities", "Shopping", "Transport", "Repairs & Maintenance", "Property Expense", "Health & Fitness", "Bank Fees & Interest", "Income"];
 
 fn total_text(g: &TriageGroup) -> String {
-    g.totals.iter().map(|(c, v)| fmt_money(-*v, *c)).collect::<Vec<_>>().join(" + ")
+    g.totals.iter().map(|(c, v)| fmt_money(v.abs(), *c)).collect::<Vec<_>>().join(" + ")
+}
+
+/// "4 payments of CI$ 125.00 (CI$ 500.00 in all)", or for varying amounts "3 payments totaling … (latest …)".
+fn amounts_text(g: &TriageGroup) -> String {
+    let typical = fmt_money(g.typical_amount.abs(), g.currency);
+    match (g.count, g.same_amount) {
+        (1, _) => format!("1 payment of {typical}"),
+        (n, true) => format!("{n} payments of {typical} each ({} in all)", total_text(g)),
+        (n, false) => format!("{n} payments totaling {} (latest {typical})", total_text(g)),
+    }
 }
 
 fn cadence_word(days: Option<i64>) -> &'static str {
@@ -271,6 +281,32 @@ fn cadence_word(days: Option<i64>) -> &'static str {
         Some(365) => "/yr",
         _ => "",
     }
+}
+
+/// Forget triage answers and manual categories in the workspaces on screen, then start triage again.
+pub fn reset_and_retriage(app: &Rc<App>) {
+    let d = adw::AlertDialog::new(
+        Some("Reset Learning?"),
+        Some("Every learned rule, category, payee name and subscription flag in the workspaces you're viewing is forgotten, and Smart Triage starts over. Transfers matched between your own accounts stay matched. Your statements aren't touched."),
+    );
+    d.add_responses(&[("cancel", "Cancel"), ("reset", "Reset & Re-triage")]);
+    d.set_response_appearance("reset", adw::ResponseAppearance::Destructive);
+    let w = Rc::downgrade(app);
+    d.connect_response(None, move |_, r| {
+        let Some(a) = w.upgrade() else { return };
+        if r != "reset" {
+            return;
+        }
+        match a.db.reset_learning(&a.entity_ids()) {
+            Ok(n) => {
+                a.toast(&format!("Forgotten — {n} transactions are back in triage"));
+                a.refresh();
+                triage(&a);
+            }
+            Err(e) => a.toast(&e.to_string()),
+        }
+    });
+    d.present(Some(&app.win));
 }
 
 pub fn triage(app: &Rc<App>) {
@@ -376,8 +412,8 @@ fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn()>, 
     let esc = |s: &str| glib::markup_escape_text(s).to_string();
     q.set_markup(&match g.kind {
         TriageKind::Subscription => format!("We found {} {plural} from <tt>{}</tt> ({typical}{}). Is <b>{}</b> a <b>Subscription</b>?", g.count, esc(&g.stem), cadence_word(g.cadence), esc(&g.suggested_payee)),
-        TriageKind::Transfer => format!("We found <tt>{}</tt> ({}). Is this an internal credit card payment or transfer between your accounts?", esc(&g.stem), esc(&total_text(g))),
-        TriageKind::Merchant => format!("We found {} {plural} from <tt>{}</tt> totaling {}. How should we categorize <b>{}</b>?", g.count, esc(&g.stem), esc(&total_text(g)), esc(&g.suggested_payee)),
+        TriageKind::Transfer => format!("We found {} to <tt>{}</tt>. Is this an internal credit card payment or transfer between your accounts?", esc(&amounts_text(g)), esc(&g.stem)),
+        TriageKind::Merchant => format!("We found {} from <tt>{}</tt>. How should we categorize <b>{}</b>?", esc(&amounts_text(g)), esc(&g.stem), esc(&g.suggested_payee)),
     });
     content.append(&q);
     content.append(&dim(&format!("Latest: {}", g.sample)));

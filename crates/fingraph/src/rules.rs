@@ -16,7 +16,11 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let subs = adw::PreferencesGroup::builder().title("Subscriptions").description("Recurring charges you've marked (or the wizard detected), costed in the display currency.").build();
     let rules = adw::PreferencesGroup::builder().title("Learned Rules").description("Applied to every new statement. Workspace rules beat global ones; newer beat older.").build();
     let add = gtk::Button::builder().icon_name("list-add-symbolic").tooltip_text("New rule").css_classes(["flat"]).build();
-    rules.set_header_suffix(Some(&add));
+    let suffix = gtk::Box::builder().spacing(6).build();
+    suffix.append(&gtk::Button::builder().label("Reset & Re-triage…").css_classes(["flat"]).action_name("win.retriage").build());
+    suffix.append(&gtk::Button::builder().label("Rescan…").css_classes(["flat"]).action_name("win.rescan").build());
+    suffix.append(&add);
+    rules.set_header_suffix(Some(&suffix));
     page.add(&subs);
     page.add(&rules);
     let sub_rows: Rc<std::cell::RefCell<Vec<gtk::Widget>>> = Default::default();

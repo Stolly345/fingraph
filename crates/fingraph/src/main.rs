@@ -88,6 +88,8 @@ impl App {
         let menu = gio::Menu::new();
         let s1 = gio::Menu::new();
         s1.append(Some("Import Statements…"), Some("win.import"));
+        s1.append(Some("Rescan All Statements…"), Some("win.rescan"));
+        s1.append(Some("Reset Learning & Re-triage…"), Some("win.retriage"));
         s1.append(Some("Load Demo Data (Cayman Personal + Business across Butterfield, Scotiabank, CNB, RBC & Credit Union)"), Some("win.demo"));
         menu.append_section(None, &s1);
         let s2 = gio::Menu::new();
@@ -254,6 +256,8 @@ impl App {
             }),
         );
         add("workspaces", Rc::new(wizard::workspaces_dialog));
+        add("rescan", Rc::new(statements::rescan_all));
+        add("retriage", Rc::new(wizard::reset_and_retriage));
         add("fx", Rc::new(|a| a.fx_dialog()));
         add("welcome", Rc::new(wizard::onboarding));
         add(
