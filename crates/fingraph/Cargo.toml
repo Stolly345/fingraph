@@ -1,0 +1,36 @@
+[package]
+name = "fingraph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Local-first ledger and statement scanner for Cayman bank statements"
+
+[dependencies]
+fingraph-core = { path = "../fingraph-core" }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_6"] }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rust_decimal = "1"
+
+[package.metadata.deb]
+name = "fingraph"
+maintainer = "Alex Stoll <alexander.stoll13@gmail.com>"
+copyright = "2026, Alex Stoll"
+extended-description = """\
+FinGraph reads PDF bank statements from the Cayman banks (Butterfield, Scotiabank, \
+Cayman National, RBC and the CICSA Credit Union) with a five-pass scanner that \
+proves every statement against its own running and closing balances, learns your \
+merchants through Smart Triage, and charts income, spending, subscriptions and \
+bank fees across personal and business workspaces in KYD and USD. Everything \
+stays in ~/.local/share/fingraph; nothing is sent anywhere."""
+section = "utils"
+priority = "optional"
+# pdftotext -bbox gives the scanner every word with its position
+depends = "$auto, poppler-utils"
+assets = [
+    ["target/release/fingraph", "usr/bin/", "755"],
+    ["../../packaging/dev.fingraph.FinGraph.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/dev.fingraph.FinGraph.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../README.md", "usr/share/doc/fingraph/README.md", "644"],
+]
