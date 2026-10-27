@@ -59,9 +59,25 @@ pub struct Rule {
     /// Matching payments are business expenses of this workspace.
     #[serde(default)]
     pub business_entity_id: Option<i64>,
+    /// Only when the amount (either sign) is at least / at most this: "Adriana, CI$ 125.00 only".
+    #[serde(default)]
+    pub amount_min: Option<Decimal>,
+    #[serde(default)]
+    pub amount_max: Option<Decimal>,
 }
 
 impl Rule {
+    /// Inside the rule's amount range (no range = any amount).
+    pub fn amount_ok(&self, amount: Decimal) -> bool {
+        let a = amount.abs();
+        self.amount_min.is_none_or(|m| a >= m) && self.amount_max.is_none_or(|m| a <= m)
+    }
+
+    /// Text and amount both match.
+    pub fn applies(&self, raw: &str, memo: &str, amount: Decimal) -> bool {
+        self.amount_ok(amount) && self.matches(raw, memo)
+    }
+
     pub fn matches(&self, raw: &str, memo: &str) -> bool {
         match self.kind {
             RuleKind::NormalizedTokens => {
@@ -128,9 +144,9 @@ pub fn regex_ok(pattern: &str) -> bool {
 }
 
 /// First matching rule; workspace-specific rules beat global ones, newer beat older.
-pub fn first_match<'a>(rules: &'a [Rule], entity_id: i64, raw: &str, memo: &str) -> Option<&'a Rule> {
-    let scoped = rules.iter().rev().filter(|r| r.entity_id == Some(entity_id)).find(|r| r.matches(raw, memo));
-    scoped.or_else(|| rules.iter().rev().filter(|r| r.entity_id.is_none()).find(|r| r.matches(raw, memo)))
+pub fn first_match<'a>(rules: &'a [Rule], entity_id: i64, raw: &str, memo: &str, amount: Decimal) -> Option<&'a Rule> {
+    let scoped = rules.iter().rev().filter(|r| r.entity_id == Some(entity_id)).find(|r| r.applies(raw, memo, amount));
+    scoped.or_else(|| rules.iter().rev().filter(|r| r.entity_id.is_none()).find(|r| r.applies(raw, memo, amount)))
 }
 
 /// Bank transaction-type labels that say nothing about the merchant (Scotiabank prints the merchant
@@ -422,6 +438,10 @@ mod tests {
         let r = Rule { pattern: c.clone(), category_id: Some(17), ..Default::default() };
         assert!(r.matches("POS PURCHASE", "PAYPAL *DISCOVERYDI HELP.4029357733 US"));
         assert!(r.matches("POS PURCHASE", "PAYPAL *DISCOVERYDI HEL 4029357733 US"));
+        // a rule for one Amazon service doesn't capture the others
+        let pv = Rule { pattern: "PRIME VIDEO CHANNELS".into(), ..Default::default() };
+        assert!(!pv.matches("AMAZON DIGITAL SVCS, AMZN.COM/BILL", ""));
+        assert!(!pv.matches("AUDIBLE*E47R01203, AMZN.COM/BILL", ""));
         assert!(!r.matches("POS PURCHASE", "KIRK MARKET"));
         // and triage asks once
         let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
@@ -435,7 +455,7 @@ mod tests {
 
     #[test]
     fn rules_match_on_stems() {
-        let r = Rule { id: 1, kind: RuleKind::NormalizedTokens, pattern: "FOSTER'S FOOD FAIR".into(), clean_payee: None, category_id: Some(3), is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None };
+        let r = Rule { id: 1, kind: RuleKind::NormalizedTokens, pattern: "FOSTER'S FOOD FAIR".into(), clean_payee: None, category_id: Some(3), is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None, ..Default::default() };
         assert!(r.matches("POS PURCHASE", "FOSTER'S FOOD FAIR #12 CAMANA BAY"));
         assert!(!r.matches("POS PURCHASE", "KIRK MARKET"));
     }

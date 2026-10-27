@@ -39,6 +39,19 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         .description("PDF statements from Butterfield, Scotiabank, Cayman National, RBC or the CICSA Credit Union. Each is read five times over and checked against its own balances.")
         .build();
     body.append(&drop_hint);
+    // coverage: one glance tells you which statement you forgot to download
+    let cov_card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).css_classes(["card", "chart-card"]).build();
+    let cov_head = gtk::Box::builder().spacing(8).build();
+    let cov_title = crate::heading("Statement Coverage");
+    cov_title.set_hexpand(true);
+    cov_head.append(&cov_title);
+    cov_head.append(&gtk::Label::builder().label("● verified   ◐ doesn't balance   ○ missing   · before the account's first statement").css_classes(["dim-label", "caption"]).build());
+    cov_card.append(&cov_head);
+    let cov_grid = gtk::Grid::builder().column_spacing(6).row_spacing(4).build();
+    cov_card.append(&cov_grid);
+    let cov_breaks = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).build();
+    cov_card.append(&cov_breaks);
+    body.append(&cov_card);
     body.append(&list);
     let page = gtk::ScrolledWindow::builder().child(&adw::Clamp::builder().maximum_size(1100).child(&body).build()).vexpand(true).build();
 
@@ -64,6 +77,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             });
             list.remove_all();
             let docs = a.db.documents(&a.entity_ids()).unwrap_or_default();
+            fill_coverage(&a, &cov_grid, &cov_breaks);
+            cov_card.set_visible(!docs.is_empty());
             drop_hint.set_visible(docs.is_empty());
             list.set_visible(!docs.is_empty());
             for d in docs {
@@ -115,6 +130,42 @@ fn doc_row(app: &Rc<App>, d: &DocumentRow) -> adw::ActionRow {
         });
     }
     row
+}
+
+/// Account × month dots for the last twelve months, then any break in the chain of balances.
+fn fill_coverage(app: &Rc<App>, grid: &gtk::Grid, breaks: &gtk::Box) {
+    use fingraph_core::workflows::MonthState;
+    while let Some(c) = grid.first_child() {
+        grid.remove(&c);
+    }
+    crate::clear(breaks);
+    let cov = app.db.coverage(&app.entity_ids(), 12, crate::today()).unwrap_or_default();
+    if let Some(first) = cov.first() {
+        for (i, (m, _)) in first.months.iter().enumerate() {
+            grid.attach(&gtk::Label::builder().label(m.format("%b").to_string()).css_classes(["caption", "dim-label"]).width_chars(4).build(), i as i32 + 1, 0, 1, 1);
+        }
+    }
+    for (r, c) in cov.iter().enumerate() {
+        let row = r as i32 + 1;
+        let name = gtk::Label::builder().label(&c.account).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(34).build();
+        grid.attach(&name, 0, row, 1, 1);
+        for (i, (m, s)) in c.months.iter().enumerate() {
+            let (glyph, class, what) = match s {
+                MonthState::Verified => ("●", "amount-in", "statement present and verified to the cent"),
+                MonthState::Discrepancy => ("◐", "warning", "statement present but it doesn't balance (see its Scan Pass Report)"),
+                MonthState::Missing => ("○", "error", "no statement — download it from your bank and drop it here"),
+                MonthState::Pending => ("·", "dim-label", "this month: the statement isn't out yet"),
+                MonthState::Before => ("·", "dim-label", "before this account's first statement"),
+            };
+            let l = gtk::Label::builder().label(glyph).css_classes([class, "heading"]).tooltip_text(format!("{} {}: {what}", c.account, m.format("%B %Y"))).build();
+            grid.attach(&l, i as i32 + 1, row, 1, 1);
+        }
+    }
+    for c in &cov {
+        for b in &c.breaks {
+            breaks.append(&gtk::Label::builder().label(format!("⚠ {} — {b}", c.account)).xalign(0.0).wrap(true).css_classes(["warning", "caption"]).build());
+        }
+    }
 }
 
 pub fn choose_files(app: &Rc<App>) {

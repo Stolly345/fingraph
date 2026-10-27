@@ -139,14 +139,21 @@ pub fn parse_period(text: &str, order: Order) -> Option<(NaiveDate, NaiveDate)> 
         return None;
     }
     let ctx0 = DateCtx { order, period: None, fallback_year: 2000 };
-    let (_, _, last) = found[found.len() - 1];
     let has_year = |p: &Partial| !matches!(p, Partial::Named { year: None, .. } | Partial::Numeric { year: None, .. });
-    if !has_year(&last) {
+    // the pair written as a range ("May 16 - Jun 15, 2026", "15AUG26 to 15SEP26") beats whatever date
+    // comes after it on the line (a "pay by" date)
+    let joined = |i: usize| {
+        let between = text[found[i].1..found[i + 1].0].trim().to_lowercase();
+        matches!(between.as_str(), "-" | "–" | "—" | "to" | "through" | "thru" | "until")
+    };
+    let i = (0..found.len() - 1).rev().find(|&i| joined(i) && has_year(&found[i + 1].2)).unwrap_or(found.len() - 2);
+    let (start_p, end_p) = (found[i].2, found[i + 1].2);
+    if !has_year(&end_p) {
         return None;
     }
-    let end = resolve(last, &ctx0)?;
+    let end = resolve(end_p, &ctx0)?;
     let ctx = DateCtx { order, period: Some((end - Duration::days(400), end)), fallback_year: end.year() };
-    let start = resolve(found[found.len() - 2].2, &ctx)?;
+    let start = resolve(start_p, &ctx)?;
     (start <= end && (end - start).num_days() <= 370).then_some((start, end))
 }
 
@@ -193,5 +200,7 @@ mod tests {
         assert_eq!(parse_period("Aug 17 - Sep 15, 2026", Order::DayFirst), Some((ymd(2026, 8, 17), ymd(2026, 9, 15))));
         assert_eq!(parse_period("Dec 16 - Jan 15, 2026", Order::DayFirst), Some((ymd(2025, 12, 16), ymd(2026, 1, 15))));
         assert_eq!(parse_period("01/08/2026 to 31/08/2026", Order::DayFirst), Some((ymd(2026, 8, 1), ymd(2026, 8, 31))));
+        // the pay-by date after the period isn't its end
+        assert_eq!(parse_period("***********3575 May 16 - Jun 15, 2026 July 10, 2026 2 of 5", Order::DayFirst), Some((ymd(2026, 5, 16), ymd(2026, 6, 15))));
     }
 }

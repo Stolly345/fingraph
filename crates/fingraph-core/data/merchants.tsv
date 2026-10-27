@@ -4,6 +4,8 @@
 # by |. When several entries match, the one with the longest keyword wins, so
 # "FOSTERS PHARMACY" beats "FOSTERS". Categories must exist in FinGraph's category list.
 # `fallback` marks a payment platform (GOOGLE, APPLE.COM/BILL): it applies only when no other entry matches.
+# One entry per service: entries are treated as one merchant across spellings, so a rule for one
+# applies to every keyword in its entry.
 # Never add a generic word on its own (MARKET, CAYMAN, GRILL, CAMANA BAY): it would catch other merchants.
 
 # ── Groceries & liquor
@@ -92,7 +94,11 @@ SPORTS SUPREMO	Sports Supremo	Shopping
 
 # ── Amazon: the store is shopping, its digital services are subscriptions
 AMAZON|AMZN|AMAZON COM|AMZN COM|AMAZON MKTPL|AMZN MKTP|AMAZON MKTPLACE|AMAZON MARKETPLACE	Amazon	Online Shopping
-AMAZON DIGIT|AMAZON DIGITAL|AMZN DIGITAL|AMAZON DIGITAL SVCS|AMAZON PRIME|AMZN PRIME|PRIME VIDEO|KINDLE|AUDIBLE	Amazon Digital	Subscriptions & Digital
+AMAZON DIGIT|AMAZON DIGITAL|AMZN DIGITAL|AMAZON DIGITAL SVCS	Amazon Digital	Subscriptions & Digital
+AMAZON PRIME|AMZN PRIME|PRIME MEMBERSHIP	Amazon Prime	Subscriptions & Digital
+PRIME VIDEO|PRIMEVIDEO	Prime Video	Subscriptions & Digital
+KINDLE|KINDLE UNLTD|KINDLE UNLIMITED	Kindle	Subscriptions & Digital
+AUDIBLE	Audible	Subscriptions & Digital
 
 # ── Pets
 ISLAND VETERINARY|ISLAND VET	Island Veterinary Services	Vet
@@ -436,12 +442,19 @@ CVS|CVS PHARMACY	CVS	Pharmacy
 WALGREENS	Walgreens	Pharmacy
 IHERB	iHerb	Health & Fitness
 VITACOST	Vitacost	Health & Fitness
-MYUS|MYUS COM	MyUS (shipping)	Online Shopping
-SHIPITO	Shipito	Online Shopping
-ARAMEX	Aramex	Online Shopping
-FEDEX	FedEx	Online Shopping
-UPS STORE|UPS COM	UPS	Online Shopping
-DHL	DHL	Online Shopping
+MYUS|MYUS COM	MyUS	Shipping & Freight
+SHIPITO	Shipito	Shipping & Freight
+ARAMEX	Aramex	Shipping & Freight
+FEDEX	FedEx	Shipping & Freight
+UPS STORE|UPS COM	UPS	Shipping & Freight
+DHL	DHL	Shipping & Freight
+TROPICAL SHIPPING|TROPICAL SHIP	Tropical Shipping	Shipping & Freight
+AEROPOST	Aeropost	Shipping & Freight
+CARIBEX	Caribex	Shipping & Freight
+HYDE SHIPPING	Hyde Shipping	Shipping & Freight
+SEABOARD MARINE|SEABOARD	Seaboard Marine	Shipping & Freight
+CROWLEY	Crowley	Shipping & Freight
+CAYMAN FREIGHT	Cayman Freight Services	Shipping & Freight
 SHOPIFY	Shopify store	Online Shopping
 SQUARESPACE	Squarespace	Subscriptions & Digital
 WIX COM|WIX	Wix	Subscriptions & Digital

@@ -15,6 +15,8 @@ use crate::App;
 
 thread_local! {
     static SEARCH: RefCell<Option<gtk::SearchEntry>> = const { RefCell::new(None) };
+    /// For cell buttons built in factory callbacks that have no app at hand.
+    static APP: RefCell<Option<std::rc::Weak<App>>> = const { RefCell::new(None) };
     /// An account picked in the sidebar, applied to the account filter on the next refresh.
     static PENDING_ACCOUNT: std::cell::Cell<Option<Option<i64>>> = const { std::cell::Cell::new(None) };
 }
@@ -52,7 +54,7 @@ fn category_choices(cats: &[Category]) -> (Vec<String>, Vec<Option<i64>>) {
 /// Offer to turn a manual edit into a learned rule for this merchant.
 fn offer_rule(app: &Rc<App>, t: &TxRow, category_id: Option<i64>, payee: Option<String>, what: &str) {
     let stem = merchant_stem(&t.raw_description, &t.memo);
-    let rule = Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: stem.clone(), clean_payee: payee, category_id, is_subscription: t.is_subscription, is_transfer: false, expected_cadence: None, entity_id: if app.db.prefs().rules_all_workspaces { None } else { Some(t.entity_id) }, business_entity_id: None };
+    let rule = Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: stem.clone(), clean_payee: payee, category_id, is_subscription: t.is_subscription, is_transfer: false, expected_cadence: None, entity_id: if app.db.prefs().rules_all_workspaces { None } else { Some(t.entity_id) }, business_entity_id: None, ..Default::default() };
     app.toast_action(
         &format!("Remember: {what} for every “{stem}”?"),
         "Remember",
@@ -72,6 +74,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let table = gtk::ColumnView::builder().model(&selection).css_classes(["data-table"]).show_row_separators(true).reorderable(false).build();
     let search = gtk::SearchEntry::builder().placeholder_text("Search payee, description, memo, tag or amount (Ctrl+F)").hexpand(true).build();
     SEARCH.with(|s| *s.borrow_mut() = Some(search.clone()));
+    APP.with(|x| *x.borrow_mut() = Some(Rc::downgrade(app)));
     let account_dd = gtk::DropDown::builder().tooltip_text("Account").build();
     let category_dd = gtk::DropDown::builder().tooltip_text("Category").build();
     let account_ids: Rc<RefCell<Vec<Option<i64>>>> = Rc::new(RefCell::new(vec![None]));
@@ -91,14 +94,20 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let cat_pop = gtk::Popover::builder().child(&gtk::ScrolledWindow::builder().child(&cat_menu_box).min_content_height(320).propagate_natural_width(true).build()).build();
     let bulk_cat = gtk::MenuButton::builder().label("Categorize").popover(&cat_pop).build();
     let bulk_tag = gtk::Button::with_label("Tag…");
-    let bulk_sub = gtk::Button::with_label("Mark Subscription");
-    let bulk_biz = gtk::Button::with_label("Business Expense");
-    let bulk_unlink = gtk::Button::with_label("Not a Transfer");
+    let bulk_sub = gtk::Button::builder().label("Subscription").tooltip_text("Mark as a subscription").build();
+    let bulk_biz = gtk::Button::builder().label("Business").tooltip_text("Flag as a business expense paid from this account").build();
+    let one_split = gtk::Button::builder().icon_name("edit-cut-symbolic").tooltip_text("Split one transaction across categories / workspaces").build();
+    let one_attach = gtk::Button::builder().icon_name("mail-attachment-symbolic").tooltip_text("Attach a receipt or invoice (or drop a file on the row)").build();
+    let one_rule = gtk::Button::builder().label("Rule…").tooltip_text("A rule from this transaction: by its words or reference number, optionally only for this amount").build();
+    let bulk_unlink = gtk::Button::builder().label("Not Transfer").tooltip_text("Not a transfer between your own accounts").build();
     let bulk_del = gtk::Button::builder().icon_name("user-trash-symbolic").tooltip_text("Delete selected").css_classes(["destructive-action"]).build();
     bar.pack_end(&bulk_del);
     bar.pack_end(&bulk_unlink);
     bar.pack_end(&bulk_sub);
     bar.pack_end(&bulk_biz);
+    bar.pack_end(&one_rule);
+    bar.pack_end(&one_attach);
+    bar.pack_end(&one_split);
     bar.pack_end(&bulk_tag);
     bar.pack_end(&bulk_cat);
     bar.pack_end(&summary);
@@ -138,7 +147,11 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     col(
         "Date",
         false,
-        Box::new(move |item| item.set_child(Some(&label()))),
+        Box::new(move |item| {
+            let l = label();
+            l.set_width_chars(11);
+            item.set_child(Some(&l));
+        }),
         Box::new(|item, t| {
             let l = item.child().and_downcast::<gtk::Label>().unwrap();
             l.set_label(&t.posted.format("%d %b %Y").to_string());
@@ -180,17 +193,30 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     col(
         "Description",
         true,
-        Box::new(move |item| {
-            let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
-            b.append(&label());
-            let memo = label();
-            memo.add_css_class("dim-label");
-            memo.add_css_class("caption");
-            b.append(&memo);
-            item.set_child(Some(&b));
+        Box::new({
+            let w = Rc::downgrade(app);
+            move |item| {
+                let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+                b.append(&label());
+                let memo = label();
+                memo.add_css_class("dim-label");
+                memo.add_css_class("caption");
+                b.append(&memo);
+                // drop a receipt or invoice onto the row to attach it
+                let drop = gtk::DropTarget::new(gtk::gdk::FileList::static_type(), gtk::gdk::DragAction::COPY);
+                let (w, b2) = (w.clone(), b.clone());
+                drop.connect_drop(move |_, v, _, _| {
+                    let (Some(a), Ok(files), Ok(id)) = (w.upgrade(), v.get::<gtk::gdk::FileList>(), b2.widget_name().parse::<i64>()) else { return false };
+                    crate::split::attach_paths(&a, id, files.files().iter().filter_map(|f| f.path()).collect());
+                    true
+                });
+                b.add_controller(drop);
+                item.set_child(Some(&b));
+            }
         }),
         Box::new(|item, t| {
             let b = item.child().and_downcast::<gtk::Box>().unwrap();
+            b.set_widget_name(&t.id.to_string());
             let l = b.first_child().and_downcast::<gtk::Label>().unwrap();
             let m = l.next_sibling().and_downcast::<gtk::Label>().unwrap();
             l.set_label(&t.raw_description);
@@ -364,6 +390,19 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             if t.is_subscription {
                 b.append(&icon("starred-symbolic", "Subscription"));
             }
+            if t.splits > 0 {
+                b.append(&icon("edit-cut-symbolic", &format!("Split into {} lines (select it and press ✂ to change)", t.splits)));
+            }
+            if t.attachments > 0 {
+                let clip = gtk::Button::builder().icon_name("mail-attachment-symbolic").tooltip_text(format!("{} receipt{} attached — click to open", t.attachments, if t.attachments == 1 { "" } else { "s" })).css_classes(["flat", "circular"]).build();
+                let id = t.id;
+                clip.connect_clicked(move |btn| {
+                    if let Some(a) = APP.with(|x| x.borrow().as_ref().and_then(|w| w.upgrade())) {
+                        crate::split::open_attachments(&a, id, btn.upcast_ref());
+                    }
+                });
+                b.append(&clip);
+            }
         }),
     );
 
@@ -439,6 +478,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     category_id: cat_filter.filter(|c| *c > 0),
                     uncategorized_only: cat_filter == Some(-1),
                     search: search.text().to_string(),
+                    split_lines: false,
                 })
                 .unwrap_or_default();
             let focus = a.focus_ids.borrow().clone();
@@ -556,6 +596,56 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 }
             });
             d.present(Some(&a.win));
+        });
+    }
+    // one-transaction actions
+    let only_one = {
+        let sr = selected_rows.clone();
+        let w = Rc::downgrade(app);
+        Rc::new(move || -> Option<(Rc<App>, TxRow)> {
+            let a = w.upgrade()?;
+            let rows = sr();
+            if rows.len() != 1 {
+                a.toast("Select one transaction");
+                return None;
+            }
+            Some((a, rows[0].clone()))
+        })
+    };
+    {
+        let o = only_one.clone();
+        one_split.connect_clicked(move |_| {
+            if let Some((a, t)) = o() {
+                crate::split::dialog(&a, t.id);
+            }
+        });
+    }
+    {
+        let o = only_one.clone();
+        one_attach.connect_clicked(move |_| {
+            if let Some((a, t)) = o() {
+                crate::split::choose_attachment(&a, t.id);
+            }
+        });
+    }
+    {
+        let o = only_one.clone();
+        one_rule.connect_clicked(move |_| {
+            let Some((a, t)) = o() else { return };
+            // start from the most specific text the row has: a reference number when there is one
+            let words: Vec<&str> = t.memo.split(|c: char| c == '|' || c.is_whitespace()).collect();
+            let reference = words.iter().find(|w| w.len() >= 6 && w.chars().all(|c| c.is_ascii_digit())).map(|s| s.to_string());
+            let rule = Rule {
+                kind: if reference.is_some() { RuleKind::Substring } else { RuleKind::NormalizedTokens },
+                pattern: reference.unwrap_or_else(|| merchant_stem(&t.raw_description, &t.memo)),
+                clean_payee: Some(t.clean_payee.clone()),
+                category_id: t.category_id,
+                amount_min: Some(t.amount.abs()),
+                amount_max: Some(t.amount.abs()),
+                entity_id: Some(t.entity_id),
+                ..Default::default()
+            };
+            crate::rules::rule_dialog(&a, Some(rule));
         });
     }
     {

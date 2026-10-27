@@ -66,7 +66,20 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let r_pnl = adw::ActionRow::builder().title("P&amp;L by month and category (CSV)").subtitle("Transfers between your accounts excluded").activatable(true).build();
     r_pnl.add_suffix(&gtk::Image::from_icon_name("x-office-spreadsheet-symbolic"));
     reports.add(&r_pnl);
+    let r_bundle = adw::ActionRow::builder()
+        .title("P&amp;L with receipts")
+        .subtitle("A folder holding the P&amp;L and every attached receipt, named by date, payee and amount — for your accountant")
+        .activatable(true)
+        .build();
+    r_bundle.add_suffix(&gtk::Image::from_icon_name("folder-documents-symbolic"));
+    reports.add(&r_bundle);
     page.add(&reports);
+    let projects = adw::PreferencesGroup::builder()
+        .title("Projects &amp; Landed Cost")
+        .description("Everything sharing a tag, whatever account paid: a renovation, a vehicle, or an online order with its freight and customs duty. Tag in Transactions (or on a split line).")
+        .build();
+    page.add(&projects);
+    let project_rows: Rc<RefCell<Vec<gtk::Widget>>> = Default::default();
     let summary = adw::PreferencesGroup::builder().title("Summary for the Range").build();
     page.add(&summary);
     let summary_rows: Rc<RefCell<Vec<adw::ActionRow>>> = Default::default();
@@ -89,8 +102,45 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         })
     };
 
+    // reports count split lines in their own categories and workspaces; files to import elsewhere keep statement rows
+    let lines_for = {
+        let selected = selected.clone();
+        Rc::new(move |a: &Rc<App>| -> Vec<TxRow> {
+            let (from, to) = a.range();
+            a.db.transactions(&TxFilter { entity_ids: a.entity_ids(), from: Some(from), to: Some(to), account_id: selected().map(|x| x.id), split_lines: true, ..Default::default() })
+                .unwrap_or_default()
+                .into_iter()
+                .rev()
+                .collect()
+        })
+    };
+    {
+        let (w, lines_for) = (Rc::downgrade(app), lines_for.clone());
+        r_bundle.connect_activated(move |_| {
+            let Some(a) = w.upgrade() else { return };
+            let lines = lines_for(&a);
+            if lines.is_empty() {
+                return a.toast("Nothing in this range");
+            }
+            let (from, to) = a.range();
+            let fd = gtk::FileDialog::builder().title("Choose Where to Save the P&L Folder").modal(true).build();
+            let w = Rc::downgrade(&a);
+            fd.select_folder(Some(&a.win), gio::Cancellable::NONE, move |res| {
+                let (Some(a), Some(parent)) = (w.upgrade(), res.ok().and_then(|f| f.path())) else { return };
+                let dir = parent.join(format!("FinGraph P&L {from} to {to}"));
+                let pnl = export::pnl_csv(&lines, a.display(), &a.db.fx().unwrap_or_default());
+                let r = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("P&L.csv"), pnl)).map_err(|e| e.to_string()).and_then(|_| a.db.export_receipts(&lines, &dir.join("Receipts")).map_err(|e| e.to_string()));
+                match r {
+                    Ok(n) => a.toast(&format!("Saved the P&L and {n} receipt{} to {}", if n == 1 { "" } else { "s" }, dir.display())),
+                    Err(e) => a.toast(&format!("Couldn't save: {e}")),
+                }
+            });
+        });
+    }
+
     let go = {
         let w = Rc::downgrade(app);
+        let lines_for = lines_for.clone();
         let (selected, rows_for) = (selected.clone(), rows_for.clone());
         Rc::new(move |f: Format| {
             let Some(a) = w.upgrade() else { return };
@@ -105,7 +155,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             match (f, acct) {
                 (Format::Csv, _) => save(&a, &format!("{stem}.csv"), export::csv(&rows)),
                 (Format::Qif, _) => save(&a, &format!("{stem}.qif"), export::qif(&rows)),
-                (Format::Pnl, _) => save(&a, &format!("{stem}_pnl.csv"), export::pnl_csv(&rows, a.display(), &a.db.fx().unwrap_or_default())),
+                (Format::Pnl, _) => save(&a, &format!("{stem}_pnl.csv"), export::pnl_csv(&lines_for(&a), a.display(), &a.db.fx().unwrap_or_default())),
                 (Format::Ofx, Some(x)) => save(&a, &format!("{stem}.ofx"), export::ofx(&x, &rows)),
                 (Format::Qbo, Some(x)) => save(&a, &format!("{stem}.qbo"), export::qbo(&x, &rows)),
                 (_, None) => a.toast("Pick one account for OFX or QBO"),
@@ -131,7 +181,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
     let refresh: crate::Refresh = {
         let w = Rc::downgrade(app);
-        let (accounts, account, range, ident, bankid, bid, selected, rows_for, summary) = (accounts.clone(), account.clone(), range.clone(), ident.clone(), bankid.clone(), bid.clone(), selected.clone(), rows_for.clone(), summary.clone());
+        let (accounts, account, range, ident, bankid, bid, selected, summary) = (accounts.clone(), account.clone(), range.clone(), ident.clone(), bankid.clone(), bid.clone(), selected.clone(), summary.clone());
+        let (lines_for, projects) = (lines_for.clone(), projects.clone());
         let r_ofx = r_ofx.clone();
         let r_qbo = r_qbo.clone();
         let busy = Rc::new(std::cell::Cell::new(false));
@@ -162,9 +213,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             for r in summary_rows.borrow_mut().drain(..) {
                 summary.remove(&r);
             }
-            let rows = rows_for(&a);
+            let rows = lines_for(&a);
             let fx = a.db.fx().unwrap_or_default();
             let (from, to) = a.range();
+            fill_projects(&a, &projects, &project_rows);
             let k = insights::kpis(&rows, &[], from, to, a.display(), &fx, crate::today());
             let mut lines = vec![("Income".to_string(), a.money(k.income)), ("Expenses".to_string(), a.money(k.expenses)), ("Net".to_string(), a.money(k.net))];
             for (c, v) in insights::by_category(&rows, from, to, a.display(), &fx, &a.parents()).into_iter().take(8) {
@@ -184,4 +236,57 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         account.connect_selected_notify(move |_| r());
     }
     (page.upcast(), refresh)
+}
+
+/// Projects & Landed Cost: one row per tag across all time, its cost broken down by category, and
+/// a button to pull in untagged freight and customs duty that followed its purchases.
+fn fill_projects(a: &Rc<App>, group: &adw::PreferencesGroup, rows_kept: &Rc<RefCell<Vec<gtk::Widget>>>) {
+    for r in rows_kept.borrow_mut().drain(..) {
+        group.remove(&r);
+    }
+    let rows = a.db.transactions(&TxFilter { entity_ids: a.entity_ids(), split_lines: true, ..Default::default() }).unwrap_or_default();
+    let fx = a.db.fx().unwrap_or_default();
+    let list = insights::projects(&rows, a.display(), &fx);
+    if list.is_empty() {
+        let r = adw::ActionRow::builder().title("No tags yet").subtitle("Select transactions in Transactions → Tag…, e.g. “Unit 2 Renovation” or “Solar Install”").build();
+        group.add(&r);
+        rows_kept.borrow_mut().push(r.upcast());
+    }
+    for p in list {
+        let parts = p.parts.iter().take(4).map(|(c, v)| format!("{c} {}", a.money(*v))).collect::<Vec<_>>().join(" · ");
+        let r = adw::ActionRow::builder()
+            .title(glib::markup_escape_text(&p.tag))
+            .subtitle(glib::markup_escape_text(&format!("{} charge{} · {} – {}\n{parts}", p.count, if p.count == 1 { "" } else { "s" }, p.first.format("%d %b %Y"), p.last.format("%d %b %Y"))))
+            .subtitle_lines(3)
+            .build();
+        let candidates: Vec<i64> = insights::landed_cost_candidates(&rows, &p.tag).iter().map(|t| t.id).collect();
+        if !candidates.is_empty() {
+            let add = gtk::Button::builder()
+                .label(format!("Add {} freight & duty", candidates.len()))
+                .tooltip_text("Untagged shipping and customs charges up to six weeks after this project's purchases")
+                .valign(gtk::Align::Center)
+                .css_classes(["flat"])
+                .build();
+            let (w, tag, ids) = (Rc::downgrade(a), p.tag.clone(), candidates);
+            add.connect_clicked(move |_| {
+                if let Some(a) = w.upgrade() {
+                    let _ = a.db.set_tag(&ids, &tag);
+                    a.toast(&format!("Added {} charges to “{tag}”", ids.len()));
+                    a.refresh();
+                }
+            });
+            r.add_suffix(&add);
+        }
+        r.add_suffix(&gtk::Label::builder().label(a.money(p.total)).css_classes(["tnum", "heading"]).build());
+        let show = gtk::Button::builder().icon_name("go-next-symbolic").tooltip_text("Show these transactions").valign(gtk::Align::Center).css_classes(["flat"]).build();
+        let (w, ids) = (Rc::downgrade(a), p.tx_ids.clone());
+        show.connect_clicked(move |_| {
+            if let Some(a) = w.upgrade() {
+                a.show_transactions(ids.clone());
+            }
+        });
+        r.add_suffix(&show);
+        group.add(&r);
+        rows_kept.borrow_mut().push(r.upcast());
+    }
 }

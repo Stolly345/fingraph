@@ -132,6 +132,46 @@ ALTER TABLE learned_rules ADD COLUMN business_entity_id INTEGER REFERENCES entit
 "#, r#"
 -- closed accounts can be hidden from lists and charts; their history still counts
 ALTER TABLE accounts ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
+"#, r#"
+-- rules that only apply to some amounts ("Adriana, CI$ 125.00 only")
+ALTER TABLE learned_rules ADD COLUMN amount_min TEXT;
+ALTER TABLE learned_rules ADD COLUMN amount_max TEXT;
+-- one charge split over categories / workspaces (the A.L. Thompson's receipt): the statement row
+-- stays as printed for reconciliation, reports read the lines
+CREATE TABLE splits (
+    id INTEGER PRIMARY KEY,
+    transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    amount TEXT NOT NULL,
+    amount_minor INTEGER NOT NULL,
+    category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+    business_entity_id INTEGER REFERENCES entities(id) ON DELETE SET NULL,
+    tag TEXT NOT NULL DEFAULT '',
+    memo TEXT NOT NULL DEFAULT '',
+    UNIQUE (transaction_id, seq)
+);
+-- business spending you paid personally, settled by a later transfer; keyed by fingerprint so a
+-- rescan keeps it (split_seq -1 = the whole transaction)
+CREATE TABLE reimbursements (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    fitid TEXT NOT NULL,
+    split_seq INTEGER NOT NULL DEFAULT -1,
+    paid_account_id INTEGER NOT NULL,
+    paid_fitid TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (account_id, fitid, split_seq)
+);
+-- receipts and invoices; files live in attachments/ beside the ledger
+CREATE TABLE attachments (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    fitid TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    stored TEXT NOT NULL,
+    added_at TEXT NOT NULL
+);
+CREATE INDEX attachments_tx ON attachments(account_id, fitid);
 "#];
 
 /// (name, kind, children). Missing ones are added to existing ledgers on open; lists are shown A–Z.
@@ -159,7 +199,7 @@ const CATEGORIES: &[(&str, &str, &[&str])] = &[
     ("Property Expense", "Expense", &["Cleaning", "Landscaping", "Pest Control", "Pool Service", "Property Management"]),
     ("Repairs & Maintenance", "Expense", &[]),
     ("Savings & Investments", "Transfer", &[]),
-    ("Shopping", "Expense", &["Electronics", "Online Shopping"]),
+    ("Shopping", "Expense", &["Electronics", "Online Shopping", "Shipping & Freight"]),
     ("Subscriptions & Digital", "Expense", &[]),
     ("Transfers", "Transfer", &["Credit Card Payments"]),
     ("Transport", "Expense", &["Car Payment", "Fuel", "Parking", "Taxi & Rideshare", "Vehicle Maintenance"]),
@@ -262,6 +302,11 @@ pub struct TxRow {
     pub business_entity_id: Option<i64>,
     /// The workspace of the account it was paid from.
     pub account_entity_id: i64,
+    /// How many split lines the statement row has (0 = not split).
+    pub splits: i64,
+    /// Set on a reporting row that is one line of a split (see `TxFilter::split_lines`).
+    pub split_seq: Option<i64>,
+    pub attachments: i64,
 }
 
 impl TxRow {
@@ -280,6 +325,8 @@ pub struct TxFilter {
     pub category_id: Option<i64>,
     pub uncategorized_only: bool,
     pub search: String,
+    /// For reports: a split row becomes its lines, each in its own category and workspace.
+    pub split_lines: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -295,26 +342,26 @@ pub struct Db {
     pub conn: Connection,
 }
 
-fn dec(s: &str) -> Decimal {
+pub(crate) fn dec(s: &str) -> Decimal {
     Decimal::from_str(s).unwrap_or_default()
 }
 fn opt_dec(s: Option<String>) -> Option<Decimal> {
     s.and_then(|s| Decimal::from_str(&s).ok())
 }
-fn date(s: &str) -> NaiveDate {
+pub(crate) fn date(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap_or_default()
 }
-fn ccy(s: &str) -> Currency {
+pub(crate) fn ccy(s: &str) -> Currency {
     Currency::parse(s).unwrap_or(Currency::KYD)
 }
-fn cat_kind(s: &str) -> CategoryKind {
+pub(crate) fn cat_kind(s: &str) -> CategoryKind {
     match s {
         "Income" => CategoryKind::Income,
         "Transfer" => CategoryKind::Transfer,
         _ => CategoryKind::Expense,
     }
 }
-fn now() -> String {
+pub(crate) fn now() -> String {
     Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
@@ -335,7 +382,8 @@ pub fn file_sha256(path: &Path) -> Result<String> {
 
 const TX_SELECT: &str = "SELECT t.id, t.document_id, t.account_id, a.name, a.account_type, COALESCE(bp.short_name, ''), COALESCE(t.business_entity_id, a.entity_id), e.base_currency,
     t.posted_date, t.effective_date, t.raw_description, t.clean_payee, t.amount, t.currency, t.amount_in_entity_currency, t.running_balance_reported,
-    t.category_id, c.name, c.kind, t.sub_entity_tag, t.memo, t.fitid, t.is_recurring, t.is_subscription, t.transfer_peer_tx_id, t.review_status, t.business_entity_id, a.entity_id
+    t.category_id, c.name, c.kind, t.sub_entity_tag, t.memo, t.fitid, t.is_recurring, t.is_subscription, t.transfer_peer_tx_id, t.review_status, t.business_entity_id, a.entity_id,
+    (SELECT COUNT(*) FROM splits s WHERE s.transaction_id = t.id), (SELECT COUNT(*) FROM attachments x WHERE x.account_id = t.account_id AND x.fitid = t.fitid)
     FROM transactions t JOIN accounts a ON a.id = t.account_id JOIN entities e ON e.id = COALESCE(t.business_entity_id, a.entity_id)
     LEFT JOIN bank_profiles bp ON bp.id = a.bank_profile_id LEFT JOIN categories c ON c.id = t.category_id";
 
@@ -369,6 +417,9 @@ fn tx_row(r: &Row) -> rusqlite::Result<TxRow> {
         review: ReviewStatus::parse(&r.get::<_, String>(25)?),
         business_entity_id: r.get(26)?,
         account_entity_id: r.get(27)?,
+        splits: r.get(28)?,
+        split_seq: None,
+        attachments: r.get(29)?,
     })
 }
 
@@ -833,7 +884,7 @@ impl Db {
                 {
                     memo = format!("{memo}{}FX original {oc} {oa}", if memo.is_empty() { "" } else { " | " });
                 }
-                let rule = rules::first_match(&rules, entity_id, &t.description, &memo);
+                let rule = rules::first_match(&rules, entity_id, &t.description, &memo, t.amount);
                 let n = tx.execute(
                     "INSERT OR IGNORE INTO transactions (document_id, account_id, posted_date, effective_date, raw_description, clean_payee, amount, amount_minor, currency,
                      amount_in_entity_currency, amount_in_entity_minor, running_balance_reported, category_id, memo, fitid, is_subscription, review_status)
@@ -969,6 +1020,7 @@ impl Db {
             subscription: bool,
             confirmed: bool,
             manual: Option<(NaiveDate, String, Decimal, String)>,
+            splits: Vec<crate::workflows::SplitLine>,
         }
         let keep = self.prefs().rescan_keeps_edits;
         let kept: Vec<Kept> = if keep {
@@ -988,9 +1040,16 @@ impl Db {
                     subscription: r.get(6)?,
                     confirmed: r.get::<_, String>(7)? == "Confirmed",
                     manual: memo.starts_with("Converted from skipped line").then(|| (date(&r.get::<_, String>(8).unwrap_or_default()), r.get(9).unwrap_or_default(), dec(&r.get::<_, String>(10).unwrap_or_default()), memo.clone())),
+                    splits: Vec::new(),
                 })
             })?;
-            rows.collect::<rusqlite::Result<_>>()?
+            let mut v: Vec<Kept> = rows.collect::<rusqlite::Result<_>>()?;
+            for k in &mut v {
+                if let Some(id) = self.conn.query_row("SELECT id FROM transactions WHERE account_id = ?1 AND fitid = ?2", params![k.account, k.fitid], |r| r.get::<_, i64>(0)).optional()? {
+                    k.splits = self.splits(id)?;
+                }
+            }
+            v
         } else {
             Vec::new()
         };
@@ -1015,11 +1074,18 @@ impl Db {
                     params![id, k.category, k.payee, k.subscription],
                 )?;
             }
+            // "Mark Subscription" is a hand edit even on a row a rule filed
+            if k.subscription {
+                self.set_subscription(&[id], true)?;
+            }
             if !k.tag.is_empty() {
                 self.set_tag(&[id], &k.tag)?;
             }
             if k.business.is_some() {
                 self.set_business(&[id], k.business)?;
+            }
+            if !k.splits.is_empty() {
+                self.set_splits(id, &k.splits)?;
             }
         }
         self.recheck_documents(sha256)?;
@@ -1142,6 +1208,9 @@ impl Db {
     // ---------------------------------------------------------------- transactions
 
     pub fn transactions(&self, f: &TxFilter) -> Result<Vec<TxRow>> {
+        if f.split_lines {
+            return self.with_split_lines(f);
+        }
         let mut sql = format!("{TX_SELECT} WHERE 1=1");
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
         if !f.entity_ids.is_empty() {
@@ -1306,7 +1375,7 @@ impl Db {
     }
 
     pub fn rules(&self) -> Result<Vec<Rule>> {
-        let mut st = self.conn.prepare("SELECT id, kind, pattern, clean_payee, category_id, is_subscription, is_transfer, expected_cadence, entity_id, business_entity_id FROM learned_rules ORDER BY id")?;
+        let mut st = self.conn.prepare("SELECT id, kind, pattern, clean_payee, category_id, is_subscription, is_transfer, expected_cadence, entity_id, business_entity_id, amount_min, amount_max FROM learned_rules ORDER BY id")?;
         let rows = st.query_map([], |r| {
             Ok(Rule {
                 id: r.get(0)?,
@@ -1319,6 +1388,8 @@ impl Db {
                 expected_cadence: r.get(7)?,
                 entity_id: r.get(8)?,
                 business_entity_id: r.get(9)?,
+                amount_min: opt_dec(r.get(10)?),
+                amount_max: opt_dec(r.get(11)?),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1328,8 +1399,8 @@ impl Db {
     /// (except ones the user confirmed by hand). Returns how many rows changed.
     pub fn learn(&self, rule: &Rule) -> Result<usize> {
         self.conn.execute(
-            "INSERT INTO learned_rules (kind, pattern, clean_payee, category_id, is_subscription, is_transfer, expected_cadence, entity_id, created_at, business_entity_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![rule.kind.as_str(), rule.pattern, rule.clean_payee, rule.category_id, rule.is_subscription, rule.is_transfer, rule.expected_cadence, rule.entity_id, now(), rule.business_entity_id],
+            "INSERT INTO learned_rules (kind, pattern, clean_payee, category_id, is_subscription, is_transfer, expected_cadence, entity_id, created_at, business_entity_id, amount_min, amount_max) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![rule.kind.as_str(), rule.pattern, rule.clean_payee, rule.category_id, rule.is_subscription, rule.is_transfer, rule.expected_cadence, rule.entity_id, now(), rule.business_entity_id, rule.amount_min.map(|d| d.to_string()), rule.amount_max.map(|d| d.to_string())],
         )?;
         let mut saved = rule.clone();
         saved.id = self.conn.last_insert_rowid();
@@ -1342,7 +1413,7 @@ impl Db {
         let rows: Vec<TxRow> = self.transactions(&TxFilter::default())?.into_iter().filter(|t| rule.entity_id.is_none_or(|e| e == t.account_entity_id || e == t.entity_id)).collect();
         let tx = self.conn.unchecked_transaction()?;
         let mut n = 0;
-        for t in rows.iter().filter(|t| rule.matches(&t.raw_description, &t.memo)) {
+        for t in rows.iter().filter(|t| rule.applies(&t.raw_description, &t.memo, t.amount)) {
             if t.review == ReviewStatus::Confirmed && !force && t.category_id.is_some() {
                 continue;
             }
@@ -1355,7 +1426,7 @@ impl Db {
         }
         tx.commit()?;
         if let Some(b) = rule.business_entity_id {
-            let ids: Vec<i64> = rows.iter().filter(|t| rule.matches(&t.raw_description, &t.memo) && t.account_entity_id != b).map(|t| t.id).collect();
+            let ids: Vec<i64> = rows.iter().filter(|t| rule.applies(&t.raw_description, &t.memo, t.amount) && t.account_entity_id != b).map(|t| t.id).collect();
             self.set_business(&ids, Some(b))?;
             n = n.max(ids.len());
         }
@@ -1571,7 +1642,7 @@ impl Db {
     pub fn mark_transfers(&self, ids: &[i64], stem: &str, entity_id: Option<i64>) -> Result<usize> {
         let cat = self.category_id("Transfers")?;
         self.set_category(ids, cat)?;
-        let rule = Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: stem.into(), clean_payee: None, category_id: cat, is_subscription: false, is_transfer: true, expected_cadence: None, entity_id, business_entity_id: None };
+        let rule = Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: stem.into(), clean_payee: None, category_id: cat, is_subscription: false, is_transfer: true, expected_cadence: None, entity_id, business_entity_id: None, ..Default::default() };
         self.learn(&rule)?;
         self.match_transfers()
     }
@@ -1602,7 +1673,7 @@ impl Db {
         // a few answers already learned, so triage starts with the interesting merchants
         for (pattern, cat, payee) in [("SALARY", "Salary", "Island Air (Salary)"), ("RENT RECEIVED", "Rental Income", "Rent"), ("SERVICE CHARGE", "Bank Fees & Interest", "Scotiabank")] {
             let category_id = self.category_id(cat)?;
-            self.learn(&Rule { id: 0, kind: RuleKind::Substring, pattern: pattern.into(), clean_payee: Some(payee.into()), category_id, is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None })?;
+            self.learn(&Rule { id: 0, kind: RuleKind::Substring, pattern: pattern.into(), clean_payee: Some(payee.into()), category_id, is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None, ..Default::default() })?;
         }
         for (pattern, tag) in [("UNIT A", "Unit A"), ("UNIT B", "Unit B")] {
             let ids: Vec<i64> = self.transactions(&TxFilter { entity_ids: vec![business], search: pattern.into(), ..Default::default() })?.iter().map(|t| t.id).collect();
@@ -1614,7 +1685,7 @@ impl Db {
 
 /// The description names an account: its last four digits on their own ("Transfer to 2197") or as the
 /// end of a full card/account number ("Transfer to 10785 19544403575").
-fn names_account(words: &[String], last4: &str) -> bool {
+pub(crate) fn names_account(words: &[String], last4: &str) -> bool {
     words.iter().any(|w| w == last4 || (w.len() >= 8 && w.ends_with(last4) && w.bytes().all(|b| b.is_ascii_digit())))
 }
 
@@ -1686,7 +1757,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         db.load_demo().unwrap();
         let cat = db.category_id("Utilities").unwrap();
-        let n = db.learn(&Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: "CUC".into(), clean_payee: Some("CUC".into()), category_id: cat, is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None }).unwrap();
+        let n = db.learn(&Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: "CUC".into(), clean_payee: Some("CUC".into()), category_id: cat, is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None, ..Default::default() }).unwrap();
         assert!(n >= 24, "{n}");
         let left = db.transactions(&TxFilter { search: "CUC WEB".into(), uncategorized_only: true, ..Default::default() }).unwrap();
         assert!(left.is_empty());
@@ -1698,7 +1769,7 @@ mod tests {
         db.load_demo().unwrap();
         let before = db.uncategorized_count(&[]).unwrap();
         let cat = db.category_id("Groceries").unwrap();
-        db.learn(&Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: "GENERAL LANDSCAPING".into(), clean_payee: Some("Landscaper".into()), category_id: cat, is_subscription: true, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None }).unwrap();
+        db.learn(&Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: "GENERAL LANDSCAPING".into(), clean_payee: Some("Landscaper".into()), category_id: cat, is_subscription: true, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None, ..Default::default() }).unwrap();
         assert!(db.uncategorized_count(&[]).unwrap() < before);
         db.reset_learning(&[]).unwrap();
         assert!(db.rules().unwrap().is_empty());
@@ -1761,6 +1832,8 @@ mod tests {
         let fam = db.category_id("Family Expense").unwrap();
         db.set_category(&[t.id], fam).unwrap();
         db.set_tag(&[t.id], "Kids room").unwrap();
+        let sub = db.transactions(&TxFilter { search: "KIRK HOME".into(), ..Default::default() }).unwrap()[1].clone();
+        db.set_subscription(&[sub.id], true).unwrap();
         let (sha, name, ent): (String, String, i64) = db
             .conn
             .query_row("SELECT d.sha256_hash, d.filename, a.entity_id FROM documents d JOIN accounts a ON a.id = d.account_id WHERE d.id = ?1", [t.document_id.unwrap()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
@@ -1773,6 +1846,9 @@ mod tests {
         let same = again.iter().find(|x| x.fitid == t.fitid).unwrap();
         assert_eq!((same.category_id, same.tag.as_str()), (fam, "Kids room"));
         assert_eq!(again.len(), rows.len(), "no duplicates");
+        if sub.document_id == t.document_id {
+            assert!(again.iter().find(|x| x.fitid == sub.fitid).unwrap().is_subscription, "Mark Subscription survives a rescan");
+        }
     }
 
     #[test]

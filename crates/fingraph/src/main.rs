@@ -6,10 +6,12 @@ mod changes;
 mod charts;
 mod dashboard;
 mod export;
+mod owed;
 mod preferences;
 mod profiles;
 mod review;
 mod rules;
+mod split;
 mod statements;
 mod transactions;
 mod wizard;
@@ -621,7 +623,7 @@ impl App {
     /// Counts beside the pages, and one row per account with its latest verified balance.
     pub fn update_sidebar(self: &Rc<Self>) {
         let ids = self.entity_ids();
-        let rows = self.db.transactions(&TxFilter { entity_ids: ids.clone(), ..Default::default() }).unwrap_or_default();
+        let rows = self.db.transactions(&TxFilter { entity_ids: ids.clone(), split_lines: true, ..Default::default() }).unwrap_or_default();
         let docs = self.db.documents(&ids).unwrap_or_default();
         let fx = self.db.fx().unwrap_or_default();
         let set = |k: &str, text: String, warn: bool| {
@@ -640,7 +642,10 @@ impl App {
         set("changes", if changes > 0 { changes.to_string() } else { String::new() }, false);
         let subs: Decimal = insights::subscriptions(&rows, self.display(), &fx, today()).iter().filter(|s| s.active).map(|s| s.monthly).sum();
         set("subscriptions", if subs.is_zero() { String::new() } else { format!("{}/mo", fmt_money(subs.round_dp(0), self.display())) }, false);
-        let bad = docs.iter().filter(|d| matches!(d.reconciliation, fingraph_core::Reconciliation::Discrepancy(_))).count();
+        // a statement that doesn't balance, a month with no statement, or a break between statements
+        let cov = self.db.coverage(&ids, 12, today()).unwrap_or_default();
+        let missing = cov.iter().map(|c| c.months.iter().filter(|m| m.1 == fingraph_core::workflows::MonthState::Missing).count() + c.breaks.len()).sum::<usize>();
+        let bad = docs.iter().filter(|d| matches!(d.reconciliation, fingraph_core::Reconciliation::Discrepancy(_))).count() + missing;
         set("statements", if bad > 0 { format!("⚠ {bad}") } else { String::new() }, bad > 0);
 
         // accounts: rebuilt in place, just above Setup, only when they or their balances changed
@@ -858,6 +863,8 @@ fn debug_shot(app: &Rc<App>) {
         Ok("triage") => wizard::triage(app),
         Ok("onboarding") => wizard::onboarding(app),
         Ok("report") => statements::open_first_report(app),
+        Ok(d) if d.starts_with("split:") => split::dialog(app, d[6..].parse().unwrap_or(0)),
+        Ok(d) if d.starts_with("owed:") => owed::debug_open(app, d[5..].parse().unwrap_or(0)),
         Ok("preferences") => {
             preferences::show(app);
             if let (Some(d), Ok(page)) = (app.win.visible_dialog().and_downcast::<adw::PreferencesDialog>(), std::env::var("FINGRAPH_PAGE")) {

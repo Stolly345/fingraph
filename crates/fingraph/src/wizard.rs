@@ -332,7 +332,7 @@ pub fn triage(app: &Rc<App>) {
 
 /// Learn the answer for a group: a rule over its merchant stem, applied to every match.
 #[allow(clippy::too_many_arguments)]
-fn answer(app: &Rc<App>, g: &TriageGroup, category_id: Option<i64>, payee: &str, subscription: bool, (scope, business): (Option<i64>, Option<i64>), next: &Rc<dyn Fn()>, answered: &Rc<std::cell::Cell<usize>>) {
+fn answer(app: &Rc<App>, g: &TriageGroup, category_id: Option<i64>, payee: &str, subscription: bool, (scope, business, amount): (Option<i64>, Option<i64>, Option<fingraph_core::Decimal>), next: &Rc<dyn Fn()>, answered: &Rc<std::cell::Cell<usize>>) {
     let rule = Rule {
         id: 0,
         kind: RuleKind::NormalizedTokens,
@@ -344,6 +344,8 @@ fn answer(app: &Rc<App>, g: &TriageGroup, category_id: Option<i64>, payee: &str,
         expected_cadence: if subscription { g.cadence.or(Some(30)) } else { None },
         entity_id: scope,
         business_entity_id: business,
+        amount_min: amount,
+        amount_max: amount,
     };
     match app.db.learn(&rule) {
         Ok(n) => {
@@ -451,9 +453,16 @@ pub fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn(
         move || scope_ids.get(r.selected() as usize).copied().flatten()
     };
     let scope = Rc::new(scope);
+    // "Adriana, CI$ 125.00 only": a different amount from the same payee comes back to To Review
+    let exact = adw::SwitchRow::builder()
+        .title(glib::markup_escape_text(&format!("Only for {} payments", fmt_money(g.typical_amount.abs(), g.currency))))
+        .subtitle("Any other amount from this payee (a bonus, a one-off job) comes back here to ask")
+        .visible(g.same_amount)
+        .build();
+    opts.add(&exact);
     let scope = {
-        let (s, biz) = (scope.clone(), biz.clone());
-        Rc::new(move || (s(), biz.get()))
+        let (s, biz, exact, amt) = (scope.clone(), biz.clone(), exact.clone(), g.typical_amount.abs());
+        Rc::new(move || (s(), biz.get(), exact.is_active().then_some(amt)))
     };
 
     // category chips (hidden behind "pick category" for subscription/transfer cards)

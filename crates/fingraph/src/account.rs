@@ -100,7 +100,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let fx = a.db.fx().unwrap_or_default();
             let parents = a.parents();
             let (from, to) = a.range();
-            let all_rows: Vec<TxRow> = a.db.transactions(&TxFilter { account_id: Some(id), ..Default::default() }).unwrap_or_default();
+            let all_rows: Vec<TxRow> = a.db.transactions(&TxFilter { account_id: Some(id), split_lines: true, ..Default::default() }).unwrap_or_default();
             let rows: Vec<TxRow> = all_rows.iter().filter(|t| t.posted >= from && t.posted <= to).cloned().collect();
             let docs: Vec<_> = a.db.documents(&[]).unwrap_or_default().into_iter().filter(|d| d.account_id == id).collect();
 

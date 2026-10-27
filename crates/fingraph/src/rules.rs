@@ -69,7 +69,7 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
             for r in rule_rows.borrow_mut().drain(..) {
                 rules.remove(&r);
             }
-            let rows = a.db.transactions(&TxFilter { entity_ids: a.entity_ids(), ..Default::default() }).unwrap_or_default();
+            let rows = a.db.transactions(&TxFilter { entity_ids: a.entity_ids(), split_lines: true, ..Default::default() }).unwrap_or_default();
             let fx = a.db.fx().unwrap_or_default();
             let list = insights::subscriptions(&rows, a.display(), &fx, today());
             let total: fingraph_core::Decimal = list.iter().filter(|s| s.active).map(|s| s.annual).sum();
@@ -162,6 +162,13 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
                 if rule.is_transfer {
                     bits.push("internal transfer".into());
                 }
+                match (rule.amount_min, rule.amount_max) {
+                    (Some(a), Some(b)) if a == b => bits.push(format!("only {a}")),
+                    (Some(a), Some(b)) => bits.push(format!("{a}–{b} only")),
+                    (Some(a), None) => bits.push(format!("{a} or more")),
+                    (None, Some(b)) => bits.push(format!("up to {b}")),
+                    (None, None) => {}
+                }
                 if let Some(b) = rule.business_entity_id {
                     bits.push(format!("business expense of {}", a.entity_name(b)));
                 }
@@ -212,7 +219,8 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
 }
 
 /// New rule, or edit one (saved as a new rule replacing the old).
-fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
+/// Edit a rule, or (id 0) create one, optionally pre-filled from a transaction.
+pub fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
     let cats = app.categories();
     let ents = app.entities.borrow().clone();
     let kinds: Vec<&str> = RuleKind::ALL.iter().map(|k| k.as_str()).collect();
@@ -231,7 +239,12 @@ fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
     let mut biz_names = vec!["No".to_string()];
     biz_names.extend(biz_ents.iter().map(|e| e.name.clone()));
     let business = adw::ComboRow::builder().title("Business expense of").model(&gtk::StringList::new(&biz_names.iter().map(String::as_str).collect::<Vec<_>>())).build();
+    // "Adriana, CI$ 125.00 only": anything else from the same payee goes to To Review
+    let amt_min = adw::EntryRow::builder().title("Only when the amount is at least (optional)").build();
+    let amt_max = adw::EntryRow::builder().title("…and at most (same number = exactly)").build();
     if let Some(r) = &existing {
+        amt_min.set_text(&r.amount_min.map(|d| d.to_string()).unwrap_or_default());
+        amt_max.set_text(&r.amount_max.map(|d| d.to_string()).unwrap_or_default());
         kind.set_selected(RuleKind::ALL.iter().position(|k| *k == r.kind).unwrap_or(0) as u32);
         pattern.set_text(&r.pattern);
         payee.set_text(r.clean_payee.as_deref().unwrap_or(""));
@@ -242,10 +255,10 @@ fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
         business.set_selected(r.business_entity_id.and_then(|id| biz_ents.iter().position(|e| e.id == id)).map_or(0, |i| i + 1) as u32);
     }
     let g = adw::PreferencesGroup::new();
-    for row in [kind.upcast_ref::<gtk::Widget>(), pattern.upcast_ref(), payee.upcast_ref(), category.upcast_ref(), scope.upcast_ref(), sub.upcast_ref(), transfer.upcast_ref(), business.upcast_ref()] {
+    for row in [kind.upcast_ref::<gtk::Widget>(), pattern.upcast_ref(), payee.upcast_ref(), category.upcast_ref(), scope.upcast_ref(), sub.upcast_ref(), transfer.upcast_ref(), business.upcast_ref(), amt_min.upcast_ref(), amt_max.upcast_ref()] {
         g.add(row);
     }
-    let d = adw::AlertDialog::new(Some(if existing.is_some() { "Edit Rule" } else { "New Rule" }), None);
+    let d = adw::AlertDialog::new(Some(if existing.as_ref().is_some_and(|r| r.id != 0) { "Edit Rule" } else { "New Rule" }), None);
     d.set_extra_child(Some(&g));
     d.add_responses(&[("cancel", "Cancel"), ("ok", "Save & Apply")]);
     d.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
@@ -270,8 +283,10 @@ fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
             expected_cadence: if sub.is_active() { Some(30) } else { None },
             entity_id: (scope.selected() as usize).checked_sub(1).and_then(|i| ents.get(i)).map(|e| e.id),
             business_entity_id: (business.selected() as usize).checked_sub(1).and_then(|i| biz_ents.get(i)).map(|e| e.id),
+            amount_min: fingraph_core::money::parse_user(&amt_min.text()).map(|d| d.abs()),
+            amount_max: fingraph_core::money::parse_user(&amt_max.text()).map(|d| d.abs()),
         };
-        if let Some(old) = &existing {
+        if let Some(old) = existing.as_ref().filter(|o| o.id != 0) {
             let _ = a.db.delete_rule(old.id);
         }
         match a.db.learn(&rule) {

@@ -134,7 +134,8 @@ pub fn kpis(rows: &[TxRow], docs: &[DocumentRow], from: NaiveDate, to: NaiveDate
         expenses,
         net,
         net_prior,
-        net_delta_pct: pct(net, net_prior),
+        // only compare with a prior period your statements actually cover
+        net_delta_pct: pct(net, net_prior).filter(|_| crate::workflows::prior_covered(docs, (from, to), (pf, pt))),
         savings_rate_pct: (!income.is_zero()).then(|| (net / income * Decimal::ONE_HUNDRED).to_f64().unwrap_or(0.0)),
         subs_monthly: round2(subs_monthly),
         subs_annual: round2(subs_monthly * Decimal::from(12)),
@@ -460,10 +461,11 @@ pub enum InsightKind {
     BankFees,
     CategoryDrift,
     TaxSummary,
+    Annual,
 }
 
 impl InsightKind {
-    pub const ALL: [InsightKind; 6] = [Self::PriceCreep, Self::Spike, Self::Duplicate, Self::BankFees, Self::CategoryDrift, Self::TaxSummary];
+    pub const ALL: [InsightKind; 7] = [Self::PriceCreep, Self::Spike, Self::Annual, Self::Duplicate, Self::BankFees, Self::CategoryDrift, Self::TaxSummary];
     pub fn label(self) -> &'static str {
         match self {
             Self::PriceCreep => "Subscription price creep",
@@ -472,6 +474,7 @@ impl InsightKind {
             Self::BankFees => "Bank fees & interest",
             Self::CategoryDrift => "Category drift",
             Self::TaxSummary => "Tax / business P&L",
+            Self::Annual => "Annual renewals",
         }
     }
     pub fn icon(self) -> &'static str {
@@ -482,6 +485,7 @@ impl InsightKind {
             Self::BankFees => "x-office-spreadsheet-symbolic",
             Self::CategoryDrift => "view-sort-descending-symbolic",
             Self::TaxSummary => "x-office-spreadsheet-symbolic",
+            Self::Annual => "x-office-calendar-symbolic",
         }
     }
 }
@@ -494,6 +498,61 @@ pub struct Insight {
     pub tx_ids: Vec<i64>,
     /// A breakdown to expand.
     pub parts: Vec<InsightPart>,
+}
+
+/// A project or asset: everything tagged with the same name (an online order, its freight and
+/// its customs duty; a renovation; a vehicle repair), whatever account paid.
+#[derive(Debug, Clone)]
+pub struct Project {
+    pub tag: String,
+    pub total: Decimal,
+    pub count: usize,
+    pub first: NaiveDate,
+    pub last: NaiveDate,
+    /// By top-level or sub category, biggest first: the landed-cost breakdown.
+    pub parts: Vec<(String, Decimal)>,
+    pub tx_ids: Vec<i64>,
+}
+
+/// Tagged money out (pass split lines so a tagged part of a receipt counts), by tag, biggest first.
+pub fn projects(rows: &[TxRow], ccy: Currency, fx: &Fx) -> Vec<Project> {
+    let mut by: BTreeMap<String, Vec<&TxRow>> = BTreeMap::new();
+    for t in rows.iter().filter(|t| !t.tag.trim().is_empty() && !t.is_transfer()) {
+        by.entry(t.tag.trim().to_string()).or_default().push(t);
+    }
+    let mut out: Vec<Project> = by
+        .into_iter()
+        .map(|(tag, v)| {
+            let mut parts: BTreeMap<String, Decimal> = BTreeMap::new();
+            for t in &v {
+                *parts.entry(t.category_name.clone().unwrap_or_else(|| "Uncategorized".into())).or_default() -= value(t, ccy, fx);
+            }
+            let mut parts: Vec<(String, Decimal)> = parts.into_iter().collect();
+            parts.sort_by_key(|x| std::cmp::Reverse(x.1));
+            Project {
+                total: -v.iter().map(|t| value(t, ccy, fx)).sum::<Decimal>(),
+                count: v.len(),
+                first: v.iter().map(|t| t.posted).min().unwrap_or_default(),
+                last: v.iter().map(|t| t.posted).max().unwrap_or_default(),
+                parts,
+                tx_ids: v.iter().map(|t| t.id).collect(),
+                tag,
+            }
+        })
+        .collect();
+    out.sort_by_key(|p| std::cmp::Reverse(p.total));
+    out
+}
+
+/// Freight and duty charges that probably belong with a project's online purchases: untagged,
+/// filed under Shipping & Freight or Import Duty, up to six weeks after one of its purchases.
+pub fn landed_cost_candidates<'a>(rows: &'a [TxRow], tag: &str) -> Vec<&'a TxRow> {
+    let buys: Vec<NaiveDate> = rows.iter().filter(|t| t.tag.trim() == tag && t.amount.is_sign_negative()).map(|t| t.posted).collect();
+    rows.iter()
+        .filter(|t| t.tag.trim().is_empty() && t.amount.is_sign_negative())
+        .filter(|t| matches!(t.category_name.as_deref(), Some("Shipping & Freight") | Some("Import Duty")))
+        .filter(|t| buys.iter().any(|b| t.posted >= *b && (t.posted - *b).num_days() <= 42))
+        .collect()
 }
 
 /// One line of an insight's breakdown: (title, detail, transactions).
@@ -581,7 +640,27 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
         }
         let prior: Vec<Decimal> = (1..=6).filter_map(|i| months.get(&add_months(last_m, -i)).map(|x| x.0)).collect();
         let charges_per_month = months.values().map(|x| x.1.len()).sum::<usize>() as f64 / months.len() as f64;
-        if prior.len() < 3 || charges_per_month > 2.0 {
+        if charges_per_month > 2.0 {
+            continue;
+        }
+        // with a year of history, compare with the same month last year first: CUC climbs every
+        // summer with the air conditioning, and that isn't news
+        if let Some((ly_v, _)) = months.get(&add_months(last_m, -12)) {
+            let avg_note = (prior.len() >= 3).then(|| prior.iter().copied().sum::<Decimal>() / Decimal::from(prior.len())).and_then(|a| pct(*last_v, a)).map(|p| format!(" ({p:+.0}% vs its 6-month average)")).unwrap_or_default();
+            if let Some(yoy) = pct(*last_v, *ly_v)
+                && yoy > tune.spike_percent
+            {
+                out.push(Insight {
+                    kind: InsightKind::Spike,
+                    title: format!("{name} up {yoy:.0}% vs {} last year", last_m.format("%B")),
+                    detail: format!("{} this {} against {} a year ago{avg_note}", money(*last_v), last_m.format("%B"), money(*ly_v)),
+                    tx_ids: ids.clone(),
+                    parts: Vec::new(),
+                });
+            }
+            continue;
+        }
+        if prior.len() < 3 {
             continue;
         }
         let avg = prior.iter().copied().sum::<Decimal>() / Decimal::from(prior.len());
@@ -595,8 +674,43 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
             out.push(Insight {
                 kind: InsightKind::Spike,
                 title: format!("{name} up {p:.0}% vs 6-month average"),
-                detail: format!("{} in {} against an average of {}", money(*last_v), last_m.format("%B"), money(round2(avg))),
+                detail: format!("{} in {} against an average of {} (no bill from {} last year to compare with yet)", money(*last_v), last_m.format("%B"), money(round2(avg)), last_m.format("%B")),
                 tx_ids: ids.clone(),
+                parts: Vec::new(),
+            });
+        }
+    }
+
+    // annual renewals: insurance, licences, registrations, memberships — charged once a year
+    let mut yearly: BTreeMap<(i64, String), Vec<&TxRow>> = BTreeMap::new();
+    for t in rows.iter().filter(|t| t.amount.is_sign_negative() && counts(t) && t.posted <= to) {
+        yearly.entry((t.account_id, merchant_stem(&t.raw_description, &t.memo))).or_default().push(t);
+    }
+    for v in yearly.values_mut() {
+        v.sort_by_key(|t| t.posted);
+        let Some(last) = v.last().copied() else { continue };
+        // the charge before it, 11–13 months earlier, with nothing in between
+        let Some(prev) = v.iter().rev().nth(1).copied().filter(|p| (330..=400).contains(&(last.posted - p.posted).num_days())) else { continue };
+        let (now_v, then_v) = (-value(last, ccy, fx), -value(prev, ccy, fx));
+        let due = last.posted + Duration::days(365);
+        if last.posted >= from {
+            let change = pct(now_v, then_v).unwrap_or(0.0);
+            out.push(Insight {
+                kind: InsightKind::Annual,
+                title: format!("{} renewed: {}{}", payee(last), money(now_v), if change.abs() >= 1.0 { format!(" ({change:+.0}% vs last year)") } else { String::new() }),
+                detail: format!("{} last year on {} · next due around {}", money(then_v), prev.posted.format("%d %b %Y"), due.format("%d %b %Y")),
+                tx_ids: vec![prev.id, last.id],
+                parts: Vec::new(),
+            });
+        }
+        // coming up within six weeks of the range end
+        let next = prev.posted + Duration::days(365 * 2);
+        if (to..to + Duration::days(45)).contains(&next) {
+            out.push(Insight {
+                kind: InsightKind::Annual,
+                title: format!("{} renews around {}", payee(last), next.format("%d %b")),
+                detail: format!("{} last time ({}), {} the year before", money(now_v), last.posted.format("%d %b %Y"), money(then_v)),
+                tx_ids: vec![prev.id, last.id],
                 parts: Vec::new(),
             });
         }
@@ -708,6 +822,88 @@ mod tests {
     use super::*;
     use crate::db::{Db, TxFilter};
 
+    fn row(id: i64, day: NaiveDate, raw: &str, amount: &str, cat: &str, tag: &str) -> TxRow {
+        TxRow {
+            id,
+            document_id: None,
+            account_id: 1,
+            account_name: "Chq".into(),
+            account_type: crate::AccountType::Checking,
+            bank_short: "Scotiabank".into(),
+            entity_id: 1,
+            entity_currency: Currency::KYD,
+            posted: day,
+            effective: None,
+            raw_description: raw.into(),
+            clean_payee: raw.into(),
+            amount: amount.parse().unwrap(),
+            currency: Currency::KYD,
+            amount_entity: amount.parse().unwrap(),
+            balance: None,
+            category_id: Some(9),
+            category_name: Some(cat.into()),
+            category_kind: Some(crate::db::CategoryKind::Expense),
+            tag: tag.into(),
+            memo: String::new(),
+            fitid: id.to_string(),
+            is_recurring: true,
+            is_subscription: false,
+            transfer_peer: None,
+            review: crate::ReviewStatus::Confirmed,
+            business_entity_id: None,
+            account_entity_id: 1,
+            splits: 0,
+            split_seq: None,
+            attachments: 0,
+        }
+    }
+
+    #[test]
+    fn summer_cuc_is_compared_with_last_summer() {
+        let d = |y, m| NaiveDate::from_ymd_opt(y, m, 10).unwrap();
+        let mut parents = BTreeMap::new();
+        parents.insert(9, "Utilities".to_string());
+        // a winter of 200s, last August 300, this August 306: up ~50% on the 6 months, ~2% on the year
+        let mut rows: Vec<TxRow> = (0..12).map(|i| {
+            let m = add_months(d(2025, 8), i);
+            let v = if m.month() == 8 { "-300.00" } else { "-200.00" };
+            row(i as i64, m.with_day(10).unwrap(), "CUC WEB PMT", v, "Electricity", "")
+        }).collect();
+        rows.push(row(99, d(2026, 8), "CUC WEB PMT", "-306.00", "Electricity", ""));
+        let fx = Fx::default();
+        let ins = insights(&rows, &[], d(2026, 8), d(2026, 8) + Duration::days(20), Currency::KYD, &fx, &parents, &Tuning::default());
+        assert!(ins.iter().all(|i| i.kind != InsightKind::Spike), "seasonal, not news: {ins:#?}");
+        rows.last_mut().unwrap().amount = "-420.00".parse().unwrap();
+        rows.last_mut().unwrap().amount_entity = "-420.00".parse().unwrap();
+        let ins = insights(&rows, &[], d(2026, 8), d(2026, 8) + Duration::days(20), Currency::KYD, &fx, &parents, &Tuning::default());
+        assert!(ins.iter().any(|i| i.kind == InsightKind::Spike && i.title.contains("vs August last year")), "{ins:#?}");
+    }
+
+    #[test]
+    fn annual_renewals_and_landed_cost() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let rows = vec![
+            row(1, d(2025, 9, 1), "ISLAND HERITAGE", "-3000.00", "Home Insurance", ""),
+            row(2, d(2026, 9, 3), "ISLAND HERITAGE", "-3270.00", "Home Insurance", ""),
+            row(3, d(2026, 5, 2), "HOME DEPOT", "-240.00", "Online Shopping", "Unit 2 Reno"),
+            row(4, d(2026, 5, 12), "TROPICAL SHIPPING", "-45.00", "Shipping & Freight", ""),
+            row(5, d(2026, 5, 20), "CUSTOMS", "-54.00", "Import Duty", ""),
+            row(6, d(2026, 9, 20), "CUSTOMS", "-80.00", "Import Duty", ""),
+        ];
+        let fx = Fx::default();
+        let ins = insights(&rows, &[], d(2026, 9, 1), d(2026, 9, 30), Currency::KYD, &fx, &BTreeMap::new(), &Tuning::default());
+        assert!(ins.iter().any(|i| i.kind == InsightKind::Annual && i.title.contains("+9% vs last year")), "{ins:#?}");
+        // freight and duty within six weeks of the purchase belong with it; September's duty doesn't
+        let c: Vec<i64> = landed_cost_candidates(&rows, "Unit 2 Reno").iter().map(|t| t.id).collect();
+        assert_eq!(c, vec![4, 5]);
+        let mut tagged = rows.clone();
+        for t in tagged.iter_mut().filter(|t| t.id == 4 || t.id == 5) {
+            t.tag = "Unit 2 Reno".into();
+        }
+        let p = &projects(&tagged, Currency::KYD, &fx)[0];
+        assert_eq!((p.tag.as_str(), p.total, p.count), ("Unit 2 Reno", "339.00".parse().unwrap(), 3));
+    }
+
     #[test]
     fn a_lone_old_charge_is_yearly_and_your_cycle_wins() {
         let db = Db::open_in_memory().unwrap();
@@ -744,7 +940,7 @@ mod tests {
         let subs_cat = db.category_id("Subscriptions & Digital").unwrap();
         let util = db.category_id("Utilities").unwrap();
         for (pat, cat, sub) in [("HBO MAX", subs_cat, true), ("CUC", util, false)] {
-            db.learn(&crate::rules::Rule { id: 0, kind: crate::rules::RuleKind::NormalizedTokens, pattern: pat.into(), clean_payee: None, category_id: cat, is_subscription: sub, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None }).unwrap();
+            db.learn(&crate::rules::Rule { id: 0, kind: crate::rules::RuleKind::NormalizedTokens, pattern: pat.into(), clean_payee: None, category_id: cat, is_subscription: sub, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None, ..Default::default() }).unwrap();
         }
         let rows = db.transactions(&TxFilter::default()).unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();

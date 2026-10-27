@@ -72,6 +72,7 @@ const KEYWORDS: &[(&str, &str)] = &[
     ("PROPANE|LPG", "Gas"),
     ("FUEL|PETROL|GAS STATION|SERVICE STATION|GASOLINE", "Fuel"),
     ("AUTO|AUTOMOTIVE|AUTOS|MOTORS|GARAGE|TYRE|TYRES|TIRE|TIRES|MECHANIC*|CAR WASH|AUTO PARTS|BODY SHOP|COLLISION", "Vehicle Maintenance"),
+    ("FREIGHT|SHIPPING|CARGO|COURIER|FORWARDING|FORWARDERS", "Shipping & Freight"),
     ("RENT A CAR|CAR RENTAL|RENTACAR", "Car Rental"),
     ("TAXI|TAXIS|CAB|CABS", "Taxi & Rideshare"),
     ("PARKING", "Parking"),
@@ -157,7 +158,7 @@ mod tests {
         assert_eq!(name("KIRK MARKET/BACK-UP 1"), Some(("Kirk Market", "Groceries")));
         assert_eq!(name("MARLEY JERK CENTRE"), Some(("Marley Jerk Centre", "Takeaway & Delivery")));
         // the merchant comes before the billing descriptor
-        assert_eq!(name("AUDIBLE*E47R01203, AMZN.COM/BILL"), Some(("Amazon Digital", "Subscriptions & Digital")));
+        assert_eq!(name("AUDIBLE*E47R01203, AMZN.COM/BILL"), Some(("Audible", "Subscriptions & Digital")));
         assert_eq!(name("AMAZON MKTPLACE PMTS, AMZN.COM/BILL"), Some(("Amazon", "Online Shopping")));
         assert_eq!(name("WAL-MART SUPERCENTER 5854, MIAMI"), Some(("Walmart", "Shopping")));
         assert_eq!(name("TORTUGA GREENERY, GEORGE TOWN"), None);

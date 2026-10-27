@@ -82,7 +82,7 @@ from a terminal.
 
 ---
 
-## 5. Data model (schema v3)
+## 5. Data model (schema v4)
 
 `entities` (workspaces: Personal / Business / RentalProperty, base currency) · `bank_profiles` ·
 `accounts` (bank, masked number, type, currency, OFX ids, `hidden`) · `fx_rates` (peg 1 KYD = 1.20 USD)
@@ -92,13 +92,21 @@ and effective dates, raw description, clean payee, amount + cents, currency, amo
 currency, reported running balance, category, tag, memo, FITID, recurring/subscription flags,
 `transfer_peer_tx_id`, `business_entity_id`, review status) · `categories` (108, two levels, kinds
 Income / Expense / Transfer) · `learned_rules` (kind, pattern, payee, category, subscription,
-transfer, cadence, workspace scope, business workspace) · `settings` (incl. the preferences JSON).
+transfer, cadence, workspace scope, business workspace, optional amount range) · `splits` (lines of
+a split charge: amount, category, workspace, tag, memo) · `reimbursements` (which business charge or
+split line was paid back by which incoming transaction) · `attachments` (receipt files, keyed by
+account + FITID so they survive rescans) · `settings` (incl. the preferences JSON).
 
 - **FITID** = SHA-256 of account, date, amount, normalised description and same-day sequence:
   re-importing a statement or an overlapping one never duplicates.
 - **Workspace amount**: a rate printed on the statement (`USD 145.00 @ 0.84`, `(59.14 KYD)`) beats
   the configured rate (switchable).
-- Migrations: v1 base, v2 business-expense columns, v3 hidden accounts. Missing categories are
+- **Splits**: the lines must add up to the bank's amount; the statement row keeps its FITID and running
+  balance (reconciliation is unchanged), while category totals, P&L, projects and "owes you" read the
+  lines. Transfers can't be split. Splits, reimbursements and attachments follow the FITID through rescans.
+- **Attachments** are copied (named by content hash) into `~/.local/share/fingraph/attachments/`.
+- Migrations: v1 base, v2 business-expense columns, v3 hidden accounts, v4 amount rules, splits,
+  reimbursements, attachments. Missing categories are
   seeded into older ledgers on open; nothing is renamed or removed.
 
 ---
@@ -135,6 +143,9 @@ inspector-converted lines) matched by FITID.
 Applied on import, in this order; earlier steps win.
 
 1. **Your rules** (learned from To Review or "Remember" toasts; workspace rules beat global ones).
+   A rule can be limited to an amount or range (*Adriana only when CI$ 125.00*; other amounts go to
+   review) and can match a standing order's reference number. To Review offers "Only for CI$ 125.00
+   payments" when every charge is the same amount; Transactions → **Rule…** prefills from one row.
 2. **Transfers** between your accounts: opposite amounts, same currency exactly or KYD↔USD within 2%
    of the peg, ≤ 5 days apart, transfer wording or the other account named. Never spending.
 3. **Credit card payments**: a bank payment naming one of your cards (last four, or a full number
@@ -164,6 +175,10 @@ rules applied retroactively.
 
 **Business expenses** paid from a personal account keep their account but count in the chosen
 business workspace's P&L (`business_entity_id`); per transaction, in bulk, from triage, or as a rule.
+A **split** sends part of one charge to the business (e.g. the rental's share of a hardware receipt).
+The Overview shows **"<Business> owes you"** for business charges paid personally and not yet repaid;
+**Record Repayment** links them to the incoming transfer that paid them back (undo exists in the core
+only).
 
 ---
 
@@ -173,10 +188,20 @@ business workspace's P&L (`business_entity_id`); per transaction, in bulk, from 
   reconciliation & triage status; charts: monthly income/expenses + net line, spending by category
   (donut → merchant drill-down), cumulative daily spend vs the usual band, top-merchant Pareto,
   balance history, workspace/tag P&L. Every chart has tooltips and click-through to transactions.
+  "vs prior period" is only shown when statements cover ≥ 80% of the prior period's account-months.
 - **What Changed**: one card per kind with an expandable list — price creep (last rise within 90
   days), bill spikes (> 20% over the bill's own 6-month average, steady bills only), possible double
   charges (same account, merchant and amount within 3 days; fees and subscriptions never; a run is one
-  entry), bank fees & interest (by bank and fee type), category drift, YTD P&L by workspace/tag.
+  entry), bank fees & interest (by bank and fee type), category drift, YTD P&L by workspace/tag,
+  **annual renewals** (a charge ~a year after the same merchant's last one). Bill spikes also compare
+  with **the same month last year** when it exists, so a CUC summer bill isn't flagged against winter.
+- **Statement coverage** (Statements page): an account × month grid — ● verified, ◐ discrepancy,
+  ○ missing, · before the account's first statement — plus breaks where one statement's closing
+  balance isn't the next one's opening, or dates leave a gap of more than 3 days. Duplicate and
+  overlapping statements are skipped. Counted in the sidebar's Statements badge.
+- **Projects & landed cost** (Reports): every tag as a project across accounts, with category
+  breakdown; for an online order it suggests the freight-forwarder (MyUS, Tropical, Aeropost,
+  Caribex, Hyde…) and customs charges that followed it — **Add N freight & duty** tags them.
 - **Subscriptions**: per merchant, cost per cycle, yearly cost, last charge, price rises, lapsed.
   Billing cycle from the charges' rhythm; a lone charge is guessed **yearly** (a monthly plan
   corrects itself on its next charge); a picker (weekly … yearly) overrides any guess.
@@ -198,9 +223,10 @@ controls a page uses (date range, KYD | USD). Reopens on the last page.
 
 **Pages**: Transactions (virtualised grid, search Ctrl+F, account/category filters, inline category,
 payee, business and tag edits with "Remember" toasts, bulk categorise/tag/business/subscription/
-unlink/delete) · Statements (drop zone, bank badge, reconciliation badge, Scan Pass Report for every
-pass, Convert for skipped lines) · Reports & Export (CSV, QIF, OFX, QBO per account, P&L CSV, range
-summary) · Rules & Categories (edit, re-apply, forget, add category) · Bank Profiles (edit, test a
+unlink/delete, ✂ split, 📎 attach — or drop a file on a row — and Rule…; a paperclip opens the
+receipts) · Statements (drop zone, bank badge, reconciliation badge, Scan Pass Report for every
+pass, Convert for skipped lines) · Reports & Export (CSV, QIF, OFX, QBO per account, P&L CSV, **P&L with receipts** — a folder with
+the P&L and every attached receipt named `date payee amount` — and Projects & Landed Cost) · Rules & Categories (edit, re-apply, forget, add category) · Bank Profiles (edit, test a
 PDF, new profile from a sample's detected columns).
 
 **Preferences** (7 pages, saved as they change): General (start workspace, date range, currency,
@@ -227,17 +253,17 @@ banks, one deliberately unreadable line to show the inspector).
   development sit beside the ledger as `ledger-backup-2026-10-27-*.db`.
 - Terminal: `cargo run -p fingraph-core --example ledger -- reset|rescan|reapply|cards`.
 - Debug builds only: `FINGRAPH_SHOT=out.png` (with `FINGRAPH_DB`, `FINGRAPH_DEMO`, `FINGRAPH_VIEW`,
-  `FINGRAPH_DIALOG`, `FINGRAPH_PAGE`, `FINGRAPH_SHOT_STEPS`, `FINGRAPH_SCROLL`) renders the window to
+  `FINGRAPH_DIALOG` (`triage|onboarding|report|preferences|split:<id>|owed:<id>`), `FINGRAPH_PAGE`, `FINGRAPH_SHOT_STEPS`, `FINGRAPH_SCROLL`) renders the window to
   a PNG for visual checks without a person at the screen.
 
 ---
 
 ## 11. Quality
 
-- `cargo test --workspace`: 36 tests — five bank layouts, rollover, date inheritance, sign healing,
+- `cargo test --workspace`: 42 tests — five bank layouts, rollover, date inheritance, sign healing,
   both Pass-5 recoveries, a whole demo year, ledger (dedup, transfers, card payments, business
-  expenses, backups/restore/erase, rescan keeping edits), rules and truncation matching, directory
-  and keywords, insights, subscriptions, exports. Plus `-- --ignored real` re-scanning the owner's
+  expenses, backups/restore/erase, rescan keeping edits), rules and truncation matching, amount and reference rules, splits,
+  attachments, coverage, directory and keywords, insights, subscriptions, exports. Plus `-- --ignored real` re-scanning the owner's
   statements.
 - `cargo clippy --workspace --all-targets` clean; `cargo build --release` clean.
 - UI checked page by page with the screenshot hooks against the demo and a copy of the real ledger.
@@ -262,6 +288,12 @@ banks, one deliberately unreadable line to show the inspector).
 | Card payments | Transfers › Credit Card Payments, recognised by card number or wording |
 | ExpressVPN at CI$ 1,215/yr | Lone charge guessed yearly; billing-cycle picker |
 | Per-account breakdown | Account overview page from the sidebar |
+| Statement coverage & continuity | Coverage grid + balance chaining; prior-period comparison only with coverage. Found the period parser reading the pay-by date (fixed) |
+| Adriana CI$ 125 only | Amount-limited rules; reference-number rules for standing orders |
+| Split charges, director's loan | 1-to-N splits; "owes you" cards + Record Repayment |
+| Receipts | Local attachments by drop or button; P&L with receipts export |
+| Landed cost | Tags as projects; freight & duty suggestions |
+| CUC summer bills, annual renewals | Year-over-year spike check; Annual renewals card |
 
 ---
 
@@ -272,8 +304,9 @@ banks, one deliberately unreadable line to show the inspector).
 - **Directory accuracy**: most entries came from research agents with little web access; generic
   keys were removed, but individual entries may be wrong or closed. Harmless if absent from your
   statements; fix by editing `data/merchants.tsv` (rebuild needed) or with a rule.
-- **No statement-coverage awareness** yet: yearly totals and "vs prior period" don't know which
-  months have statements; gaps between statements aren't flagged (proposed, not built).
+- Year-over-year needs 12 months of history; annual renewals need the previous year's charge.
+- Receipts are files, not OCR'd; the P&L-with-receipts export is a folder, not one merged PDF.
+- A recorded repayment can't be undone from the UI yet (core has `undo_reimbursement`).
 - No OCR for scanned PDFs; no font metadata from the PDF.
 - The directory isn't browsable in the app; additions are rules or file edits.
 - The Python prototype's ledger was never migrated (statements re-imported instead).

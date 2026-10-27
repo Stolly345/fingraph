@@ -59,6 +59,9 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         ribbon.append(c);
     }
     body.append(&ribbon);
+    // what each business owes you for spending you paid personally
+    let owed_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
+    body.append(&owed_box);
 
     // charts
     let monthly = Chart::new(240);
@@ -106,7 +109,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
             let ids = a.entity_ids();
-            let rows = a.db.transactions(&TxFilter { entity_ids: ids.clone(), ..Default::default() }).unwrap_or_default();
+            let rows = a.db.transactions(&TxFilter { entity_ids: ids.clone(), split_lines: true, ..Default::default() }).unwrap_or_default();
             if rows.is_empty() {
                 stack.set_visible_child_name("empty");
                 return;
@@ -131,6 +134,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             }
 
             // KPIs
+            crate::owed::fill(&a, &owed_box);
             let k = insights::kpis(&rows, &docs, from, to, ccy, &fx, today());
             k_net.value.set_label(&money(k.net));
             k_net.value.set_css_classes(&["value", "tnum", if k.net.is_sign_negative() { "amount-out" } else { "amount-in" }]);
