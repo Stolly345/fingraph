@@ -1,6 +1,7 @@
 //! FinGraph: a local-first ledger for Cayman bank statements. Drop PDFs in, the 5-pass scanner reads
 //! and proves them, Smart Triage learns your merchants, and the dashboard shows where money goes.
 
+mod account;
 mod changes;
 mod charts;
 mod dashboard;
@@ -195,6 +196,10 @@ impl App {
         let (e, er) = export::build(&app);
         let (r, rr) = rules::build(&app, rules::Part::Rules);
         let (p, pr) = profiles::build(&app);
+        let (ac, acr) = account::build(&app);
+        // an account's overview is reached from its row under Accounts, not listed itself
+        app.stack.add_titled(&ac, Some("account"), "Account");
+        app.views.borrow_mut().push(("account", acr));
         let pages: Vec<(&'static str, &str, &str, gtk::Widget, Refresh)> = vec![
             ("overview", "Overview", "view-grid-symbolic", o, or),
             ("review", "To Review", "mail-unread-symbolic", rv, rvr),
@@ -221,7 +226,7 @@ impl App {
                 }
                 let name = row.widget_name().to_string();
                 if let Some(id) = name.strip_prefix("account:").and_then(|s| s.parse::<i64>().ok()) {
-                    return transactions::show_account(&a, id);
+                    return account::show(&a, id);
                 }
                 if name == "preferences" {
                     // a dialog, not a page: put the highlight back where you were
@@ -567,14 +572,14 @@ impl App {
         }
         // highlight it in the sidebar (an account row stays highlighted over its transactions)
         let on_account = self.side_list.selected_row().is_some_and(|r| r.widget_name().starts_with("account:"));
-        if !(on_account && name == "transactions")
+        if !(on_account && matches!(name, "transactions" | "account"))
             && let Some(r) = self.row_named(name)
             && self.side_list.selected_row().as_ref() != Some(&r)
         {
             self.side_list.select_row(Some(&r));
         }
         // the header shows only what this page uses
-        self.range_dd.set_visible(matches!(name, "overview" | "changes" | "transactions" | "export"));
+        self.range_dd.set_visible(matches!(name, "overview" | "changes" | "transactions" | "export" | "account"));
         self.ccy_box.set_visible(matches!(name, "overview" | "changes" | "transactions" | "subscriptions" | "export"));
         if MAIN_PAGES.contains(&name) {
             let mut p = self.db.prefs();

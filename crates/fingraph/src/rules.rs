@@ -9,7 +9,7 @@ use fingraph_core::rules::{Rule, RuleKind};
 use gtk::glib;
 use std::rc::Rc;
 
-use crate::{App, pill, today};
+use crate::{App, today};
 
 /// Which page: Subscriptions (checked often) or Rules & Categories (set up once).
 #[derive(Clone, Copy, PartialEq)]
@@ -91,21 +91,44 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
                 let r = adw::ActionRow::builder()
                     .title(glib::markup_escape_text(&s.payee))
                     .subtitle(glib::markup_escape_text(&format!(
-                        "{} {every} on {} · last {} · {} charges",
+                        "{} {every}{} · {} · last {} · {} charge{}{}{}",
                         fmt_money(s.latest, s.currency),
+                        if s.cadence_guessed { " (a guess: set the cycle)" } else { "" },
                         s.account,
                         s.last_charged.format("%d %b %Y"),
-                        s.charges
+                        s.charges,
+                        if s.charges == 1 { "" } else { "s" },
+                        s.last_rise.map(|(o, n, _)| format!(" · ▲ price rose {o} → {n}")).unwrap_or_default(),
+                        if s.active { "" } else { " · lapsed" }
                     )))
+                    .subtitle_lines(3)
                     .build();
-                if let Some((old, new, _)) = s.last_rise {
-                    r.add_suffix(&pill(&format!("▲ {old} → {new}"), "bad"));
+                // the billing cycle: what you pick here beats any guess
+                const CYCLES: [(&str, i64); 5] = [("Weekly", 7), ("Fortnightly", 14), ("Monthly", 30), ("Quarterly", 91), ("Yearly", 365)];
+                let cycle = gtk::DropDown::builder()
+                    .model(&gtk::StringList::new(&CYCLES.map(|c| c.0)))
+                    .selected(CYCLES.iter().enumerate().min_by_key(|(_, c)| (c.1 - s.cadence_days).abs()).map_or(1, |(i, _)| i) as u32)
+                    .valign(gtk::Align::Center)
+                    .tooltip_text("How often it bills")
+                    .build();
+                if s.cadence_guessed {
+                    cycle.add_css_class("warning");
                 }
-                if !s.active {
-                    r.add_suffix(&pill("Lapsed", "meh"));
+                {
+                    let (w, stem) = (Rc::downgrade(&a), s.stem.clone());
+                    cycle.connect_selected_notify(move |dd| {
+                        let Some(a) = w.upgrade() else { return };
+                        let days = CYCLES[dd.selected() as usize].1;
+                        let mut p = a.db.prefs();
+                        p.subscription_cadence.insert(stem.clone(), days);
+                        if a.db.save_prefs(&p).is_ok() {
+                            a.refresh();
+                        }
+                    });
                 }
+                r.add_suffix(&cycle);
                 r.add_suffix(&gtk::Label::builder().label(format!("{}/yr", a.money(s.annual))).css_classes(["tnum", "heading"]).build());
-                let not = gtk::Button::builder().label("Not a Subscription").valign(gtk::Align::Center).css_classes(["flat"]).build();
+                let not = gtk::Button::builder().icon_name("window-close-symbolic").tooltip_text("Not a subscription").valign(gtk::Align::Center).css_classes(["flat", "circular"]).build();
                 let (w, ids) = (Rc::downgrade(&a), s.tx_ids.clone());
                 not.connect_clicked(move |_| {
                     if let Some(a) = w.upgrade() {

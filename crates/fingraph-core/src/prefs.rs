@@ -42,6 +42,8 @@ pub struct Prefs {
     /// New rules apply to every workspace (otherwise just the one the charge came from).
     pub rules_all_workspaces: bool,
     pub ask_subscriptions: bool,
+    /// Billing cycles you set for subscriptions: merchant → days between charges.
+    pub subscription_cadence: std::collections::BTreeMap<String, i64>,
     /// File charges from businesses in the directory automatically.
     pub auto_directory: bool,
     /// Also file keyword guesses (MARKET → Groceries) instead of only suggesting them.
@@ -83,6 +85,7 @@ impl Default for Prefs {
             fuzzy_merchants: true,
             rules_all_workspaces: false,
             ask_subscriptions: true,
+            subscription_cadence: Default::default(),
             auto_directory: true,
             auto_keywords: false,
             rescan_keeps_edits: true,
@@ -105,5 +108,6 @@ impl Prefs {
     pub fn apply_globals(&self) {
         crate::money::set_style(self.currency_codes, self.brackets, self.statement_fx_wins);
         crate::rules::set_fuzzy(self.fuzzy_merchants);
+        crate::insights::set_cadence_overrides(&self.subscription_cadence);
     }
 }

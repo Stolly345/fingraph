@@ -5,6 +5,7 @@ use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use std::collections::BTreeMap;
+use std::sync::{LazyLock, RwLock};
 
 use crate::db::{CategoryKind, DocumentRow, Entity, TxRow};
 use crate::money::{fmt_money, round2};
@@ -379,6 +380,39 @@ pub struct Subscription {
     pub annual: Decimal,
     pub active: bool,
     pub tx_ids: Vec<i64>,
+    /// The billing cycle is a guess (one charge, recent): set it on the Subscriptions page.
+    pub cadence_guessed: bool,
+}
+
+static CADENCE: LazyLock<RwLock<BTreeMap<String, i64>>> = LazyLock::new(Default::default);
+
+/// Billing cycles you set on the Subscriptions page (merchant → days). From `Prefs::apply_globals`.
+pub fn set_cadence_overrides(m: &BTreeMap<String, i64>) {
+    if let Ok(mut c) = CADENCE.write() {
+        *c = m.clone();
+    }
+}
+
+/// How often a subscription bills, in days, and whether that's a guess. Yours wins; then the
+/// charges' own rhythm. A lone charge is guessed yearly: if it's really monthly, the next
+/// statement shows a second charge and the rhythm takes over, while a monthly guess for a yearly
+/// plan would overstate its cost twelvefold until you noticed.
+fn billing_cycle(stem: &str, dates: &[NaiveDate]) -> (i64, bool) {
+    if let Some(&d) = CADENCE.read().ok().as_ref().and_then(|c| c.get(stem)) {
+        return (d, false);
+    }
+    if let Some(c) = rules::cadence(dates) {
+        return (c, false);
+    }
+    if let (Some(&first), Some(&last)) = (dates.iter().min(), dates.iter().max())
+        && dates.len() >= 2
+    {
+        let gap = (last - first).num_days() / (dates.len() as i64 - 1);
+        if (5..=400).contains(&gap) {
+            return (gap, true);
+        }
+    }
+    (365, true)
 }
 
 /// Charges flagged as subscriptions, one entry per merchant.
@@ -392,7 +426,7 @@ pub fn subscriptions(rows: &[TxRow], ccy: Currency, fx: &Fx, today: NaiveDate) -
         .map(|(stem, mut v)| {
             v.sort_by_key(|t| t.posted);
             let last = v[v.len() - 1];
-            let cad = rules::cadence(&v.iter().map(|t| t.posted).collect::<Vec<_>>()).unwrap_or(30);
+            let (cad, guessed) = billing_cycle(&stem, &v.iter().map(|t| t.posted).collect::<Vec<_>>());
             let latest_disp = -value(last, ccy, fx);
             let monthly = round2(latest_disp * Decimal::from(30) / Decimal::from(cad));
             Subscription {
@@ -409,6 +443,7 @@ pub fn subscriptions(rows: &[TxRow], ccy: Currency, fx: &Fx, today: NaiveDate) -
                 annual: round2(latest_disp * Decimal::from(365) / Decimal::from(cad)),
                 active: (today - last.posted).num_days() <= 2 * cad + 7,
                 tx_ids: v.iter().map(|t| t.id).collect(),
+                cadence_guessed: guessed,
                 stem,
             }
         })
@@ -672,6 +707,33 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
 mod tests {
     use super::*;
     use crate::db::{Db, TxFilter};
+
+    #[test]
+    fn a_lone_old_charge_is_yearly_and_your_cycle_wins() {
+        let db = Db::open_in_memory().unwrap();
+        db.load_demo().unwrap();
+        let fx = db.fx().unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let mut rows = db.transactions(&TxFilter::default()).unwrap();
+        // one ExpressVPN-style charge two months before the statements end
+        let mut one = rows.iter().find(|t| t.raw_description.contains("NETFLIX")).unwrap().clone();
+        one.raw_description = "PAYPAL *EXPRESSVPN".into();
+        one.amount = "-122.28".parse().unwrap();
+        one.posted = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+        one.id = -1;
+        rows.push(one);
+        let vpn = || subscriptions(&rows, Currency::USD, &fx, today).into_iter().find(|s| s.stem.contains("EXPRESSVPN")).unwrap();
+        let s = vpn();
+        assert_eq!((s.cadence_days, s.cadence_guessed), (365, true), "a lone charge is guessed yearly");
+        assert_eq!(s.annual, round2("122.28".parse::<Decimal>().unwrap()));
+        // monthly charges are still monthly
+        let hbo = subscriptions(&rows, Currency::USD, &fx, today).into_iter().find(|s| s.stem.starts_with("HBO")).unwrap();
+        assert_eq!((hbo.cadence_days, hbo.cadence_guessed), (30, false));
+        // and what you set wins
+        set_cadence_overrides(&[(s.stem.clone(), 30)].into_iter().collect());
+        assert_eq!((vpn().cadence_days, vpn().cadence_guessed), (30, false));
+        set_cadence_overrides(&BTreeMap::new());
+    }
 
     #[test]
     fn demo_insights() {
