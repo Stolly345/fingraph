@@ -325,6 +325,7 @@ banks, one deliberately unreadable line to show the inspector).
 | Landed cost | Tags as projects; freight & duty suggestions |
 | Couldn't change charges in "owes you" | ✎ per charge opens the transaction editor; the dialog reopens with fresh totals |
 | Where's the business database? | Business Directory page: search, seen-in-statements count, keywords, Override… → rule |
+| "Subscriptions CI$ 860 a month" in the budget vs CI$ 161 on Subscriptions | The category also holds one-off digital purchases; its suggestion is now active subscriptions + the usual one-offs, labelled as such. Gross shown per payday and per month |
 | Budget: crash on Fill, over count, 85% alert, pay-based wizard with projections | RefCell borrow held across redraw (fixed); badge + Overview card; 4-step wizard, plan, trend projection |
 | Budgeting from past spending | Budget page: 6-month median suggestions, per-view budgets, pace projection |
 | Consolidated statement | Combined Statement page: chosen accounts, months, combined balance, click to edit |

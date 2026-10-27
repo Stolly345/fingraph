@@ -144,6 +144,35 @@ pub fn fill_overview(app: &Rc<App>, into: &gtk::Box) {
     into.append(&list);
 }
 
+const SUBS: &str = "Subscriptions & Digital";
+
+/// What each category usually costs a month (`suggest`), except Subscriptions & Digital: that one is
+/// your active subscriptions' monthly cost (as on the Subscriptions page) plus the usual one-off
+/// digital purchases (apps, domains, downloads), since a median of the two mixed reads as "subscriptions".
+/// Also returns (subscriptions a month, other digital a month) for labelling.
+fn usual(s: &Snap, m: NaiveDate) -> (BTreeMap<String, Decimal>, Decimal, Decimal) {
+    let mut out = suggest(&s.rows, m, MONTHS, s.ccy, &s.fx, &s.parents);
+    let subs: Decimal = fingraph_core::insights::subscriptions(&s.rows, s.ccy, &s.fx, today()).iter().filter(|x| x.active).map(|x| x.monthly).sum();
+    let others: Vec<TxRow> = s.rows.iter().filter(|t| !t.is_subscription).cloned().collect();
+    let one_off = suggest(&others, m, MONTHS, s.ccy, &s.fx, &s.parents).get(SUBS).copied().unwrap_or_default();
+    let subs = subs.round_dp(0);
+    let total = subs + one_off;
+    if total.is_zero() {
+        out.remove(SUBS);
+    } else {
+        out.insert(SUBS.into(), total);
+    }
+    (out, subs, one_off)
+}
+
+fn usual_text(name: &str, u: Decimal, subs: Decimal, one_off: Decimal, ccy: Currency) -> String {
+    if name == SUBS {
+        format!("usually {}: subscriptions {} a month + other digital purchases {}", fmt_money(u, ccy), fmt_money(subs, ccy), fmt_money(one_off, ccy))
+    } else {
+        format!("usually {}", fmt_money(u, ccy))
+    }
+}
+
 fn kpi(title: &str) -> (gtk::Box, gtk::Label, gtk::Label) {
     let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).css_classes(["card", "kpi"]).build();
     b.append(&gtk::Label::builder().label(title).xalign(0.0).css_classes(["dim-label", "caption-heading"]).build());
@@ -263,7 +292,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let s = snap(&a);
             let (ccy, m) = (s.ccy, month());
             let end = add_months(m, 1).pred_opt().unwrap_or(m);
-            let usual = suggest(&s.rows, m, MONTHS, ccy, &s.fx, &s.parents);
+            let (usual, subs_m, one_off) = usual(&s, m);
             let now: BTreeMap<String, Decimal> = by_category(&s.rows, m, end, ccy, &s.fx, &s.parents).into_iter().collect();
             let last: BTreeMap<String, Decimal> = by_category(&s.rows, add_months(m, -1), m.pred_opt().unwrap_or(m), ccy, &s.fx, &s.parents).into_iter().collect();
             let money = |d: Decimal| fmt_money(d, ccy);
@@ -326,9 +355,11 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 line(
                     "Take-home pay",
                     format!(
-                        "{} a payday ({}), {} × {} pays a year ÷ 12{}{}",
+                        "{} a payday ({}; gross {} a payday, {} a month), {} × {} pays a year ÷ 12{}{}",
                         money(p.net_pay()),
                         p.cycle.label().to_lowercase(),
+                        money(p.gross),
+                        money((p.gross * p.cycle.per_year() / Decimal::from(12)).round_dp(2)),
                         money(p.net_pay()),
                         p.cycle.per_year(),
                         if p.other_income.is_zero() { String::new() } else { format!(" + {} other income", money(p.other_income)) },
@@ -413,7 +444,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 let b = s.budgets.get(&c.id).copied();
                 let u = usual.get(&c.name).copied();
                 let mut sub = vec![match u {
-                    Some(u) => format!("Usually {}", money(u)),
+                    Some(u) => {
+                        let t = usual_text(&c.name, u, subs_m, one_off, ccy);
+                        format!("U{}", &t[1..])
+                    }
                     None => "Nothing in the last six months".into(),
                 }];
                 if let Some(l) = last.get(&c.name) {
@@ -627,7 +661,7 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
         "Your Spending",
         "Each category starts at what you usually spend (the median of your last six months) or the budget you already have. Change any of them; leave one empty for no budget. Fixed bills are marked — the savings step only trims the flexible ones.",
     );
-    let usual = suggest(&s.rows, m, MONTHS, ccy, &s.fx, &s.parents);
+    let (usual, subs_m, one_off) = usual(&s, m);
     let lb = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
     let cat_entries: Rc<Vec<(Category, gtk::Entry)>> = Rc::new(
         s.cats
@@ -637,7 +671,7 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
                 let u = usual.get(&c.name).copied();
                 let r = adw::ActionRow::builder()
                     .title(glib::markup_escape_text(&c.name))
-                    .subtitle(format!("{}{}", if core::is_fixed(&c.name) { "Fixed bill" } else { "Flexible" }, u.map(|u| format!(" · usually {}", money(u))).unwrap_or_default()))
+                    .subtitle(format!("{}{}", if core::is_fixed(&c.name) { "Fixed bill" } else { "Flexible" }, u.map(|u| format!(" · {}", usual_text(&c.name, u, subs_m, one_off, ccy))).unwrap_or_default()))
                     .build();
                 let e = gtk::Entry::builder().placeholder_text(ccy.symbol()).width_chars(9).valign(gtk::Align::Center).input_purpose(gtk::InputPurpose::Number).build();
                 e.set_text(&amount_text(s.budgets.get(&c.id).copied().or(u).unwrap_or_default()));
@@ -705,7 +739,9 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
             let (p, budgets) = read();
             let deducted: Vec<String> = p.deductions.iter().map(|d| format!("{} {}", if d.name.is_empty() { "deduction" } else { &d.name }, money(p.deduction(d)))).collect();
             take_home.set_label(&format!(
-                "Take-home {} a payday{} → {} a month ({} × {} ÷ 12)",
+                "Gross {} a payday = {} a month.\nTake-home {} a payday{} → {} a month ({} × {} ÷ 12)",
+                money(p.gross),
+                money((p.gross * p.cycle.per_year() / Decimal::from(12)).round_dp(2)),
                 money(p.net_pay()),
                 if deducted.is_empty() { String::new() } else { format!(" (gross {} − {})", money(p.gross), deducted.join(" − ")) },
                 money(p.monthly_income() - p.other_income),
