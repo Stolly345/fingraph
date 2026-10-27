@@ -437,7 +437,30 @@ fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn()>, 
         TriageKind::Merchant => format!("We found {} from <tt>{}</tt>. How should we categorize <b>{}</b>?", esc(&amounts_text(g)), esc(&g.stem), esc(&g.suggested_payee)),
     });
     content.append(&q);
-    content.append(&dim(&format!("Latest: {}", g.sample)));
+    // the charges themselves: date, amount, account and the statement's own wording
+    let list = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
+    const SHOWN: usize = 6;
+    let row_for = |c: &fingraph_core::rules::TriageInput| {
+        let detail = if c.memo.is_empty() { c.raw.clone() } else { format!("{} — {}", c.raw, c.memo) };
+        let r = adw::ActionRow::builder()
+            .title(glib::markup_escape_text(&c.posted.format("%a %d %b %Y").to_string()))
+            .subtitle(glib::markup_escape_text(&format!("{} · {detail}", c.account)))
+            .subtitle_lines(2)
+            .build();
+        r.add_suffix(&gtk::Label::builder().label(fmt_money(c.amount, c.currency)).css_classes([if c.amount.is_sign_negative() { "amount-out" } else { "amount-in" }]).build());
+        r
+    };
+    for c in g.charges.iter().take(SHOWN) {
+        list.append(&row_for(c));
+    }
+    if g.charges.len() > SHOWN {
+        let more = adw::ExpanderRow::builder().title(format!("{} earlier", g.charges.len() - SHOWN)).build();
+        for c in &g.charges[SHOWN..] {
+            more.add_row(&row_for(c));
+        }
+        list.append(&more);
+    }
+    content.append(&list);
 
     // payee + scope
     let opts = adw::PreferencesGroup::new();

@@ -1228,7 +1228,7 @@ impl Db {
         let rows = self.transactions(&TxFilter { entity_ids: entity_ids.to_vec(), uncategorized_only: true, ..Default::default() })?;
         let items: Vec<rules::TriageInput> = rows
             .iter()
-            .map(|t| rules::TriageInput { id: t.id, entity_id: t.entity_id, posted: t.posted, raw: t.raw_description.clone(), memo: t.memo.clone(), amount: t.amount, currency: t.currency })
+            .map(|t| rules::TriageInput { id: t.id, entity_id: t.entity_id, posted: t.posted, raw: t.raw_description.clone(), memo: t.memo.clone(), amount: t.amount, currency: t.currency, account: t.account_name.clone() })
             .collect();
         Ok(rules::triage_groups(&items))
     }

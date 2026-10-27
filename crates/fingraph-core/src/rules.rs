@@ -255,6 +255,7 @@ pub struct TriageInput {
     pub memo: String,
     pub amount: Decimal,
     pub currency: Currency,
+    pub account: String,
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +275,8 @@ pub struct TriageGroup {
     pub currency: Currency,
     pub cadence: Option<i64>,
     pub sample: String,
+    /// Every charge in the group, newest first, so you can tell which payment is which.
+    pub charges: Vec<TriageInput>,
 }
 
 /// Group uncategorised transactions by merchant stem; the biggest groups first.
@@ -320,6 +323,11 @@ pub fn triage_groups(items: &[TriageInput]) -> Vec<TriageGroup> {
                 currency: latest.currency,
                 cadence: cad,
                 sample: if latest.memo.is_empty() { latest.raw.clone() } else { format!("{} — {}", latest.raw, latest.memo) },
+                charges: {
+                    let mut c: Vec<TriageInput> = v.iter().map(|t| (*t).clone()).collect();
+                    c.sort_by(|a, b| b.posted.cmp(&a.posted).then(b.id.cmp(&a.id)));
+                    c
+                },
                 stem,
             }
         })
@@ -362,7 +370,7 @@ mod tests {
     #[test]
     fn triage_finds_subscriptions_and_transfers() {
         let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
-        let t = |id, date, raw: &str, amt: &str| TriageInput { id, entity_id: 1, posted: date, raw: raw.into(), memo: String::new(), amount: amt.parse().unwrap(), currency: Currency::USD };
+        let t = |id, date, raw: &str, amt: &str| TriageInput { id, entity_id: 1, posted: date, raw: raw.into(), memo: String::new(), amount: amt.parse().unwrap(), currency: Currency::USD, account: "Visa".into() };
         let g = triage_groups(&[
             t(5, d(6, 1), "ABM WITHDRAWAL", "-100.00"),
             t(6, d(7, 1), "ABM WITHDRAWAL", "-100.00"),
@@ -376,6 +384,7 @@ mod tests {
         assert_eq!(g[0].count, 3);
         assert_eq!(g[0].cadence, Some(30));
         assert_eq!(g[0].suggested_payee, "HBO Max");
+        assert_eq!(g[0].charges.iter().map(|c| c.posted).collect::<Vec<_>>(), vec![d(8, 3), d(7, 3), d(6, 3)], "newest first");
         assert_eq!(g[1].kind, TriageKind::Transfer);
         assert_eq!(g[2].kind, TriageKind::Merchant, "a monthly cash withdrawal is not a subscription");
     }
