@@ -603,7 +603,7 @@ mod tests {
         let subs_cat = db.category_id("Subscriptions & Digital").unwrap();
         let util = db.category_id("Utilities").unwrap();
         for (pat, cat, sub) in [("HBO MAX", subs_cat, true), ("CUC", util, false)] {
-            db.learn(&crate::rules::Rule { id: 0, kind: crate::rules::RuleKind::NormalizedTokens, pattern: pat.into(), clean_payee: None, category_id: cat, is_subscription: sub, is_transfer: false, expected_cadence: None, entity_id: None }).unwrap();
+            db.learn(&crate::rules::Rule { id: 0, kind: crate::rules::RuleKind::NormalizedTokens, pattern: pat.into(), clean_payee: None, category_id: cat, is_subscription: sub, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None }).unwrap();
         }
         let rows = db.transactions(&TxFilter::default()).unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();

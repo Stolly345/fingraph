@@ -10,9 +10,10 @@ use std::sync::LazyLock;
 
 use crate::Currency;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuleKind {
     /// Every word of the pattern appears in the merchant stem (the wizard's default).
+    #[default]
     NormalizedTokens,
     Substring,
     Regex,
@@ -34,7 +35,7 @@ impl RuleKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
     pub id: i64,
     pub kind: RuleKind,
@@ -47,6 +48,9 @@ pub struct Rule {
     pub expected_cadence: Option<i64>,
     /// `None` = every workspace.
     pub entity_id: Option<i64>,
+    /// Matching payments are business expenses of this workspace.
+    #[serde(default)]
+    pub business_entity_id: Option<i64>,
 }
 
 impl Rule {
@@ -350,7 +354,7 @@ mod tests {
 
     #[test]
     fn rules_match_on_stems() {
-        let r = Rule { id: 1, kind: RuleKind::NormalizedTokens, pattern: "FOSTER'S FOOD FAIR".into(), clean_payee: None, category_id: Some(3), is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None };
+        let r = Rule { id: 1, kind: RuleKind::NormalizedTokens, pattern: "FOSTER'S FOOD FAIR".into(), clean_payee: None, category_id: Some(3), is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None };
         assert!(r.matches("POS PURCHASE", "FOSTER'S FOOD FAIR #12 CAMANA BAY"));
         assert!(!r.matches("POS PURCHASE", "KIRK MARKET"));
     }

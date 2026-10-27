@@ -374,7 +374,7 @@ pub fn triage(app: &Rc<App>) {
 
 /// Learn the answer for a group: a rule over its merchant stem, applied to every match.
 #[allow(clippy::too_many_arguments)]
-fn answer(app: &Rc<App>, g: &TriageGroup, category_id: Option<i64>, payee: &str, subscription: bool, scope: Option<i64>, next: &Rc<dyn Fn()>, answered: &Rc<std::cell::Cell<usize>>) {
+fn answer(app: &Rc<App>, g: &TriageGroup, category_id: Option<i64>, payee: &str, subscription: bool, (scope, business): (Option<i64>, Option<i64>), next: &Rc<dyn Fn()>, answered: &Rc<std::cell::Cell<usize>>) {
     let rule = Rule {
         id: 0,
         kind: RuleKind::NormalizedTokens,
@@ -385,6 +385,7 @@ fn answer(app: &Rc<App>, g: &TriageGroup, category_id: Option<i64>, payee: &str,
         is_transfer: false,
         expected_cadence: if subscription { g.cadence.or(Some(30)) } else { None },
         entity_id: scope,
+        business_entity_id: business,
     };
     match app.db.learn(&rule) {
         Ok(n) => {
@@ -392,6 +393,9 @@ fn answer(app: &Rc<App>, g: &TriageGroup, category_id: Option<i64>, payee: &str,
             let _ = app.db.set_category(&g.tx_ids, category_id);
             if subscription {
                 let _ = app.db.set_subscription(&g.tx_ids, true);
+            }
+            if business.is_some() {
+                let _ = app.db.set_business(&g.tx_ids, business);
             }
             answered.set(answered.get() + 1);
             app.toast(&format!("Learned “{}” · updated {} transaction{}", g.suggested_payee, n.max(g.count), if n.max(g.count) == 1 { "" } else { "s" }));
@@ -433,11 +437,43 @@ fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn()>, 
         .selected(if g.entity_ids.len() == 1 { 0 } else { scope_ids.len() as u32 - 1 })
         .build();
     opts.add(&scope_row);
+    // "this was a business expense": books every matching payment to a business workspace
+    let biz_row = adw::SwitchRow::builder().title("Business expense").subtitle("Count it in a business P&L, not personal spending").build();
+    opts.add(&biz_row);
+    let biz: Rc<std::cell::Cell<Option<i64>>> = Rc::default();
+    {
+        let (w, biz, home) = (Rc::downgrade(app), biz.clone(), g.entity_ids.first().copied().unwrap_or_default());
+        biz_row.connect_active_notify(move |row| {
+            let Some(a) = w.upgrade() else { return };
+            if !row.is_active() {
+                biz.set(None);
+                row.set_subtitle("Count it in a business P&L, not personal spending");
+                return;
+            }
+            if biz.get().is_some() {
+                return;
+            }
+            let (biz, row2, row3) = (biz.clone(), row.clone(), row.clone());
+            a.with_business(
+                home,
+                move |a, id| {
+                    biz.set(Some(id));
+                    row2.set_subtitle(&format!("Booked to {}", a.entity_name(id)));
+                },
+                move |_| row3.set_active(false),
+            );
+        });
+    }
+
     let scope = {
         let r = scope_row.clone();
         move || scope_ids.get(r.selected() as usize).copied().flatten()
     };
     let scope = Rc::new(scope);
+    let scope = {
+        let (s, biz) = (scope.clone(), biz.clone());
+        Rc::new(move || (s(), biz.get()))
+    };
 
     // category chips (hidden behind "pick category" for subscription/transfer cards)
     let chips_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).visible(g.kind == TriageKind::Merchant).build();
@@ -493,7 +529,7 @@ fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn()>, 
             let (w, g2, scope2, next2, ans) = (Rc::downgrade(app), g.clone(), scope.clone(), next.clone(), answered.clone());
             yes.connect_clicked(move |_| {
                 let Some(a) = w.upgrade() else { return };
-                match a.db.mark_transfers(&g2.tx_ids, &g2.stem, scope2()) {
+                match a.db.mark_transfers(&g2.tx_ids, &g2.stem, scope2().0) {
                     Ok(n) => {
                         ans.set(ans.get() + 1);
                         a.toast(&format!("Marked as transfers · {n} new pair{} matched across your accounts", if n == 1 { "" } else { "s" }));

@@ -115,6 +115,9 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 if rule.is_transfer {
                     bits.push("internal transfer".into());
                 }
+                if let Some(b) = rule.business_entity_id {
+                    bits.push(format!("business expense of {}", a.entity_name(b)));
+                }
                 bits.push(scope);
                 let r = adw::ActionRow::builder()
                     .title(glib::markup_escape_text(&format!("{}  “{}”", rule.kind.as_str(), rule.pattern)))
@@ -177,6 +180,10 @@ fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
     let scope = adw::ComboRow::builder().title("Applies to").model(&gtk::StringList::new(&scope_names.iter().map(String::as_str).collect::<Vec<_>>())).build();
     let sub = adw::SwitchRow::builder().title("Subscription").build();
     let transfer = adw::SwitchRow::builder().title("Internal transfer").build();
+    let biz_ents: Vec<_> = ents.iter().filter(|e| e.kind != fingraph_core::EntityKind::Personal).cloned().collect();
+    let mut biz_names = vec!["No".to_string()];
+    biz_names.extend(biz_ents.iter().map(|e| e.name.clone()));
+    let business = adw::ComboRow::builder().title("Business expense of").model(&gtk::StringList::new(&biz_names.iter().map(String::as_str).collect::<Vec<_>>())).build();
     if let Some(r) = &existing {
         kind.set_selected(RuleKind::ALL.iter().position(|k| *k == r.kind).unwrap_or(0) as u32);
         pattern.set_text(&r.pattern);
@@ -185,9 +192,10 @@ fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
         scope.set_selected(r.entity_id.and_then(|id| ents.iter().position(|e| e.id == id)).map_or(0, |i| i + 1) as u32);
         sub.set_active(r.is_subscription);
         transfer.set_active(r.is_transfer);
+        business.set_selected(r.business_entity_id.and_then(|id| biz_ents.iter().position(|e| e.id == id)).map_or(0, |i| i + 1) as u32);
     }
     let g = adw::PreferencesGroup::new();
-    for row in [kind.upcast_ref::<gtk::Widget>(), pattern.upcast_ref(), payee.upcast_ref(), category.upcast_ref(), scope.upcast_ref(), sub.upcast_ref(), transfer.upcast_ref()] {
+    for row in [kind.upcast_ref::<gtk::Widget>(), pattern.upcast_ref(), payee.upcast_ref(), category.upcast_ref(), scope.upcast_ref(), sub.upcast_ref(), transfer.upcast_ref(), business.upcast_ref()] {
         g.add(row);
     }
     let d = adw::AlertDialog::new(Some(if existing.is_some() { "Edit Rule" } else { "New Rule" }), None);
@@ -214,6 +222,7 @@ fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
             is_transfer: transfer.is_active(),
             expected_cadence: if sub.is_active() { Some(30) } else { None },
             entity_id: (scope.selected() as usize).checked_sub(1).and_then(|i| ents.get(i)).map(|e| e.id),
+            business_entity_id: (business.selected() as usize).checked_sub(1).and_then(|i| biz_ents.get(i)).map(|e| e.id),
         };
         if let Some(old) = &existing {
             let _ = a.db.delete_rule(old.id);

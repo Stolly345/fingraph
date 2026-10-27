@@ -43,7 +43,7 @@ fn category_choices(cats: &[Category]) -> (Vec<String>, Vec<Option<i64>>) {
 /// Offer to turn a manual edit into a learned rule for this merchant.
 fn offer_rule(app: &Rc<App>, t: &TxRow, category_id: Option<i64>, payee: Option<String>, what: &str) {
     let stem = merchant_stem(&t.raw_description, &t.memo);
-    let rule = Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: stem.clone(), clean_payee: payee, category_id, is_subscription: t.is_subscription, is_transfer: false, expected_cadence: None, entity_id: Some(t.entity_id) };
+    let rule = Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: stem.clone(), clean_payee: payee, category_id, is_subscription: t.is_subscription, is_transfer: false, expected_cadence: None, entity_id: Some(t.entity_id), business_entity_id: None };
     app.toast_action(
         &format!("Remember: {what} for every “{stem}”?"),
         "Remember",
@@ -83,11 +83,13 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let bulk_cat = gtk::MenuButton::builder().label("Categorize").popover(&cat_pop).build();
     let bulk_tag = gtk::Button::with_label("Tag…");
     let bulk_sub = gtk::Button::with_label("Mark Subscription");
+    let bulk_biz = gtk::Button::with_label("Business Expense");
     let bulk_unlink = gtk::Button::with_label("Not a Transfer");
     let bulk_del = gtk::Button::builder().icon_name("user-trash-symbolic").tooltip_text("Delete selected").css_classes(["destructive-action"]).build();
     bar.pack_end(&bulk_del);
     bar.pack_end(&bulk_unlink);
     bar.pack_end(&bulk_sub);
+    bar.pack_end(&bulk_biz);
     bar.pack_end(&bulk_tag);
     bar.pack_end(&bulk_cat);
     bar.pack_end(&summary);
@@ -232,6 +234,63 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     dd.set_widget_name(&t.id.to_string());
                     let pos = ids.borrow().iter().position(|c| *c == t.category_id).unwrap_or(0);
                     dd.set_selected(pos as u32);
+                })
+            },
+        );
+    }
+    {
+        let w = Rc::downgrade(app);
+        col(
+            "Business",
+            false,
+            Box::new(move |item| {
+                let cb = gtk::CheckButton::builder().halign(gtk::Align::Center).build();
+                let w = w.clone();
+                cb.connect_toggled(move |cb| {
+                    let Some(a) = w.upgrade() else { return };
+                    let Ok(id) = cb.widget_name().parse::<i64>() else { return };
+                    let Ok(t) = a.db.transaction(id) else { return };
+                    // binding sets the box too: only act on a real change
+                    if cb.is_active() == t.business_entity_id.is_some() {
+                        return;
+                    }
+                    if !cb.is_active() {
+                        let _ = a.db.set_business(&[id], None);
+                        a.toast(&format!("{} is personal again", t.clean_payee));
+                        return a.refresh();
+                    }
+                    a.with_business(t.account_entity_id, move |a: &Rc<App>, biz| {
+                        if a.db.set_business(&[t.id], Some(biz)).is_ok() {
+                            let stem = merchant_stem(&t.raw_description, &t.memo);
+                            let rule = Rule { kind: RuleKind::NormalizedTokens, pattern: stem.clone(), entity_id: Some(t.account_entity_id), business_entity_id: Some(biz), ..Default::default() };
+                            a.toast_action(
+                                &format!("Booked to {}. Always treat “{stem}” as a business expense?", a.entity_name(biz)),
+                                "Always",
+                                Rc::new(move |a: &Rc<App>| match a.db.learn(&rule) {
+                                    Ok(n) => {
+                                        a.toast(&format!("Rule saved · {n} transaction{} booked to the business", if n == 1 { "" } else { "s" }));
+                                        a.refresh();
+                                    }
+                                    Err(e) => a.toast(&e.to_string()),
+                                }),
+                            );
+                            a.refresh();
+                        }
+                    }, |a| a.refresh());
+                });
+                item.set_child(Some(&cb));
+            }),
+            {
+                let w = Rc::downgrade(app);
+                Box::new(move |item, t| {
+                    let cb = item.child().and_downcast::<gtk::CheckButton>().unwrap();
+                    cb.set_widget_name(&t.id.to_string());
+                    cb.set_active(t.business_entity_id.is_some());
+                    let tip = match (t.business_entity_id, w.upgrade()) {
+                        (Some(b), Some(a)) => format!("Business expense of {} (paid from {})", a.entity_name(b), t.account_name),
+                        _ => "Tick if this was a business expense".to_string(),
+                    };
+                    cb.set_tooltip_text(Some(&tip));
                 })
             },
         );
@@ -423,6 +482,25 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         });
     }
     bar.set_revealed(true);
+    {
+        let (w, sr) = (Rc::downgrade(app), selected_rows.clone());
+        bulk_biz.connect_clicked(move |_| {
+            let Some(a) = w.upgrade() else { return };
+            let rows = sr();
+            let Some(home) = rows.first().map(|t| t.account_entity_id) else { return };
+            let ids: Vec<i64> = rows.iter().map(|t| t.id).collect();
+            a.with_business(
+                home,
+                move |a, biz| {
+                    if a.db.set_business(&ids, Some(biz)).is_ok() {
+                        a.toast(&format!("{} transactions booked to {}", ids.len(), a.entity_name(biz)));
+                        a.refresh();
+                    }
+                },
+                |_| {},
+            );
+        });
+    }
     {
         let (w, sr) = (Rc::downgrade(app), selected_rows.clone());
         bulk_sub.connect_clicked(move |_| {

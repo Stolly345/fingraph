@@ -509,6 +509,57 @@ impl App {
         self.toasts.add_toast(adw::Toast::builder().title(glib::markup_escape_text(msg)).timeout(4).build());
     }
 
+    /// Pick the business workspace an expense paid from `home`'s account belongs to: the only one
+    /// there is, a choice when there are several, or a new one when there are none.
+    pub fn with_business(self: &Rc<Self>, home: i64, then: impl Fn(&Rc<App>, i64) + 'static, cancelled: impl Fn(&Rc<App>) + 'static) {
+        let ents = self.entities.borrow().clone();
+        let biz: Vec<_> = ents.iter().filter(|e| e.id != home && e.kind != fingraph_core::EntityKind::Personal).cloned().collect();
+        if biz.len() == 1 {
+            return then(self, biz[0].id);
+        }
+        let group = adw::PreferencesGroup::new();
+        let pick = adw::ComboRow::builder().title("Business").model(&gtk::StringList::new(&biz.iter().map(|e| e.name.as_str()).collect::<Vec<_>>())).build();
+        let name = adw::EntryRow::builder().title("New business workspace name").text("Business").build();
+        let (title, body) = if biz.is_empty() {
+            group.add(&name);
+            ("Create a Business Workspace", "Business expenses are booked to their own workspace, so its P&L and tax summary include them and your personal spending doesn't.")
+        } else {
+            group.add(&pick);
+            ("Which Business?", "The expense moves to that workspace's P&L.")
+        };
+        let d = adw::AlertDialog::new(Some(title), Some(body));
+        d.set_extra_child(Some(&group));
+        d.add_responses(&[("cancel", "Cancel"), ("ok", "Book to Business")]);
+        d.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+        let w = Rc::downgrade(self);
+        let then = Rc::new(then);
+        d.connect_response(None, move |_, r| {
+            let Some(a) = w.upgrade() else { return };
+            if r != "ok" {
+                return cancelled(&a);
+            }
+            let id = if biz.is_empty() {
+                let n = name.text().trim().to_string();
+                let base = a.entities.borrow().iter().find(|e| e.id == home).map_or(Currency::KYD, |e| e.base_currency);
+                match a.db.entity_by_name(&n).ok().flatten().map(Ok).unwrap_or_else(|| a.db.create_entity(&n, fingraph_core::EntityKind::Business, base)) {
+                    Ok(id) => {
+                        a.reload_entities();
+                        id
+                    }
+                    Err(e) => return a.toast(&e.to_string()),
+                }
+            } else {
+                biz[pick.selected() as usize].id
+            };
+            then(&a, id);
+        });
+        d.present(Some(&self.win));
+    }
+
+    pub fn entity_name(&self, id: i64) -> String {
+        self.entities.borrow().iter().find(|e| e.id == id).map_or_else(|| "?".into(), |e| e.name.clone())
+    }
+
     pub fn toast_action(self: &Rc<Self>, msg: &str, label: &str, f: AppFn) {
         let t = adw::Toast::builder().title(glib::markup_escape_text(msg)).button_label(label).timeout(8).build();
         let w = Rc::downgrade(self);

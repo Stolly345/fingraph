@@ -124,6 +124,10 @@ CREATE TABLE learned_rules (
     created_at TEXT NOT NULL
 );
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+"#, r#"
+-- a payment from a personal account that was really a business expense is booked to that workspace
+ALTER TABLE transactions ADD COLUMN business_entity_id INTEGER REFERENCES entities(id) ON DELETE SET NULL;
+ALTER TABLE learned_rules ADD COLUMN business_entity_id INTEGER REFERENCES entities(id) ON DELETE SET NULL;
 "#];
 
 /// (name, kind, children)
@@ -212,6 +216,7 @@ pub struct DocumentRow {
 #[derive(Debug, Clone)]
 pub struct TxRow {
     pub id: i64,
+    /// The workspace the row counts in: its account's, or the business it was flagged for.
     pub document_id: Option<i64>,
     pub account_id: i64,
     pub account_name: String,
@@ -237,6 +242,10 @@ pub struct TxRow {
     pub is_subscription: bool,
     pub transfer_peer: Option<i64>,
     pub review: ReviewStatus,
+    /// Flagged as a business expense of this workspace (paid from another workspace's account).
+    pub business_entity_id: Option<i64>,
+    /// The workspace of the account it was paid from.
+    pub account_entity_id: i64,
 }
 
 impl TxRow {
@@ -308,10 +317,10 @@ pub fn file_sha256(path: &Path) -> Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-const TX_SELECT: &str = "SELECT t.id, t.document_id, t.account_id, a.name, a.account_type, COALESCE(bp.short_name, ''), a.entity_id, e.base_currency,
+const TX_SELECT: &str = "SELECT t.id, t.document_id, t.account_id, a.name, a.account_type, COALESCE(bp.short_name, ''), COALESCE(t.business_entity_id, a.entity_id), e.base_currency,
     t.posted_date, t.effective_date, t.raw_description, t.clean_payee, t.amount, t.currency, t.amount_in_entity_currency, t.running_balance_reported,
-    t.category_id, c.name, c.kind, t.sub_entity_tag, t.memo, t.fitid, t.is_recurring, t.is_subscription, t.transfer_peer_tx_id, t.review_status
-    FROM transactions t JOIN accounts a ON a.id = t.account_id JOIN entities e ON e.id = a.entity_id
+    t.category_id, c.name, c.kind, t.sub_entity_tag, t.memo, t.fitid, t.is_recurring, t.is_subscription, t.transfer_peer_tx_id, t.review_status, t.business_entity_id, a.entity_id
+    FROM transactions t JOIN accounts a ON a.id = t.account_id JOIN entities e ON e.id = COALESCE(t.business_entity_id, a.entity_id)
     LEFT JOIN bank_profiles bp ON bp.id = a.bank_profile_id LEFT JOIN categories c ON c.id = t.category_id";
 
 fn tx_row(r: &Row) -> rusqlite::Result<TxRow> {
@@ -342,6 +351,8 @@ fn tx_row(r: &Row) -> rusqlite::Result<TxRow> {
         is_subscription: r.get(23)?,
         transfer_peer: r.get(24)?,
         review: ReviewStatus::parse(&r.get::<_, String>(25)?),
+        business_entity_id: r.get(26)?,
+        account_entity_id: r.get(27)?,
     })
 }
 
@@ -529,7 +540,8 @@ impl Db {
         let fx = self.fx()?;
         let rows: Vec<(i64, String, String, String, String)> = {
             let mut st = self.conn.prepare(
-                "SELECT t.id, t.amount, t.currency, e.base_currency, t.memo FROM transactions t JOIN accounts a ON a.id = t.account_id JOIN entities e ON e.id = a.entity_id WHERE (?1 IS NULL OR e.id = ?1)",
+                "SELECT t.id, t.amount, t.currency, e.base_currency, t.memo FROM transactions t JOIN accounts a ON a.id = t.account_id
+                 JOIN entities e ON e.id = COALESCE(t.business_entity_id, a.entity_id) WHERE (?1 IS NULL OR e.id = ?1 OR a.entity_id = ?1)",
             )?;
             st.query_map([entity], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect::<rusqlite::Result<_>>()?
         };
@@ -691,6 +703,14 @@ impl Db {
                         if rule.is_some_and(|r| r.category_id.is_some()) { ReviewStatus::AutoCategorized } else { ReviewStatus::NeedsReview }.as_str()
                     ],
                 )?;
+                if n > 0
+                    && let Some(b) = rule.and_then(|r| r.business_entity_id).filter(|b| *b != entity_id)
+                {
+                    let id = tx.last_insert_rowid();
+                    let base: String = tx.query_row("SELECT base_currency FROM entities WHERE id = ?1", [b], |r| r.get(0))?;
+                    let v = entity_amount(&fx, t.amount, s.currency, ccy(&base), t.fx_original);
+                    tx.execute("UPDATE transactions SET business_entity_id = ?2, amount_in_entity_currency = ?3, amount_in_entity_minor = ?4 WHERE id = ?1", params![id, b, v.to_string(), to_minor(v)])?;
+                }
                 if n == 0 {
                     rep.duplicates += 1;
                 } else {
@@ -826,7 +846,7 @@ impl Db {
                 tx.execute("UPDATE transactions SET clean_payee = ?2, is_subscription = 0 WHERE id = ?1", params![t.id, payee])?;
             } else {
                 tx.execute(
-                    "UPDATE transactions SET category_id = NULL, clean_payee = ?2, is_subscription = 0, review_status = 'NeedsReview' WHERE id = ?1",
+                    "UPDATE transactions SET category_id = NULL, clean_payee = ?2, is_subscription = 0, business_entity_id = NULL, review_status = 'NeedsReview' WHERE id = ?1",
                     params![t.id, payee],
                 )?;
                 n += 1;
@@ -883,7 +903,7 @@ impl Db {
         let mut sql = format!("{TX_SELECT} WHERE 1=1");
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
         if !f.entity_ids.is_empty() {
-            sql += &format!(" AND a.entity_id IN ({})", f.entity_ids.iter().map(|_| "?").collect::<Vec<_>>().join(","));
+            sql += &format!(" AND COALESCE(t.business_entity_id, a.entity_id) IN ({})", f.entity_ids.iter().map(|_| "?").collect::<Vec<_>>().join(","));
             args.extend(f.entity_ids.iter().map(|&i| i.into()));
         }
         if let Some(d) = f.from {
@@ -956,6 +976,29 @@ impl Db {
         Ok(())
     }
 
+    /// Book these transactions to a business workspace (`None` = back to their own account's).
+    /// The workspace amount is recalculated in case the business keeps a different currency.
+    pub fn set_business(&self, ids: &[i64], business: Option<i64>) -> Result<()> {
+        let fx = self.fx()?;
+        let tx = self.conn.unchecked_transaction()?;
+        for id in ids {
+            let (amt, cur, memo, home): (String, String, String, i64) = tx.query_row(
+                "SELECT t.amount, t.currency, t.memo, a.entity_id FROM transactions t JOIN accounts a ON a.id = t.account_id WHERE t.id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            let target = business.filter(|b| *b != home);
+            let base: String = tx.query_row("SELECT base_currency FROM entities WHERE id = ?1", [target.unwrap_or(home)], |r| r.get(0))?;
+            let v = entity_amount(&fx, dec(&amt), ccy(&cur), ccy(&base), parse_fx_memo(&memo));
+            tx.execute(
+                "UPDATE transactions SET business_entity_id = ?2, amount_in_entity_currency = ?3, amount_in_entity_minor = ?4 WHERE id = ?1",
+                params![id, target, v.to_string(), to_minor(v)],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn add_manual(&self, account_id: i64, doc_id: Option<i64>, posted: NaiveDate, description: &str, amount: Decimal, memo: &str) -> Result<i64> {
         let (cur, base): (String, String) = self.conn.query_row("SELECT a.currency, e.base_currency FROM accounts a JOIN entities e ON e.id = a.entity_id WHERE a.id = ?1", [account_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         let fx = self.fx()?;
@@ -1013,7 +1056,7 @@ impl Db {
     }
 
     pub fn rules(&self) -> Result<Vec<Rule>> {
-        let mut st = self.conn.prepare("SELECT id, kind, pattern, clean_payee, category_id, is_subscription, is_transfer, expected_cadence, entity_id FROM learned_rules ORDER BY id")?;
+        let mut st = self.conn.prepare("SELECT id, kind, pattern, clean_payee, category_id, is_subscription, is_transfer, expected_cadence, entity_id, business_entity_id FROM learned_rules ORDER BY id")?;
         let rows = st.query_map([], |r| {
             Ok(Rule {
                 id: r.get(0)?,
@@ -1025,6 +1068,7 @@ impl Db {
                 is_transfer: r.get(6)?,
                 expected_cadence: r.get(7)?,
                 entity_id: r.get(8)?,
+                business_entity_id: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1034,8 +1078,8 @@ impl Db {
     /// (except ones the user confirmed by hand). Returns how many rows changed.
     pub fn learn(&self, rule: &Rule) -> Result<usize> {
         self.conn.execute(
-            "INSERT INTO learned_rules (kind, pattern, clean_payee, category_id, is_subscription, is_transfer, expected_cadence, entity_id, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            params![rule.kind.as_str(), rule.pattern, rule.clean_payee, rule.category_id, rule.is_subscription, rule.is_transfer, rule.expected_cadence, rule.entity_id, now()],
+            "INSERT INTO learned_rules (kind, pattern, clean_payee, category_id, is_subscription, is_transfer, expected_cadence, entity_id, created_at, business_entity_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![rule.kind.as_str(), rule.pattern, rule.clean_payee, rule.category_id, rule.is_subscription, rule.is_transfer, rule.expected_cadence, rule.entity_id, now(), rule.business_entity_id],
         )?;
         let mut saved = rule.clone();
         saved.id = self.conn.last_insert_rowid();
@@ -1044,7 +1088,8 @@ impl Db {
 
     /// `force`: also overwrite rows marked Confirmed (the wizard's answers are confirmations).
     pub fn apply_rule(&self, rule: &Rule, force: bool) -> Result<usize> {
-        let rows = self.transactions(&TxFilter { entity_ids: rule.entity_id.into_iter().collect(), ..Default::default() })?;
+        // a workspace rule covers what that workspace's accounts paid, wherever it was booked
+        let rows: Vec<TxRow> = self.transactions(&TxFilter::default())?.into_iter().filter(|t| rule.entity_id.is_none_or(|e| e == t.account_entity_id || e == t.entity_id)).collect();
         let tx = self.conn.unchecked_transaction()?;
         let mut n = 0;
         for t in rows.iter().filter(|t| rule.matches(&t.raw_description, &t.memo)) {
@@ -1052,13 +1097,18 @@ impl Db {
                 continue;
             }
             tx.execute(
-                "UPDATE transactions SET category_id = COALESCE(?2, category_id), clean_payee = COALESCE(?3, clean_payee), is_subscription = ?4, is_recurring = is_recurring OR ?4,
+                "UPDATE transactions SET category_id = COALESCE(?2, category_id), clean_payee = COALESCE(?3, clean_payee), is_subscription = is_subscription OR ?4, is_recurring = is_recurring OR ?4,
                  review_status = ?5 WHERE id = ?1",
                 params![t.id, rule.category_id, rule.clean_payee, rule.is_subscription, if force { "Confirmed" } else { "AutoCategorized" }],
             )?;
             n += 1;
         }
         tx.commit()?;
+        if let Some(b) = rule.business_entity_id {
+            let ids: Vec<i64> = rows.iter().filter(|t| rule.matches(&t.raw_description, &t.memo) && t.account_entity_id != b).map(|t| t.id).collect();
+            self.set_business(&ids, Some(b))?;
+            n = n.max(ids.len());
+        }
         if rule.is_transfer {
             self.match_transfers()?;
         }
@@ -1161,7 +1211,7 @@ impl Db {
     pub fn mark_transfers(&self, ids: &[i64], stem: &str, entity_id: Option<i64>) -> Result<usize> {
         let cat = self.category_id("Transfers")?;
         self.set_category(ids, cat)?;
-        let rule = Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: stem.into(), clean_payee: None, category_id: cat, is_subscription: false, is_transfer: true, expected_cadence: None, entity_id };
+        let rule = Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: stem.into(), clean_payee: None, category_id: cat, is_subscription: false, is_transfer: true, expected_cadence: None, entity_id, business_entity_id: None };
         self.learn(&rule)?;
         self.match_transfers()
     }
@@ -1192,7 +1242,7 @@ impl Db {
         // a few answers already learned, so triage starts with the interesting merchants
         for (pattern, cat, payee) in [("SALARY", "Salary", "Island Air (Salary)"), ("RENT RECEIVED", "Rental Income", "Rent"), ("SERVICE CHARGE", "Bank Fees & Interest", "Scotiabank")] {
             let category_id = self.category_id(cat)?;
-            self.learn(&Rule { id: 0, kind: RuleKind::Substring, pattern: pattern.into(), clean_payee: Some(payee.into()), category_id, is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None })?;
+            self.learn(&Rule { id: 0, kind: RuleKind::Substring, pattern: pattern.into(), clean_payee: Some(payee.into()), category_id, is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None })?;
         }
         for (pattern, tag) in [("UNIT A", "Unit A"), ("UNIT B", "Unit B")] {
             let ids: Vec<i64> = self.transactions(&TxFilter { entity_ids: vec![business], search: pattern.into(), ..Default::default() })?.iter().map(|t| t.id).collect();
@@ -1295,7 +1345,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         db.load_demo().unwrap();
         let cat = db.category_id("Utilities").unwrap();
-        let n = db.learn(&Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: "CUC".into(), clean_payee: Some("CUC".into()), category_id: cat, is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None }).unwrap();
+        let n = db.learn(&Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: "CUC".into(), clean_payee: Some("CUC".into()), category_id: cat, is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None }).unwrap();
         assert!(n >= 24, "{n}");
         let left = db.transactions(&TxFilter { search: "CUC WEB".into(), uncategorized_only: true, ..Default::default() }).unwrap();
         assert!(left.is_empty());
@@ -1307,7 +1357,7 @@ mod tests {
         db.load_demo().unwrap();
         let before = db.uncategorized_count(&[]).unwrap();
         let cat = db.category_id("Groceries").unwrap();
-        db.learn(&Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: "KIRK MARKET".into(), clean_payee: Some("Kirk".into()), category_id: cat, is_subscription: true, is_transfer: false, expected_cadence: None, entity_id: None }).unwrap();
+        db.learn(&Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: "KIRK MARKET".into(), clean_payee: Some("Kirk".into()), category_id: cat, is_subscription: true, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None }).unwrap();
         assert!(db.uncategorized_count(&[]).unwrap() < before);
         db.reset_learning(&[]).unwrap();
         assert!(db.rules().unwrap().is_empty());
@@ -1315,6 +1365,28 @@ mod tests {
         assert!(rows.iter().all(|t| !t.is_subscription && (t.transfer_peer.is_some() || t.category_id.is_none())));
         assert!(rows.iter().any(|t| t.transfer_peer.is_some()), "transfer pairs survive");
         assert!(db.uncategorized_count(&[]).unwrap() >= before);
+    }
+
+    #[test]
+    fn business_expenses_paid_personally_count_in_the_business() {
+        let db = Db::open_in_memory().unwrap();
+        db.load_demo().unwrap();
+        let personal = db.entity_by_name("Personal").unwrap().unwrap();
+        let business = db.entity_by_name("Business — Property").unwrap().unwrap();
+        let kirk = |e: i64| db.transactions(&TxFilter { entity_ids: vec![e], search: "KIRK HOME".into(), ..Default::default() }).unwrap();
+        let before = kirk(personal);
+        assert!(!before.is_empty() && kirk(business).is_empty());
+        // one by hand: it moves to the business P&L and out of personal spending
+        db.set_business(&[before[0].id], Some(business)).unwrap();
+        assert_eq!(kirk(business).len(), 1);
+        assert_eq!(kirk(personal).len(), before.len() - 1);
+        assert_eq!(db.transaction(before[0].id).unwrap().account_entity_id, personal);
+        // remembered as a rule: every Kirk Home Centre payment, and future imports too
+        db.learn(&Rule { pattern: "KIRK HOME CENTRE".into(), business_entity_id: Some(business), ..Default::default() }).unwrap();
+        assert!(kirk(personal).is_empty());
+        assert_eq!(kirk(business).len(), before.len());
+        db.set_business(&[before[0].id], None).unwrap();
+        assert_eq!(kirk(personal).len(), 1);
     }
 
     #[test]
