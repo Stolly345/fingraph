@@ -20,6 +20,8 @@ PDFs, backups). Full product and system reference: [`docs/PRD.md`](docs/PRD.md).
 - **Keeps money apart**: workspaces (Personal, Business, Rental), a consolidated view, a
   business-expense flag, split charges (the rental's share of one receipt), and "Business owes you"
   cards that track personal money spent on the business until it's paid back.
+- **Budget**: a monthly amount per category, filled from what you usually spend (median of the last
+  six months), with this month against it, what's over, and where the month is heading.
 - **Rules** can be limited to an amount (*only when CI$ 125.00*) or match a reference number.
 - **Receipts**: drop a PDF or photo on a transaction; export the P&L with every receipt for your
   accountant.
@@ -41,7 +43,7 @@ wins for that transaction.
 | Path | What |
 |---|---|
 | `crates/fingraph-core` | No GUI: scanner (`parser/`), ledger (`db.rs`), rules & triage (`rules.rs`), directory (`merchants.rs`, `data/merchants.tsv`), splits/reimbursements/attachments/coverage (`workflows.rs`), insights, exports, preferences, demo statements |
-| `crates/fingraph` | The app: one file per page (`dashboard`, `review`, `changes`, `transactions`, `account`, `statements`, `rules`, `profiles`, `export`, `preferences`, `wizard`, `split`, `owed`, `statement`, `txedit`, `directory`), Cairo charts in `charts.rs` |
+| `crates/fingraph` | The app: one file per page (`dashboard`, `review`, `changes`, `transactions`, `account`, `statements`, `rules`, `profiles`, `export`, `preferences`, `wizard`, `split`, `owed`, `statement`, `txedit`, `directory`, `budget`), Cairo charts in `charts.rs` |
 | `packaging/` | Desktop entry (PDF "Open With") and icon |
 | `docs/PRD.md` | Product and system reference |
 
@@ -62,7 +64,7 @@ simulated year (Personal + a property business, all five banks, KYD and USD) to 
 2. Answer **To Review**. Each answer becomes a rule.
 3. Check **Overview** and **What Changed**; click any account in the sidebar for its breakdown.
 
-Shortcuts: Ctrl+1 … Ctrl+8 for the main pages, Ctrl+F search, Ctrl+O import, Ctrl+, preferences.
+Shortcuts: Ctrl+1 … Ctrl+9 for the main pages, Ctrl+F search, Ctrl+O import, Ctrl+, preferences.
 
 ## Adding businesses
 
@@ -95,7 +97,7 @@ Rescan when run from the app).
 ## Tests
 
 ```sh
-cargo test --workspace                            # 42 tests: bank layouts, healing, ledger, rules, directory, insights, exports
+cargo test --workspace                            # 43 tests: bank layouts, healing, ledger, rules, directory, insights, exports
 cargo test -p fingraph-core -- --ignored real     # also scans your statements in ~/.local/share/fingraph/documents
 cargo clippy --workspace --all-targets
 ```

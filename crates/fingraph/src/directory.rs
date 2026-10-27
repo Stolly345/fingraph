@@ -32,7 +32,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     body.append(&dim("When no business matches, these words suggest a category in To Review (or file it, if Preferences → Triage → keyword auto-filing is on). The first matching line wins; a * matches any ending."));
     let kw = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
     for (words, cat) in KEYWORDS {
-        let r = adw::ActionRow::builder().title(glib::markup_escape_text(&words.replace('|', " · "))).subtitle(*cat).build();
+        let r = adw::ActionRow::builder().title(glib::markup_escape_text(&words.replace('|', " · "))).subtitle(glib::markup_escape_text(cat)).build();
         r.set_widget_name(&format!("{words} {cat}").to_lowercase());
         kw.append(&r);
     }

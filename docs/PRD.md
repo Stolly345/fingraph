@@ -82,7 +82,7 @@ from a terminal.
 
 ---
 
-## 5. Data model (schema v4)
+## 5. Data model (schema v5)
 
 `entities` (workspaces: Personal / Business / RentalProperty, base currency) · `bank_profiles` ·
 `accounts` (bank, masked number, type, currency, OFX ids, `hidden`) · `fx_rates` (peg 1 KYD = 1.20 USD)
@@ -95,7 +95,8 @@ Income / Expense / Transfer) · `learned_rules` (kind, pattern, payee, category,
 transfer, cadence, workspace scope, business workspace, optional amount range) · `splits` (lines of
 a split charge: amount, category, workspace, tag, memo) · `reimbursements` (which business charge or
 split line was paid back by which incoming transaction) · `attachments` (receipt files, keyed by
-account + FITID so they survive rescans) · `settings` (incl. the preferences JSON).
+account + FITID so they survive rescans) · `budgets` (view scope = sorted workspace ids,
+top-level category, monthly amount + currency) · `settings` (incl. the preferences JSON).
 
 - **FITID** = SHA-256 of account, date, amount, normalised description and same-day sequence:
   re-importing a statement or an overlapping one never duplicates.
@@ -106,7 +107,7 @@ account + FITID so they survive rescans) · `settings` (incl. the preferences JS
   lines. Transfers can't be split. Splits, reimbursements and attachments follow the FITID through rescans.
 - **Attachments** are copied (named by content hash) into `~/.local/share/fingraph/attachments/`.
 - Migrations: v1 base, v2 business-expense columns, v3 hidden accounts, v4 amount rules, splits,
-  reimbursements, attachments. Missing categories are
+  reimbursements, attachments; v5 budgets. Missing categories are
   seeded into older ledgers on open; nothing is renamed or removed.
 
 ---
@@ -205,6 +206,12 @@ only).
 - **Subscriptions**: per merchant, cost per cycle, yearly cost, last charge, price rises, lapsed.
   Billing cycle from the charges' rhythm; a lone charge is guessed **yearly** (a monthly plan
   corrects itself on its next charge); a picker (weekly … yearly) overrides any guess.
+- **Budget**: per top-level expense category, a monthly amount kept per view (Personal, the
+  business and a consolidated set each have their own). "Usually" = median of the last 6 whole
+  months, months without spending counted as zero, rounded up to 10; **Fill From My Spending** sets
+  it for every category without a budget, **Use** per row. Shows spent / budget with a bar (red when
+  over), last month, totals, spending outside budgeted categories, uncategorised spending (→ To
+  Review) and the month's projected total at the current pace. Previous months browsable.
 - **Combined Statement**: every transaction of the ticked accounts (default all in the workspace)
   in date order, a heading per month (in / out / net, transfers not counted, closing combined
   balance), the combined balance after each line (printed balances, else carried from the
@@ -221,8 +228,8 @@ Thresholds, chart months, hidden cards and categories left out of spending are p
 
 **Sidebar** (`AdwNavigationSplitView`): workspace switcher (one workspace or Consolidated across a
 chosen set) at the top; Overview, To Review *(count)*, What Changed *(count)*, Transactions,
-Combined Statement, Subscriptions *(monthly cost)*, Statements *(⚠ when one doesn't balance)*, Reports & Export
-(Ctrl+1–7; Combined Statement Ctrl+8); **Accounts** — each with its last verified balance (owed in red), opening its overview;
+Combined Statement, Budget, Subscriptions *(monthly cost)*, Statements *(⚠ when one doesn't balance)*, Reports & Export
+(Ctrl+1–7; Combined Statement Ctrl+8, Budget Ctrl+9); **Accounts** — each with its last verified balance (owed in red), opening its overview;
 **Setup** — Rules & Categories, Business Directory, Bank Profiles, Preferences (Ctrl+,). The header shows only the
 controls a page uses (date range, KYD | USD). Reopens on the last page.
 
@@ -269,7 +276,7 @@ banks, one deliberately unreadable line to show the inspector).
 
 ## 11. Quality
 
-- `cargo test --workspace`: 42 tests — five bank layouts, rollover, date inheritance, sign healing,
+- `cargo test --workspace`: 43 tests — five bank layouts, rollover, date inheritance, sign healing,
   both Pass-5 recoveries, a whole demo year, ledger (dedup, transfers, card payments, business
   expenses, backups/restore/erase, rescan keeping edits), rules and truncation matching, amount and reference rules, splits,
   attachments, coverage, directory and keywords, insights, subscriptions, exports. Plus `-- --ignored real` re-scanning the owner's
@@ -304,6 +311,7 @@ banks, one deliberately unreadable line to show the inspector).
 | Landed cost | Tags as projects; freight & duty suggestions |
 | Couldn't change charges in "owes you" | ✎ per charge opens the transaction editor; the dialog reopens with fresh totals |
 | Where's the business database? | Business Directory page: search, seen-in-statements count, keywords, Override… → rule |
+| Budgeting from past spending | Budget page: 6-month median suggestions, per-view budgets, pace projection |
 | Consolidated statement | Combined Statement page: chosen accounts, months, combined balance, click to edit |
 | CUC summer bills, annual renewals | Year-over-year spike check; Annual renewals card |
 

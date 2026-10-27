@@ -2,6 +2,7 @@
 //! and proves them, Smart Triage learns your merchants, and the dashboard shows where money goes.
 
 mod account;
+mod budget;
 mod changes;
 mod charts;
 mod dashboard;
@@ -33,7 +34,7 @@ use std::rc::Rc;
 const APP_ID: &str = "dev.fingraph.FinGraph";
 
 /// Ctrl+1 to Ctrl+7.
-const MAIN_PAGES: [&str; 8] = ["overview", "review", "changes", "transactions", "subscriptions", "statements", "export", "statement"];
+const MAIN_PAGES: [&str; 9] = ["overview", "review", "changes", "transactions", "subscriptions", "statements", "export", "statement", "budget"];
 
 /// Which workspaces the window shows.
 #[derive(Clone, PartialEq)]
@@ -197,6 +198,7 @@ impl App {
         let (c, cr) = changes::build(&app);
         let (t, tr) = transactions::build(&app);
         let (cs, csr) = statement::build(&app);
+        let (bu, bur) = budget::build(&app);
         let (sb, sbr) = rules::build(&app, rules::Part::Subscriptions);
         let (st, str_) = statements::build(&app);
         let (e, er) = export::build(&app);
@@ -213,6 +215,7 @@ impl App {
             ("changes", "What Changed", "dialog-information-symbolic", c, cr),
             ("transactions", "Transactions", "view-list-symbolic", t, tr),
             ("statement", "Combined Statement", "view-paged-symbolic", cs, csr),
+            ("budget", "Budget", "wallet-symbolic", bu, bur),
             ("subscriptions", "Subscriptions", "media-playlist-repeat-symbolic", sb, sbr),
             ("statements", "Statements", "x-office-document-symbolic", st, str_),
             ("export", "Reports & Export", "document-save-symbolic", e, er),
@@ -589,7 +592,7 @@ impl App {
         }
         // the header shows only what this page uses
         self.range_dd.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "export" | "account"));
-        self.ccy_box.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "subscriptions" | "export"));
+        self.ccy_box.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "budget" | "subscriptions" | "export"));
         if MAIN_PAGES.contains(&name) {
             let mut p = self.db.prefs();
             if p.last_page != name {
@@ -834,6 +837,7 @@ fn css() {
          .chart-card { padding: 12px; }
          .amount-out { color: @error_color; font-feature-settings: 'tnum'; }
          .amount-in { color: @success_color; font-feature-settings: 'tnum'; }
+         levelbar.over block.filled { background-color: @error_color; }
          .tnum { font-feature-settings: 'tnum'; }
          .chip { border-radius: 99px; padding: 4px 12px; }
          .bank-card { padding: 12px; min-width: 150px; }",

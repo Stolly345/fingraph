@@ -172,6 +172,14 @@ CREATE TABLE attachments (
     added_at TEXT NOT NULL
 );
 CREATE INDEX attachments_tx ON attachments(account_id, fitid);
+"#, r#"
+CREATE TABLE budgets (
+    scope TEXT NOT NULL,
+    category_id INTEGER NOT NULL,
+    amount TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    PRIMARY KEY (scope, category_id)
+);
 "#];
 
 /// (name, kind, children). Missing ones are added to existing ledgers on open; lists are shown A–Z.

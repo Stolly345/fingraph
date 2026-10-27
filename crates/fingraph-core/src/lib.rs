@@ -12,6 +12,7 @@ pub mod parser;
 pub mod prefs;
 pub mod rules;
 pub mod workflows;
+pub mod budget;
 
 pub use money::{Currency, Fx};
 pub use rust_decimal::Decimal;
