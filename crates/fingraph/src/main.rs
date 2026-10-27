@@ -12,8 +12,10 @@ mod profiles;
 mod review;
 mod rules;
 mod split;
+mod statement;
 mod statements;
 mod transactions;
+mod txedit;
 mod wizard;
 
 use adw::prelude::*;
@@ -30,7 +32,7 @@ use std::rc::Rc;
 const APP_ID: &str = "dev.fingraph.FinGraph";
 
 /// Ctrl+1 to Ctrl+7.
-const MAIN_PAGES: [&str; 7] = ["overview", "review", "changes", "transactions", "subscriptions", "statements", "export"];
+const MAIN_PAGES: [&str; 8] = ["overview", "review", "changes", "transactions", "subscriptions", "statements", "export", "statement"];
 
 /// Which workspaces the window shows.
 #[derive(Clone, PartialEq)]
@@ -193,6 +195,7 @@ impl App {
         let (rv, rvr) = review::build(&app);
         let (c, cr) = changes::build(&app);
         let (t, tr) = transactions::build(&app);
+        let (cs, csr) = statement::build(&app);
         let (sb, sbr) = rules::build(&app, rules::Part::Subscriptions);
         let (st, str_) = statements::build(&app);
         let (e, er) = export::build(&app);
@@ -207,6 +210,7 @@ impl App {
             ("review", "To Review", "mail-unread-symbolic", rv, rvr),
             ("changes", "What Changed", "dialog-information-symbolic", c, cr),
             ("transactions", "Transactions", "view-list-symbolic", t, tr),
+            ("statement", "Combined Statement", "view-paged-symbolic", cs, csr),
             ("subscriptions", "Subscriptions", "media-playlist-repeat-symbolic", sb, sbr),
             ("statements", "Statements", "x-office-document-symbolic", st, str_),
             ("export", "Reports & Export", "document-save-symbolic", e, er),
@@ -581,8 +585,8 @@ impl App {
             self.side_list.select_row(Some(&r));
         }
         // the header shows only what this page uses
-        self.range_dd.set_visible(matches!(name, "overview" | "changes" | "transactions" | "export" | "account"));
-        self.ccy_box.set_visible(matches!(name, "overview" | "changes" | "transactions" | "subscriptions" | "export"));
+        self.range_dd.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "export" | "account"));
+        self.ccy_box.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "subscriptions" | "export"));
         if MAIN_PAGES.contains(&name) {
             let mut p = self.db.prefs();
             if p.last_page != name {
@@ -865,6 +869,7 @@ fn debug_shot(app: &Rc<App>) {
         Ok("report") => statements::open_first_report(app),
         Ok(d) if d.starts_with("split:") => split::dialog(app, d[6..].parse().unwrap_or(0)),
         Ok(d) if d.starts_with("owed:") => owed::debug_open(app, d[5..].parse().unwrap_or(0)),
+        Ok(d) if d.starts_with("tx:") => txedit::dialog(app, d[3..].parse().unwrap_or(0), None),
         Ok("preferences") => {
             preferences::show(app);
             if let (Some(d), Ok(page)) = (app.win.visible_dialog().and_downcast::<adw::PreferencesDialog>(), std::env::var("FINGRAPH_PAGE")) {

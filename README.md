@@ -26,7 +26,9 @@ PDFs, backups). Full product and system reference: [`docs/PRD.md`](docs/PRD.md).
 - **Statement coverage**: an account × month grid shows verified, missing and broken months.
 - **Shows** an overview with six interactive charts, What Changed (price rises, bill spikes,
   possible double charges, bank fees, category drift, P&L, annual renewals; bills compared with the
-  same month last year), subscriptions with their real yearly cost, an overview per account, and
+  same month last year), subscriptions with their real yearly cost, an overview per account, a
+  **Combined Statement** (all or chosen accounts, month by month with a combined running balance;
+  click a line to edit it), and
   projects (tags) with total landed cost including freight and customs duty.
 - **Exports** CSV, QIF, OFX 1.0.2, QuickBooks QBO, a P&L, and a P&L with receipts.
 
@@ -39,7 +41,7 @@ wins for that transaction.
 | Path | What |
 |---|---|
 | `crates/fingraph-core` | No GUI: scanner (`parser/`), ledger (`db.rs`), rules & triage (`rules.rs`), directory (`merchants.rs`, `data/merchants.tsv`), splits/reimbursements/attachments/coverage (`workflows.rs`), insights, exports, preferences, demo statements |
-| `crates/fingraph` | The app: one file per page (`dashboard`, `review`, `changes`, `transactions`, `account`, `statements`, `rules`, `profiles`, `export`, `preferences`, `wizard`, `split`, `owed`), Cairo charts in `charts.rs` |
+| `crates/fingraph` | The app: one file per page (`dashboard`, `review`, `changes`, `transactions`, `account`, `statements`, `rules`, `profiles`, `export`, `preferences`, `wizard`, `split`, `owed`, `statement`, `txedit`), Cairo charts in `charts.rs` |
 | `packaging/` | Desktop entry (PDF "Open With") and icon |
 | `docs/PRD.md` | Product and system reference |
 
@@ -60,7 +62,7 @@ simulated year (Personal + a property business, all five banks, KYD and USD) to 
 2. Answer **To Review**. Each answer becomes a rule.
 3. Check **Overview** and **What Changed**; click any account in the sidebar for its breakdown.
 
-Shortcuts: Ctrl+1 … Ctrl+7 for the main pages, Ctrl+F search, Ctrl+O import, Ctrl+, preferences.
+Shortcuts: Ctrl+1 … Ctrl+8 for the main pages, Ctrl+F search, Ctrl+O import, Ctrl+, preferences.
 
 ## Adding businesses
 

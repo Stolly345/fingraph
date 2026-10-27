@@ -63,8 +63,13 @@ pub fn fill(app: &Rc<App>, into: &gtk::Box) {
 fn dialog(app: &Rc<App>, business: i64) {
     let Some(biz) = app.entities.borrow().iter().find(|e| e.id == business).cloned() else { return };
     let items: Vec<OwedItem> = app.db.owed_items(business).unwrap_or_default().into_iter().filter(|i| !i.reimbursed).collect();
+    if items.is_empty() {
+        return app.toast(&format!("{} doesn't owe you anything now", biz.name));
+    }
     let page = adw::PreferencesPage::new();
-    let g = adw::PreferencesGroup::builder().title("Charges Being Paid Back").description("Untick any the business isn't repaying yet.").build();
+    let g = adw::PreferencesGroup::builder().title("Charges Being Paid Back").description("Untick any the business isn't repaying yet. ✎ changes a charge's category, workspace or split.").build();
+    // set once the dialog exists: editing a charge reopens this dialog with fresh totals
+    let this: Rc<RefCell<Option<adw::Dialog>>> = Rc::default();
     let checks: Rc<RefCell<Vec<(gtk::CheckButton, OwedItem)>>> = Rc::default();
     let total = gtk::Label::builder().css_classes(["heading", "tnum"]).build();
     let pay = adw::ComboRow::builder().title("Paid back by").subtitle("Money that came into your accounts; nearest to the total first").build();
@@ -91,6 +96,27 @@ fn dialog(app: &Rc<App>, business: i64) {
             .build();
         r.add_prefix(&c);
         r.add_suffix(&gtk::Label::builder().label(fmt_money(i.owed, i.currency)).css_classes(["tnum"]).build());
+        let edit = gtk::Button::builder().icon_name("document-edit-symbolic").tooltip_text("Change this charge: category, workspace, split, receipt").valign(gtk::Align::Center).css_classes(["flat"]).build();
+        {
+            let (w, this, tx) = (Rc::downgrade(app), this.clone(), i.tx_id);
+            edit.connect_clicked(move |_| {
+                let Some(a) = w.upgrade() else { return };
+                let (w2, this) = (Rc::downgrade(&a), this.clone());
+                crate::txedit::dialog(
+                    &a,
+                    tx,
+                    Some(Rc::new(move || {
+                        if let Some(d) = this.borrow_mut().take() {
+                            d.close();
+                        }
+                        if let Some(a) = w2.upgrade() {
+                            dialog(&a, business);
+                        }
+                    })),
+                );
+            });
+        }
+        r.add_suffix(&edit);
         let rc = recompute.clone();
         c.connect_toggled(move |_| rc());
         g.add(&r);
@@ -109,6 +135,7 @@ fn dialog(app: &Rc<App>, business: i64) {
     tv.add_top_bar(&header);
     tv.set_content(Some(&page));
     let dlg = adw::Dialog::builder().title(format!("{} Owes You", biz.name)).content_width(720).content_height(640).child(&tv).build();
+    *this.borrow_mut() = Some(dlg.clone());
     {
         let (w, dlg) = (Rc::downgrade(app), dlg.clone());
         record.connect_clicked(move |_| {

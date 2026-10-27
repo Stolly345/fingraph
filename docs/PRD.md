@@ -205,6 +205,11 @@ only).
 - **Subscriptions**: per merchant, cost per cycle, yearly cost, last charge, price rises, lapsed.
   Billing cycle from the charges' rhythm; a lone charge is guessed **yearly** (a monthly plan
   corrects itself on its next charge); a picker (weekly … yearly) overrides any guess.
+- **Combined Statement**: every transaction of the ticked accounts (default all in the workspace)
+  in date order, a heading per month (in / out / net, transfers not counted, closing combined
+  balance), the combined balance after each line (printed balances, else carried from the
+  statement's opening; owed amounts negative; shown once every ticked account has one), a
+  jump-to-month list. Clicking a line opens the transaction editor.
 - **Account overview**: spent, received, transfers, latest verified balance, by category, top
   merchants, month by month, balance history — in the account's own currency.
 
@@ -216,8 +221,8 @@ Thresholds, chart months, hidden cards and categories left out of spending are p
 
 **Sidebar** (`AdwNavigationSplitView`): workspace switcher (one workspace or Consolidated across a
 chosen set) at the top; Overview, To Review *(count)*, What Changed *(count)*, Transactions,
-Subscriptions *(monthly cost)*, Statements *(⚠ when one doesn't balance)*, Reports & Export
-(Ctrl+1–7); **Accounts** — each with its last verified balance (owed in red), opening its overview;
+Combined Statement, Subscriptions *(monthly cost)*, Statements *(⚠ when one doesn't balance)*, Reports & Export
+(Ctrl+1–7; Combined Statement Ctrl+8); **Accounts** — each with its last verified balance (owed in red), opening its overview;
 **Setup** — Rules & Categories, Bank Profiles, Preferences (Ctrl+,). The header shows only the
 controls a page uses (date range, KYD | USD). Reopens on the last page.
 
@@ -228,6 +233,10 @@ receipts) · Statements (drop zone, bank badge, reconciliation badge, Scan Pass 
 pass, Convert for skipped lines) · Reports & Export (CSV, QIF, OFX, QBO per account, P&L CSV, **P&L with receipts** — a folder with
 the P&L and every attached receipt named `date payee amount` — and Projects & Landed Cost) · Rules & Categories (edit, re-apply, forget, add category) · Bank Profiles (edit, test a
 PDF, new profile from a sample's detected columns).
+
+**Transaction editor** (from the Combined Statement and the "owes you" dialog's ✎): payee,
+category, which workspace it counts in, tag, memo, subscription, Split…, receipts, Show in
+Transactions; changes apply as made.
 
 **Preferences** (7 pages, saved as they change): General (start workspace, date range, currency,
 light/dark) · Money (rate, statement rates win, codes vs symbols, brackets) · Import (statement
@@ -293,6 +302,8 @@ banks, one deliberately unreadable line to show the inspector).
 | Split charges, director's loan | 1-to-N splits; "owes you" cards + Record Repayment |
 | Receipts | Local attachments by drop or button; P&L with receipts export |
 | Landed cost | Tags as projects; freight & duty suggestions |
+| Couldn't change charges in "owes you" | ✎ per charge opens the transaction editor; the dialog reopens with fresh totals |
+| Consolidated statement | Combined Statement page: chosen accounts, months, combined balance, click to edit |
 | CUC summer bills, annual renewals | Year-over-year spike check; Annual renewals card |
 
 ---
