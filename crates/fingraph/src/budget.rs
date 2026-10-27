@@ -44,6 +44,14 @@ struct Snap {
     cats: Vec<Category>,
     budgets: BTreeMap<i64, Decimal>,
     plan: Option<Plan>,
+    /// Categories counted as fixed expenses.
+    fixed: Vec<String>,
+}
+
+impl Snap {
+    fn is_fixed(&self, category: &str) -> bool {
+        self.fixed.iter().any(|c| c == category)
+    }
 }
 
 fn snap(app: &App) -> Snap {
@@ -54,7 +62,7 @@ fn snap(app: &App) -> Snap {
     let cats = app.categories().into_iter().filter(|c| c.parent_id.is_none() && c.kind == fingraph_core::db::CategoryKind::Expense).collect();
     let budgets = app.db.budgets(&sc).unwrap_or_default().into_iter().map(|(c, (v, k))| (c, fx.convert(v, k, ccy))).collect();
     let plan = app.db.plan(&sc).map(|p| plan_in(p, ccy, &fx));
-    Snap { ccy, fx, parents: app.parents(), scope: sc, rows, cats, budgets, plan }
+    Snap { ccy, fx, parents: app.parents(), scope: sc, rows, cats, budgets, plan, fixed: app.db.fixed_categories() }
 }
 
 /// A saved plan's amounts in the display currency (percent deductions stay percent).
@@ -233,6 +241,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     // the plan: pay in, budget out, what's left to save, and where that leads
     let plan_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
     body.append(&plan_box);
+    let split_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
+    body.append(&split_box);
     let projection = Chart::new(230);
 
     body.append(&heading("Categories"));
@@ -434,11 +444,117 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 plan_box.append(&card);
             }
 
+            // ── fixed vs variable
+            clear(&split_box);
+            {
+                // a category's monthly amount: its budget, else what it usually costs
+                let amount = |c: &Category| s.budgets.get(&c.id).copied().or_else(|| usual.get(&c.name).copied()).unwrap_or_default();
+                let group = |fixed: bool| -> Vec<&Category> {
+                    let mut v: Vec<&Category> = s.cats.iter().filter(|c| s.is_fixed(&c.name) == fixed && !amount(c).is_zero()).collect();
+                    v.sort_by_key(|c| std::cmp::Reverse(amount(c)));
+                    v
+                };
+                let (fx_cats, var_cats) = (group(true), group(false));
+                let total = |v: &[&Category]| v.iter().map(|c| amount(c)).sum::<Decimal>();
+                let spent_in = |v: &[&Category]| v.iter().filter_map(|c| now.get(&c.name)).copied().sum::<Decimal>();
+                let (fixed_t, var_t) = (total(&fx_cats), total(&var_cats));
+                let income = s.plan.as_ref().map(|p| p.monthly_income()).filter(|i| !i.is_zero());
+                let loans = s.plan.as_ref().map(|p| p.loan_payments).unwrap_or_default();
+                let save = income.map(|i| i - fixed_t - var_t - loans);
+
+                split_box.append(&heading("Fixed vs Variable"));
+                split_box.append(&dim(match income {
+                    Some(_) => "How your take-home divides each month: fixed expenses you can't easily change, variable spending you can, loan payments, and what's left to save. Amounts are budgets, or the usual cost where a category has no budget.",
+                    None => "Fixed expenses you can't easily change against variable spending you can. Amounts are budgets, or the usual cost where a category has no budget. Set up your pay (Set Up Budget…) to see them against your take-home.",
+                }));
+                // one bar, split in proportion
+                let mut parts: Vec<(&str, Decimal, charts::Rgb)> = vec![("Fixed", fixed_t, charts::BLUE), ("Variable", var_t, charts::ORANGE)];
+                if !loans.is_zero() {
+                    parts.push(("Loans", loans, charts::SLATE));
+                }
+                if let Some(sv) = save.filter(|v| v.is_sign_positive()) {
+                    parts.push(("Saved", sv, charts::GREEN));
+                }
+                let whole: Decimal = parts.iter().map(|p| p.1).sum();
+                let bar = gtk::DrawingArea::builder().content_height(22).hexpand(true).build();
+                {
+                    let parts: Vec<(f64, charts::Rgb)> = parts.iter().map(|p| (if whole.is_zero() { 0.0 } else { f(p.1 / whole) }, p.2)).collect();
+                    bar.set_draw_func(move |_, cr, w, h| {
+                        let (w, h) = (f64::from(w), f64::from(h));
+                        let r = 6.0;
+                        // rounded clip, then the segments side by side
+                        cr.new_sub_path();
+                        cr.arc(w - r, r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+                        cr.arc(w - r, h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
+                        cr.arc(r, h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+                        cr.arc(r, r, r, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+                        cr.close_path();
+                        cr.clip();
+                        let mut x = 0.0;
+                        for (share, (rr, g, b)) in &parts {
+                            cr.set_source_rgb(*rr, *g, *b);
+                            cr.rectangle(x, 0.0, w * share + 0.5, h);
+                            let _ = cr.fill();
+                            x += w * share;
+                        }
+                    });
+                }
+                split_box.append(&bar);
+                let legend = gtk::Box::builder().spacing(18).build();
+                for (name, v, (rr, g, b)) in &parts {
+                    let item = gtk::Box::builder().spacing(6).build();
+                    let sw = gtk::DrawingArea::builder().content_width(10).content_height(10).valign(gtk::Align::Center).build();
+                    let (rr, g, b) = (*rr, *g, *b);
+                    sw.set_draw_func(move |_, cr, _, _| {
+                        cr.set_source_rgb(rr, g, b);
+                        cr.arc(5.0, 5.0, 5.0, 0.0, std::f64::consts::TAU);
+                        let _ = cr.fill();
+                    });
+                    item.append(&sw);
+                    let pct = if whole.is_zero() { Decimal::ZERO } else { (*v / whole * Decimal::ONE_HUNDRED).round_dp(0) };
+                    item.append(&gtk::Label::builder().label(format!("{name} {} · {pct}%", money(*v))).css_classes(["caption", "tnum"]).build());
+                    legend.append(&item);
+                }
+                split_box.append(&legend);
+
+                // a card each, with its categories
+                let cards = gtk::Box::builder().spacing(12).homogeneous(true).build();
+                for (title, cats, t, class) in [("Fixed Expenses", &fx_cats, fixed_t, "amount-fixed"), ("Variable Expenses", &var_cats, var_t, "amount-variable")] {
+                    let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "kpi"]).build();
+                    card.append(&gtk::Label::builder().label(title).xalign(0.0).css_classes(["dim-label", "caption-heading"]).build());
+                    card.append(&gtk::Label::builder().label(format!("{} a month", money(t))).xalign(0.0).css_classes(["value", "tnum", class]).build());
+                    let sp = spent_in(cats);
+                    let of = match income {
+                        Some(i) => format!(" · {}% of take-home", (t / i * Decimal::ONE_HUNDRED).round_dp(0)),
+                        None => String::new(),
+                    };
+                    card.append(&dim(&format!("{} spent in {}{of}", money(sp), m.format("%B"))));
+                    let grid = gtk::Grid::builder().column_spacing(12).row_spacing(2).margin_top(6).build();
+                    for (i, c) in cats.iter().enumerate() {
+                        let budgeted = s.budgets.contains_key(&c.id);
+                        grid.attach(&gtk::Label::builder().label(&c.name).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["caption"]).build(), 0, i as i32, 1, 1);
+                        let l = gtk::Label::builder()
+                            .label(format!("{}{}", money(amount(c)), if budgeted { "" } else { " usual" }))
+                            .xalign(1.0)
+                            .css_classes(["caption", "tnum", if budgeted { "" } else { "dim-label" }])
+                            .build();
+                        grid.attach(&l, 1, i as i32, 1, 1);
+                    }
+                    if cats.is_empty() {
+                        card.append(&dim("None yet — mark categories below"));
+                    }
+                    card.append(&grid);
+                    cards.append(&card);
+                }
+                split_box.append(&cards);
+            }
+
             // ── one row per category that has a budget, spending or a usual amount
             list.remove_all();
             let mut shown: Vec<_> = s.cats.iter().filter(|c| s.budgets.contains_key(&c.id) || now.contains_key(&c.name) || usual.contains_key(&c.name)).collect();
             shown.sort_by_key(|c| std::cmp::Reverse(now.get(&c.name).copied().unwrap_or_default().max(s.budgets.get(&c.id).copied().unwrap_or_default())));
             let use_col = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
+            let kind_col = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
             for c in shown {
                 let sp = now.get(&c.name).copied().unwrap_or_default();
                 let b = s.budgets.get(&c.id).copied();
@@ -460,6 +576,24 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     }
                 }
                 let row = adw::ActionRow::builder().title(glib::markup_escape_text(&c.name)).subtitle(sub.join(" · ")).build();
+                let is_fixed = s.is_fixed(&c.name);
+                let kind = gtk::Button::builder()
+                    .label(if is_fixed { "Fixed" } else { "Variable" })
+                    .valign(gtk::Align::Center)
+                    .css_classes(["kind-pill", if is_fixed { "kind-fixed" } else { "kind-variable" }])
+                    .tooltip_text(if is_fixed { "A fixed expense — click to count it as variable" } else { "Variable spending — click to count it as a fixed expense" })
+                    .build();
+                kind_col.add_widget(&kind);
+                {
+                    let (w, name, redraw) = (Rc::downgrade(&a), c.name.clone(), redraw.clone());
+                    kind.connect_clicked(move |_| {
+                        if let Some(a) = w.upgrade() {
+                            let _ = a.db.set_fixed(&name, !is_fixed);
+                            redraw();
+                        }
+                    });
+                }
+                row.add_prefix(&kind);
 
                 let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).valign(gtk::Align::Center).width_request(260).build();
                 let status = gtk::Label::builder().xalign(1.0).css_classes(["tnum", "caption"]).build();
@@ -680,7 +814,7 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
     // ── 3. spending
     let (p3, b3) = step_page(
         "Your Spending",
-        "Each category starts at what you usually spend (the median of your last six months) or the budget you already have. Change any of them; leave one empty for no budget. Fixed bills are marked — the savings step only trims the flexible ones.",
+        "Each category starts at what you usually spend (the median of your last six months) or the budget you already have. Change any of them; leave one empty for no budget. Fixed expenses are marked (change which on the Budget page) — the savings step only trims the variable ones.",
     );
     let (usual, subs_m, one_off) = usual(&s, m);
     // Monthly | Fortnightly: what the amounts below mean (saved as monthly either way)
@@ -708,13 +842,14 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
             .collect(),
     );
     // each row's note, in the chosen unit
+    let fixed_names: Rc<Vec<String>> = Rc::new(s.fixed.clone());
     let subtitles = {
-        let (cat_entries, fortnightly) = (cat_entries.clone(), fortnightly.clone());
+        let (cat_entries, fortnightly, fixed_names) = (cat_entries.clone(), fortnightly.clone(), fixed_names.clone());
         move || {
             let k = if fortnightly.get() { Decimal::from(12) / Decimal::from(26) } else { Decimal::ONE };
             for l in cat_entries.iter() {
                 let note = l.usual.map(|u| format!(" · {}", usual_text(&l.cat.name, (u * k).round_dp(2), (subs_m * k).round_dp(2), (one_off * k).round_dp(2), ccy))).unwrap_or_default();
-                l.row.set_subtitle(&format!("{}{note}", if core::is_fixed(&l.cat.name) { "Fixed bill" } else { "Flexible" }));
+                l.row.set_subtitle(&format!("{}{note}", if fixed_names.contains(&l.cat.name) { "Fixed expense" } else { "Variable" }));
             }
         }
     };
@@ -726,7 +861,7 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
     // ── 4. savings
     let (p4, b4) = step_page(
         "Your Savings Goal",
-        "How much you want to put away each month — an amount, or a percent of take-home (20%). FinGraph does the arithmetic: take-home − spending − loans = what's left, and if that's short of the goal, how much the flexible categories need to shrink.",
+        "How much you want to put away each month — an amount, or a percent of take-home (20%). FinGraph does the arithmetic: take-home − spending − loans = what's left, and if that's short of the goal, how much the variable categories need to shrink.",
     );
     let g4 = adw::PreferencesGroup::new();
     let goal = adw::EntryRow::builder().title(format!("Save per month ({} or %)", ccy.symbol())).text(amount_text(start.savings_goal)).build();
@@ -735,7 +870,7 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
     let maths = gtk::Label::builder().xalign(0.0).wrap(true).selectable(true).css_classes(["card", "monospace"]).build();
     maths.set_margin_top(4);
     b4.append(&maths);
-    let scale = gtk::Button::builder().label("Trim Flexible Categories to Reach It").halign(gtk::Align::Start).css_classes(["pill"]).visible(false).build();
+    let scale = gtk::Button::builder().label("Trim Variable Categories to Reach It").halign(gtk::Align::Start).css_classes(["pill"]).visible(false).build();
     b4.append(&scale);
     let ahead = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label"]).build();
     b4.append(&ahead);
@@ -772,7 +907,7 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
     };
     let factor: Rc<Cell<Option<Decimal>>> = Rc::default();
     let recalc: Rc<dyn Fn()> = {
-        let (read, take_home, spend_total, maths, ahead, scale, cat_entries, factor) = (read.clone(), take_home.clone(), spend_total.clone(), maths.clone(), ahead.clone(), scale.clone(), cat_entries.clone(), factor.clone());
+        let (read, take_home, spend_total, maths, ahead, scale, cat_entries, factor, fixed_names) = (read.clone(), take_home.clone(), spend_total.clone(), maths.clone(), ahead.clone(), scale.clone(), cat_entries.clone(), factor.clone(), fixed_names.clone());
         Rc::new(move || {
             let (p, budgets) = read();
             let deducted: Vec<String> = p.deductions.iter().map(|d| format!("{} {}", if d.name.is_empty() { "deduction" } else { &d.name }, money(p.deduction(d)))).collect();
@@ -787,11 +922,11 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
                 p.cycle.per_year()
             ));
             let total: Decimal = budgets.iter().filter_map(|b| b.1).sum();
-            let fixed: Decimal = cat_entries.iter().zip(&budgets).filter(|(l, _)| core::is_fixed(&l.cat.name)).filter_map(|(_, b)| b.1).sum();
+            let fixed: Decimal = cat_entries.iter().zip(&budgets).filter(|(l, _)| fixed_names.contains(&l.cat.name)).filter_map(|(_, b)| b.1).sum();
             let flexible = total - fixed;
             let fn_ = |d: Decimal| money((d * Decimal::from(12) / Decimal::from(26)).round_dp(2));
             spend_total.set_label(&format!(
-                "Spending budget {} a month ({} a fortnight) — fixed bills {}, flexible {} a month",
+                "Spending budget {} a month ({} a fortnight) — fixed {}, variable {} a month",
                 money(total),
                 fn_(total),
                 money(fixed),
@@ -815,7 +950,7 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
                     match p.flexible_factor(fixed, flexible) {
                         Some(k) => {
                             lines.push(format!(
-                                "Solve take-home − loans − fixed − k × flexible = goal:\nk = ({} − {} − {} − {}) ÷ {} = {:.3}\nTrim every flexible category by {}% ({} → {}).",
+                                "Solve take-home − loans − fixed − k × variable = goal:\nk = ({} − {} − {} − {}) ÷ {} = {:.3}\nTrim every variable category by {}% ({} → {}).",
                                 money(p.monthly_income()),
                                 money(p.loan_payments),
                                 money(fixed),
@@ -829,7 +964,7 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
                             factor.set(Some(k));
                             scale.set_visible(true);
                         }
-                        None => lines.push("Even with no flexible spending it doesn't add up — lower the goal or the fixed bills.".into()),
+                        None => lines.push("Even with no variable spending it doesn't add up — lower the goal or the fixed expenses.".into()),
                     }
                 }
             }
@@ -929,10 +1064,10 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
         });
     }
     {
-        let (cat_entries, factor) = (cat_entries.clone(), factor.clone());
+        let (cat_entries, factor, fixed_names) = (cat_entries.clone(), factor.clone(), fixed_names.clone());
         scale.connect_clicked(move |_| {
             let Some(k) = factor.get() else { return };
-            for l in cat_entries.iter().filter(|l| !core::is_fixed(&l.cat.name)) {
+            for l in cat_entries.iter().filter(|l| !fixed_names.contains(&l.cat.name)) {
                 let e = &l.entry;
                 if let Some(v) = parse_user(&e.text()) {
                     // down to the nearest 5

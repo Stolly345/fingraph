@@ -214,6 +214,12 @@ only).
   Review) and the month's projected total at the current pace. Previous months browsable.
   - **Alerts**: *over* (spent > budget) or *near* (≥ 85% used while < 85% of the month has gone);
     sidebar badge ("2 over" in red, else "1 near"), an Overview card, amber/red bars.
+  - **Fixed vs Variable**: each category is fixed or variable (a pill on its row toggles it; saved
+    as the `budget_fixed` setting, defaulting to Bank Fees, Education, Government, Housing,
+    Insurance, Property Expense, Subscriptions & Digital, Utilities). A bar splits take-home into
+    fixed / variable / loans / saved (or fixed vs variable without a plan), and a card each lists the
+    categories (budget, else the usual cost) with this month's spending and share of take-home. The
+    wizard's trim applies to variable categories.
   - **Setup wizard** (Set Up Budget… / Edit Plan…), 4 steps: pay (cycle weekly / fortnightly /
     twice a month / monthly, next payday, gross, deductions as amount or % of gross; prefilled from a
     detected salary — same payer ≥ 3× in 120 days at a steady rhythm and amount, payroll wording
@@ -241,7 +247,8 @@ Thresholds, chart months, hidden cards and categories left out of spending are p
 
 ## 9. Interface
 
-**Sidebar** (`AdwNavigationSplitView`): workspace switcher (one workspace or Consolidated across a
+**Sidebar** (`AdwNavigationSplitView`): each page has a white symbolic icon on a coloured rounded
+tile (Setup pages slate); icons are all from Adwaita so none fall back to full-colour images; workspace switcher (one workspace or Consolidated across a
 chosen set) at the top; Overview, To Review *(count)*, What Changed *(count)*, Transactions,
 Combined Statement, Budget, Subscriptions *(monthly cost)*, Statements *(⚠ when one doesn't balance)*, Reports & Export
 (Ctrl+1–7; Combined Statement Ctrl+8, Budget Ctrl+9); **Accounts** — each with its last verified balance (owed in red), opening its overview;
@@ -326,6 +333,7 @@ banks, one deliberately unreadable line to show the inspector).
 | Landed cost | Tags as projects; freight & duty suggestions |
 | Couldn't change charges in "owes you" | ✎ per charge opens the transaction editor; the dialog reopens with fresh totals |
 | Where's the business database? | Business Directory page: search, seen-in-statements count, keywords, Override… → rule |
+| Budget icon red, others grey; fixed vs variable breakdown | `wallet-symbolic` didn't exist (fell back to a colour icon): every page now has a coloured tile with an Adwaita icon. Fixed vs Variable section + per-category switch |
 | Monthly / fortnightly in the wizard's spending step | Toggle; amounts convert at 26 fortnights ÷ 12 months, saved monthly |
 | "Subscriptions CI$ 860 a month" in the budget vs CI$ 161 on Subscriptions | The category also holds one-off digital purchases; its suggestion is now active subscriptions + the usual one-offs, labelled as such. Gross shown per payday and per month |
 | Budget: crash on Fill, over count, 85% alert, pay-based wizard with projections | RefCell borrow held across redraw (fixed); badge + Overview card; 4-step wizard, plan, trend projection |

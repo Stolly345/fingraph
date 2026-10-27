@@ -212,16 +212,16 @@ impl App {
         let pages: Vec<(&'static str, &str, &str, gtk::Widget, Refresh)> = vec![
             ("overview", "Overview", "view-grid-symbolic", o, or),
             ("review", "To Review", "mail-unread-symbolic", rv, rvr),
-            ("changes", "What Changed", "dialog-information-symbolic", c, cr),
-            ("transactions", "Transactions", "view-list-symbolic", t, tr),
+            ("changes", "What Changed", "preferences-system-notifications-symbolic", c, cr),
+            ("transactions", "Transactions", "view-list-bullet-symbolic", t, tr),
             ("statement", "Combined Statement", "view-paged-symbolic", cs, csr),
-            ("budget", "Budget", "wallet-symbolic", bu, bur),
+            ("budget", "Budget", "accessories-calculator-symbolic", bu, bur),
             ("subscriptions", "Subscriptions", "media-playlist-repeat-symbolic", sb, sbr),
             ("statements", "Statements", "x-office-document-symbolic", st, str_),
             ("export", "Reports & Export", "document-save-symbolic", e, er),
             ("rules", "Rules & Categories", "edit-find-replace-symbolic", r, rr),
-            ("directory", "Business Directory", "system-search-symbolic", dir, dirr),
-            ("profiles", "Bank Profiles", "preferences-system-symbolic", p, pr),
+            ("directory", "Business Directory", "folder-saved-search-symbolic", dir, dirr),
+            ("profiles", "Bank Profiles", "document-page-setup-symbolic", p, pr),
         ];
         for (name, title, icon, w, refresh) in pages {
             app.stack.add_titled(&w, Some(name), title);
@@ -606,7 +606,23 @@ impl App {
 
     fn side_row(&self, name: &str, title: &str, icon: &str) -> gtk::ListBoxRow {
         let row = gtk::Box::builder().spacing(12).margin_top(6).margin_bottom(6).margin_start(6).margin_end(6).build();
-        row.append(&gtk::Image::from_icon_name(icon));
+        // a white symbol on a rounded tile in the page's colour (Setup pages share a quiet slate)
+        let tile = match name {
+            "overview" => "tile-blue",
+            "review" => "tile-orange",
+            "changes" => "tile-purple",
+            "transactions" => "tile-teal",
+            "statement" => "tile-indigo",
+            "budget" => "tile-green",
+            "subscriptions" => "tile-pink",
+            "statements" => "tile-yellow",
+            "export" => "tile-cyan",
+            _ => "tile-slate",
+        };
+        let img = gtk::Image::builder().icon_name(icon).pixel_size(14).build();
+        let tile = gtk::Box::builder().css_classes(["side-tile", tile]).valign(gtk::Align::Center).halign(gtk::Align::Start).hexpand(false).build();
+        tile.append(&img);
+        row.append(&tile);
         row.append(&gtk::Label::builder().label(title).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build());
         let badge = gtk::Label::builder().css_classes(["dim-label", "caption", "tnum"]).build();
         row.append(&badge);
@@ -841,6 +857,24 @@ fn css() {
          .amount-in { color: @success_color; font-feature-settings: 'tnum'; }
          levelbar.over block.filled { background-color: @error_color; }
          levelbar block.near { background-color: @warning_color; }
+         .kind-pill { border-radius: 99px; padding: 2px 10px; min-height: 0; font-size: 0.8em; font-weight: 600; }
+         .kind-fixed { background: alpha(#3584e4, 0.18); color: #62a0ea; }
+         .kind-variable { background: alpha(#ff7800, 0.16); color: #ffa348; }
+         .amount-fixed { color: #62a0ea; }
+         .amount-variable { color: #ffa348; }
+         .side-tile { min-width: 24px; min-height: 24px; border-radius: 7px; color: white; }
+         .side-tile image { margin: 5px; }
+         .side-tile image { -gtk-icon-shadow: 0 1px rgba(0,0,0,0.15); }
+         .tile-blue { background: linear-gradient(to bottom, #4a9cf0, #2a72d8); }
+         .tile-orange { background: linear-gradient(to bottom, #ffa348, #f07818); }
+         .tile-purple { background: linear-gradient(to bottom, #b07fd6, #8a4fc0); }
+         .tile-teal { background: linear-gradient(to bottom, #3ec6b8, #1f9a8e); }
+         .tile-indigo { background: linear-gradient(to bottom, #7c86e8, #5560d0); }
+         .tile-green { background: linear-gradient(to bottom, #5ccf7a, #2fa856); }
+         .tile-pink { background: linear-gradient(to bottom, #f27ab0, #d94b8c); }
+         .tile-yellow { background: linear-gradient(to bottom, #f6c445, #e0a21a); }
+         .tile-cyan { background: linear-gradient(to bottom, #45b4e6, #2190c4); }
+         .tile-slate { background: linear-gradient(to bottom, #8e98a6, #6b7584); }
          .tnum { font-feature-settings: 'tnum'; }
          .chip { border-radius: 99px; padding: 4px 12px; }
          .bank-card { padding: 12px; min-width: 150px; }",
@@ -957,7 +991,9 @@ fn debug_shot(app: &Rc<App>) {
             }
             if let Some(sw) = a.stack.visible_child().as_ref().and_then(first_scroller) {
                 let adj = sw.vadjustment();
-                adj.set_value(adj.upper());
+                // FINGRAPH_SCROLL=0.5 scrolls halfway; any other value to the bottom
+                let frac = std::env::var("FINGRAPH_SCROLL").ok().and_then(|v| v.parse::<f64>().ok()).filter(|f| *f < 1.0).unwrap_or(1.0);
+                adj.set_value(adj.upper() * frac);
             }
             return glib::ControlFlow::Continue;
         }

@@ -235,6 +235,22 @@ pub fn is_fixed(category: &str) -> bool {
     FIXED.contains(&category)
 }
 
+impl Db {
+    /// The categories you count as fixed expenses (the rest are variable); `FIXED` until changed.
+    pub fn fixed_categories(&self) -> Vec<String> {
+        self.setting("budget_fixed").and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_else(|| FIXED.iter().map(|s| s.to_string()).collect())
+    }
+    pub fn set_fixed(&self, category: &str, fixed: bool) -> Result<()> {
+        let mut v = self.fixed_categories();
+        v.retain(|c| c != category);
+        if fixed {
+            v.push(category.to_string());
+            v.sort();
+        }
+        self.set_setting("budget_fixed", &serde_json::to_string(&v).unwrap_or_default())
+    }
+}
+
 // ──────────────────────────────────────────────────────────────── from your statements
 
 /// A regular pay found in the statements.
@@ -348,6 +364,12 @@ mod tests {
         assert!(db.budgets("1").unwrap().is_empty());
         db.set_budget(&sc, g, None).unwrap();
         assert!(db.budgets(&sc).unwrap().is_empty());
+
+        assert!(db.fixed_categories().contains(&"Utilities".to_string()));
+        db.set_fixed("Utilities", false).unwrap();
+        db.set_fixed("Groceries", true).unwrap();
+        let f = db.fixed_categories();
+        assert!(!f.contains(&"Utilities".to_string()) && f.contains(&"Groceries".to_string()));
     }
 
     fn d(s: &str) -> Decimal {
