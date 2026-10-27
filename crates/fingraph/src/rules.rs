@@ -128,6 +128,16 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
                 }
                 r.add_suffix(&cycle);
                 r.add_suffix(&gtk::Label::builder().label(format!("{}/yr", a.money(s.annual))).css_classes(["tnum", "heading"]).build());
+                if let Some(url) = fingraph_core::merchants::manage_url(&format!("{} {}", s.payee, s.stem)) {
+                    let manage = gtk::Button::builder().icon_name("adw-external-link-symbolic").tooltip_text(format!("Manage or cancel — opens {url}")).valign(gtk::Align::Center).css_classes(["flat", "circular"]).build();
+                    let w = Rc::downgrade(&a);
+                    manage.connect_clicked(move |_| {
+                        if let Some(a) = w.upgrade() {
+                            gtk::UriLauncher::new(url).launch(Some(&a.win), gtk::gio::Cancellable::NONE, |_| {});
+                        }
+                    });
+                    r.add_suffix(&manage);
+                }
                 let not = gtk::Button::builder().icon_name("window-close-symbolic").tooltip_text("Not a subscription").valign(gtk::Align::Center).css_classes(["flat", "circular"]).build();
                 let (w, ids) = (Rc::downgrade(&a), s.tx_ids.clone());
                 not.connect_clicked(move |_| {

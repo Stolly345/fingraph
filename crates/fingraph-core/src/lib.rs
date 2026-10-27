@@ -6,6 +6,7 @@ pub mod db;
 pub mod demo;
 pub mod export;
 pub mod insights;
+pub mod learn;
 pub mod merchants;
 pub mod money;
 pub mod parser;
@@ -13,6 +14,8 @@ pub mod prefs;
 pub mod rules;
 pub mod workflows;
 pub mod budget;
+pub mod outlook;
+pub mod wealth;
 
 pub use money::{Currency, Fx};
 pub use rust_decimal::Decimal;

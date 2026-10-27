@@ -6,7 +6,7 @@
 use adw::prelude::*;
 use chrono::{Datelike, NaiveDate};
 use fingraph_core::Decimal;
-use fingraph_core::budget::{self as core, Alert, Deduction, PayCycle, Plan, scope, suggest};
+use fingraph_core::budget::{self as core, Alert, Deduction, Envelope, Fund, PayCycle, Plan, scope, suggest};
 use fingraph_core::db::{Category, TxFilter, TxRow};
 use fingraph_core::insights::{add_months, by_category, month_start};
 use fingraph_core::money::{Currency, Fx, fmt_money, parse_user};
@@ -34,18 +34,20 @@ fn f(d: Decimal) -> f64 {
 }
 
 /// Everything the page, the alerts and the wizard read, in the display currency.
-struct Snap {
-    ccy: Currency,
-    fx: Fx,
-    parents: BTreeMap<i64, String>,
-    scope: String,
-    rows: Vec<TxRow>,
+pub(crate) struct Snap {
+    pub(crate) ccy: Currency,
+    pub(crate) fx: Fx,
+    pub(crate) parents: BTreeMap<i64, String>,
+    pub(crate) scope: String,
+    pub(crate) rows: Vec<TxRow>,
     /// Top-level expense categories.
-    cats: Vec<Category>,
-    budgets: BTreeMap<i64, Decimal>,
-    plan: Option<Plan>,
+    pub(crate) cats: Vec<Category>,
+    pub(crate) budgets: BTreeMap<i64, Decimal>,
+    pub(crate) plan: Option<Plan>,
     /// Categories counted as fixed expenses.
-    fixed: Vec<String>,
+    pub(crate) fixed: Vec<String>,
+    /// Yearly and quarterly bills set aside for.
+    pub(crate) funds: Vec<Fund>,
 }
 
 impl Snap {
@@ -54,7 +56,7 @@ impl Snap {
     }
 }
 
-fn snap(app: &App) -> Snap {
+pub(crate) fn snap(app: &App) -> Snap {
     let ccy = app.display();
     let fx = app.db.fx().unwrap_or_default();
     let sc = scope(&app.entity_ids());
@@ -62,7 +64,19 @@ fn snap(app: &App) -> Snap {
     let cats = app.categories().into_iter().filter(|c| c.parent_id.is_none() && c.kind == fingraph_core::db::CategoryKind::Expense).collect();
     let budgets = app.db.budgets(&sc).unwrap_or_default().into_iter().map(|(c, (v, k))| (c, fx.convert(v, k, ccy))).collect();
     let plan = app.db.plan(&sc).map(|p| plan_in(p, ccy, &fx));
-    Snap { ccy, fx, parents: app.parents(), scope: sc, rows, cats, budgets, plan, fixed: app.db.fixed_categories() }
+    let funds = app.db.funds(&sc).unwrap_or_default();
+    Snap { ccy, fx, parents: app.parents(), scope: sc, rows, cats, budgets, plan, fixed: app.db.fixed_categories(), funds }
+}
+
+/// Each category's month: budget then, rollover, moves, spending.
+pub(crate) fn envs(app: &App, s: &Snap, m: NaiveDate) -> BTreeMap<i64, Envelope> {
+    let pairs: Vec<(i64, String)> = s.cats.iter().map(|c| (c.id, c.name.clone())).collect();
+    core::envelopes(&app.db, &s.scope, &s.rows, &pairs, m, s.ccy, &s.fx, &s.parents).unwrap_or_default()
+}
+
+/// What the non-monthly bills take each month, in the display currency.
+fn funds_monthly(s: &Snap) -> Decimal {
+    s.funds.iter().map(|f| s.fx.convert(f.monthly(), f.currency, s.ccy)).sum()
 }
 
 /// A saved plan's amounts in the display currency (percent deductions stay percent).
@@ -80,35 +94,58 @@ fn plan_in(mut p: Plan, ccy: Currency, fx: &Fx) -> Plan {
     p
 }
 
-fn elapsed(m: NaiveDate) -> Decimal {
+/// The last day the statements cover (the newest statement's end), never after today.
+pub(crate) fn data_through(app: &App) -> NaiveDate {
+    app.db.documents(&app.entity_ids()).unwrap_or_default().iter().filter_map(|d| d.period.map(|p| p.1)).max().unwrap_or(today()).min(today())
+}
+
+/// How much of `m` the statements cover (0–1): statements arrive a month late, so this month is
+/// measured to the newest statement, not to today.
+fn elapsed(m: NaiveDate, through: NaiveDate) -> Decimal {
     let end = add_months(m, 1).pred_opt().unwrap_or(m);
-    if m == month_start(today()) { Decimal::from(today().day()) / Decimal::from(end.day()) } else { Decimal::ONE }
+    if through >= end {
+        Decimal::ONE
+    } else if through < m {
+        Decimal::ZERO
+    } else {
+        Decimal::from(through.day()) / Decimal::from(end.day())
+    }
 }
 
 /// This month's categories that are over budget, or 85% used with more than 15% of the month to go.
 pub fn alerts(app: &App) -> Vec<(String, Decimal, Decimal, Alert)> {
     let s = snap(app);
     let m = month_start(today());
-    let end = add_months(m, 1).pred_opt().unwrap_or(m);
-    let now: BTreeMap<String, Decimal> = by_category(&s.rows, m, end, s.ccy, &s.fx, &s.parents).into_iter().collect();
+    let env = envs(app, &s, m);
+    let rolls = app.db.rollovers(&s.scope);
     let mut out: Vec<_> = s
         .cats
         .iter()
         .filter_map(|c| {
-            let b = *s.budgets.get(&c.id)?;
-            let spent = now.get(&c.name).copied().unwrap_or_default();
-            core::alert(spent, b, elapsed(m)).map(|a| (c.name.clone(), spent, b, a))
+            let e = env.get(&c.id)?;
+            if e.budget.is_zero() && !rolls.contains_key(&c.id) {
+                return None;
+            }
+            core::alert(e.spent, e.funded(), elapsed(m, data_through(app))).map(|a| (c.name.clone(), e.spent, e.funded(), a))
         })
         .collect();
+    // watchlists: a merchant over its monthly limit
+    let end = add_months(m, 1).pred_opt().unwrap_or(m);
+    for wl in app.db.watchlists(&s.scope) {
+        let limit = s.fx.convert(wl.limit, wl.currency, s.ccy);
+        let (spent, _) = core::watched(&s.rows, &wl, m, end, s.ccy, &s.fx);
+        if let Some(al) = core::alert(spent, limit, elapsed(m, data_through(app))) {
+            out.push((format!("Watch: {}", wl.name), spent, limit, al));
+        }
+    }
     out.sort_by_key(|x| (x.3 != Alert::Over, std::cmp::Reverse(x.1 - x.2)));
     out
 }
 
-fn alert_text(a: &(String, Decimal, Decimal, Alert), ccy: Currency) -> String {
-    let left = add_months(month_start(today()), 1).pred_opt().unwrap_or(today()).day() - today().day();
+fn alert_text(a: &(String, Decimal, Decimal, Alert), ccy: Currency, through: NaiveDate) -> String {
     match a.3 {
         Alert::Over => format!("{} over by {}", a.0, fmt_money(a.1 - a.2, ccy)),
-        Alert::Near => format!("{} {}% used with {left} days to go", a.0, (a.1 / a.2 * Decimal::ONE_HUNDRED).round_dp(0)),
+        Alert::Near => format!("{} {}% used by {}", a.0, (a.1 / a.2 * Decimal::ONE_HUNDRED).round_dp(0), through.format("%d %b")),
     }
 }
 
@@ -136,7 +173,7 @@ pub fn fill_overview(app: &Rc<App>, into: &gtk::Box) {
     let ccy = app.display();
     let row = adw::ActionRow::builder()
         .title(if a.iter().any(|x| x.3 == Alert::Over) { "Budget: over in this month" } else { "Budget: running low" })
-        .subtitle(glib::markup_escape_text(&a.iter().map(|x| alert_text(x, ccy)).collect::<Vec<_>>().join(" · ")))
+        .subtitle(glib::markup_escape_text(&a.iter().map(|x| alert_text(x, ccy, data_through(app))).collect::<Vec<_>>().join(" · ")))
         .build();
     row.add_prefix(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
     let open = gtk::Button::builder().label("Open Budget").valign(gtk::Align::Center).build();
@@ -220,10 +257,12 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     title.set_hexpand(true);
     title.set_xalign(0.0);
     let setup = gtk::Button::builder().label("Set Up Budget…").tooltip_text("A guided setup: your pay and deductions, your spending, your savings goal").build();
+    let close = gtk::Button::builder().label("Monthly Close…").tooltip_text("Go through a month once its statements are in: check them, sort what's new, settle the budget, tick off the bills").build();
     let fill = gtk::Button::builder().label("Fill From My Spending").tooltip_text(format!("Give every category without a budget what it usually costs (median of the last {MONTHS} months)")).build();
     nav.append(&prev);
     nav.append(&next);
     nav.append(&title);
+    nav.append(&close);
     nav.append(&setup);
     nav.append(&fill);
     body.append(&nav);
@@ -243,6 +282,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     body.append(&plan_box);
     let split_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
     body.append(&split_box);
+    let funds_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
+    body.append(&funds_box);
     let projection = Chart::new(230);
 
     body.append(&heading("Categories"));
@@ -251,6 +292,15 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     )));
     let list = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
     body.append(&list);
+    let watch_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
+    body.append(&watch_box);
+    let flow = Chart::new(300);
+    let flow_card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
+    let flow_title = heading("");
+    flow_card.append(&flow_title);
+    flow_card.append(&dim("Money in on the left, where it went on the right (top-level categories; transfers between your own accounts left out). The difference is what you saved — or took from savings."));
+    flow_card.append(&flow.widget);
+    body.append(&flow_card);
     let page = gtk::ScrolledWindow::builder().child(&adw::Clamp::builder().maximum_size(1000).child(&body).build()).vexpand(true).build();
 
     // the page redraws itself after an edit; the sidebar and Overview follow
@@ -272,6 +322,14 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         b.connect_clicked(move |_| {
             MONTH.with(|m| m.set(Some(add_months(month(), step))));
             r();
+        });
+    }
+    {
+        let (w, r) = (Rc::downgrade(app), redraw.clone());
+        close.connect_clicked(move |_| {
+            if let Some(a) = w.upgrade() {
+                crate::close::open(&a, None, r.clone());
+            }
         });
     }
     {
@@ -304,6 +362,13 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let end = add_months(m, 1).pred_opt().unwrap_or(m);
             let (usual, subs_m, one_off) = usual(&s, m);
             let now: BTreeMap<String, Decimal> = by_category(&s.rows, m, end, ccy, &s.fx, &s.parents).into_iter().collect();
+            let env = envs(&a, &s, m);
+            // the budgets that applied in this month, and the categories that roll over
+            let bm: BTreeMap<i64, Decimal> = env.iter().filter(|(_, e)| !e.budget.is_zero()).map(|(k, e)| (*k, e.budget)).collect();
+            let rollovers = a.db.rollovers(&s.scope);
+            let in_budget = |id: i64| bm.contains_key(&id) || rollovers.contains_key(&id);
+            let set_aside = funds_monthly(&s);
+            let through = data_through(&a);
             let last: BTreeMap<String, Decimal> = by_category(&s.rows, add_months(m, -1), m.pred_opt().unwrap_or(m), ccy, &s.fx, &s.parents).into_iter().collect();
             let money = |d: Decimal| fmt_money(d, ccy);
 
@@ -331,22 +396,28 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             }
 
             // the month so far, and where it's heading at this pace
-            let total_b: Decimal = s.budgets.values().copied().sum();
+            let total_b: Decimal = bm.values().copied().sum();
             let total_s: Decimal = now.values().copied().sum();
-            let in_b: Decimal = s.cats.iter().filter(|c| s.budgets.contains_key(&c.id)).filter_map(|c| now.get(&c.name)).copied().sum();
+            let in_b: Decimal = s.cats.iter().filter(|c| in_budget(c.id)).filter_map(|c| now.get(&c.name)).copied().sum();
+            let funded: Decimal = s.cats.iter().filter(|c| in_budget(c.id)).filter_map(|c| env.get(&c.id)).map(Envelope::funded).sum();
             let days = Decimal::from(end.day());
-            let is_now = m == month_start(today());
-            let gone = if is_now { Decimal::from(today().day()) } else { days };
+            let share = elapsed(m, through);
             budgeted.set_label(&money(total_b));
-            budgeted_s.set_label(&format!("{} categories", s.budgets.len()));
+            budgeted_s.set_label(&if funded != total_b { format!("{} categories · {} with rollovers and moves", bm.len(), money(funded)) } else { format!("{} categories", bm.len()) });
             spent.set_label(&money(total_s));
             spent_s.set_label(&format!("{} in budgeted categories · {} outside", money(in_b), money(total_s - in_b)));
-            left.set_label(&money(total_b - in_b));
-            left_s.set_label(if total_b.is_zero() { "Set a budget below, or fill it from your spending" } else if in_b > total_b { "Over budget" } else { "Left in budgeted categories" });
-            left.set_css_classes(&["value", "tnum", if in_b > total_b { "amount-out" } else { "amount-in" }]);
-            let proj = if gone.is_zero() { total_s } else { (total_s / gone * days).round_dp(2) };
+            left.set_label(&money(funded - in_b));
+            left_s.set_label(if funded.is_zero() { "Set a budget below, or fill it from your spending" } else if in_b > funded { "Over budget" } else { "Left in budgeted categories" });
+            left.set_css_classes(&["value", "tnum", if in_b > funded { "amount-out" } else { "amount-in" }]);
+            let proj = if share.is_zero() { total_s } else { (total_s / share).round_dp(2) };
             pace.set_label(&money(proj));
-            pace_s.set_label(&if is_now { format!("At this pace (day {} of {}); a big bill early in the month overstates it", today().day(), end.day()) } else { "The whole month".into() });
+            pace_s.set_label(&if share.is_zero() {
+                "No statement for this month yet — they arrive after the month ends".to_string()
+            } else if share < Decimal::ONE {
+                format!("At this pace: your statements run to {} (day {} of {}); a big bill early in the month overstates it", through.format("%d %b"), through.day(), days)
+            } else {
+                "The whole month".into()
+            });
 
             // each category's last six months, for its trend line
             let hist: BTreeMap<String, Vec<Decimal>> = s.cats.iter().map(|c| (c.name.clone(), core::history(&s.rows, &c.name, month_start(today()), MONTHS, ccy, &s.fx, &s.parents))).collect();
@@ -378,11 +449,14 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     money(p.monthly_income()),
                     "amount-in",
                 );
-                line("Spending budget", format!("{} categories", s.budgets.len()), format!("− {}", money(total_b)), "");
+                line("Spending budget", format!("{} categories", bm.len()), format!("− {}", money(total_b)), "");
+                if !set_aside.is_zero() {
+                    line("Non-monthly bills", format!("Set aside each month for {} yearly and quarterly bills", s.funds.len()), format!("− {}", money(set_aside)), "");
+                }
                 if !p.loan_payments.is_zero() {
                     line("Loan payments", "Instalments, which are transfers and not in the spending budget".into(), format!("− {}", money(p.loan_payments)), "");
                 }
-                let save = p.monthly_savings(total_b);
+                let save = p.monthly_savings(total_b) - set_aside;
                 let pct = if p.monthly_income().is_zero() { Decimal::ZERO } else { (save / p.monthly_income() * Decimal::ONE_HUNDRED).round_dp(0) };
                 let goal = if p.savings_goal.is_zero() {
                     format!("{pct}% of take-home")
@@ -405,7 +479,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     cb += save;
                     // a budgeted category follows its trend; others too, so nothing is missed
                     let spend: Decimal = hist.values().map(|v| core::forecast(v, k + 1)).sum();
-                    ct += p.monthly_income() - p.loan_payments - spend;
+                    ct += p.monthly_income() - p.loan_payments - set_aside - spend;
                     by_budget.push((k as f64, f(cb)));
                     by_trend.push((k as f64, f(ct)));
                     by_goal.push((k as f64, f(p.savings_goal * Decimal::from(k + 1))));
@@ -432,7 +506,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
                 card.append(&heading("Savings Over the Next 12 Months"));
                 card.append(&dim(&format!(
-                    "Green: take-home − budget − loans, every month ({} a month). Orange: each category's last six months drawn as a straight line (least squares) and carried forward — what happens if spending keeps drifting the way it has.",
+                    "Green: take-home − budget − non-monthly bills − loans, every month ({} a month). Orange: each category's last six months drawn as a straight line (least squares) and carried forward — what happens if spending keeps drifting the way it has.",
                     money(save)
                 )));
                 if let Some(parent) = projection.widget.parent() {
@@ -448,7 +522,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             clear(&split_box);
             {
                 // a category's monthly amount: its budget, else what it usually costs
-                let amount = |c: &Category| s.budgets.get(&c.id).copied().or_else(|| usual.get(&c.name).copied()).unwrap_or_default();
+                let amount = |c: &Category| bm.get(&c.id).copied().or_else(|| usual.get(&c.name).copied()).unwrap_or_default();
                 let group = |fixed: bool| -> Vec<&Category> {
                     let mut v: Vec<&Category> = s.cats.iter().filter(|c| s.is_fixed(&c.name) == fixed && !amount(c).is_zero()).collect();
                     v.sort_by_key(|c| std::cmp::Reverse(amount(c)));
@@ -460,7 +534,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 let (fixed_t, var_t) = (total(&fx_cats), total(&var_cats));
                 let income = s.plan.as_ref().map(|p| p.monthly_income()).filter(|i| !i.is_zero());
                 let loans = s.plan.as_ref().map(|p| p.loan_payments).unwrap_or_default();
-                let save = income.map(|i| i - fixed_t - var_t - loans);
+                let save = income.map(|i| i - fixed_t - var_t - set_aside - loans);
 
                 split_box.append(&heading("Fixed vs Variable"));
                 split_box.append(&dim(match income {
@@ -469,6 +543,9 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 }));
                 // one bar, split in proportion
                 let mut parts: Vec<(&str, Decimal, charts::Rgb)> = vec![("Fixed", fixed_t, charts::BLUE), ("Variable", var_t, charts::ORANGE)];
+                if !set_aside.is_zero() {
+                    parts.push(("Non-monthly", set_aside, charts::PURPLE));
+                }
                 if !loans.is_zero() {
                     parts.push(("Loans", loans, charts::SLATE));
                 }
@@ -531,7 +608,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     card.append(&dim(&format!("{} spent in {}{of}", money(sp), m.format("%B"))));
                     let grid = gtk::Grid::builder().column_spacing(12).row_spacing(2).margin_top(6).build();
                     for (i, c) in cats.iter().enumerate() {
-                        let budgeted = s.budgets.contains_key(&c.id);
+                        let budgeted = bm.contains_key(&c.id);
                         grid.attach(&gtk::Label::builder().label(&c.name).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["caption"]).build(), 0, i as i32, 1, 1);
                         let l = gtk::Label::builder()
                             .label(format!("{}{}", money(amount(c)), if budgeted { "" } else { " usual" }))
@@ -549,15 +626,109 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 split_box.append(&cards);
             }
 
+            // ── yearly and quarterly bills, a share set aside each month
+            clear(&funds_box);
+            {
+                funds_box.append(&heading("Non-Monthly Bills"));
+                funds_box.append(&dim(
+                    "Bills that come once a quarter or once a year — insurance, licences, registrations, annual plans. Each month sets a share aside so the bill is covered when it comes; that comes out of what you save in Your Plan.",
+                ));
+                let lb = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
+                let ideas: Vec<core::FundIdea> = core::fund_ideas(&s.rows, ccy, &s.fx, today()).into_iter().filter(|i| !s.funds.iter().any(|f| f.stem == i.stem)).collect();
+                for fd in &s.funds {
+                    let due = fd.due(today());
+                    let aside = s.fx.convert(fd.set_aside(today()), fd.currency, ccy);
+                    let whole = s.fx.convert(fd.amount, fd.currency, ccy);
+                    let r = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&fd.name))
+                        .subtitle(format!(
+                            "{} {} · due {} · {} a month",
+                            fmt_money(fd.amount, fd.currency),
+                            match fd.every_months {
+                                12 => "once a year".to_string(),
+                                n => format!("every {n} months"),
+                            },
+                            due.format("%d %b %Y"),
+                            fmt_money(fd.monthly(), fd.currency)
+                        ))
+                        .build();
+                    let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).valign(gtk::Align::Center).width_request(220).build();
+                    col.append(&gtk::Label::builder().label(format!("{} of {} set aside", money(aside), money(whole))).xalign(1.0).css_classes(["tnum", "caption"]).build());
+                    let bar = gtk::LevelBar::builder().min_value(0.0).max_value(1.0).value(if whole.is_zero() { 0.0 } else { f(aside / whole).min(1.0) }).build();
+                    col.append(&bar);
+                    r.add_suffix(&col);
+                    let edit = gtk::Button::builder().icon_name("document-edit-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Change").build();
+                    let rm = gtk::Button::builder().icon_name("user-trash-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Remove").build();
+                    {
+                        let (w, sc, fd, redraw) = (Rc::downgrade(&a), s.scope.clone(), fd.clone(), redraw.clone());
+                        edit.connect_clicked(move |_| {
+                            if let Some(a) = w.upgrade() {
+                                fund_dialog(&a, &sc, Some(fd.clone()), ccy, redraw.clone());
+                            }
+                        });
+                    }
+                    {
+                        let (w, id, redraw) = (Rc::downgrade(&a), fd.id, redraw.clone());
+                        rm.connect_clicked(move |_| {
+                            if let Some(a) = w.upgrade() {
+                                let _ = a.db.delete_fund(id);
+                                redraw();
+                            }
+                        });
+                    }
+                    r.add_suffix(&edit);
+                    r.add_suffix(&rm);
+                    lb.append(&r);
+                }
+                for i in &ideas {
+                    let r = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&i.payee))
+                        .subtitle(format!("Seen in your statements: {} {} · next around {}", money(i.amount), if i.every_months == 12 { "once a year" } else { "every 3 months" }, i.next_due.format("%d %b %Y")))
+                        .build();
+                    r.add_prefix(&gtk::Image::from_icon_name("starred-symbolic"));
+                    let add = gtk::Button::builder().label("Set Aside For It").valign(gtk::Align::Center).css_classes(["flat"]).build();
+                    let (w, sc, i, redraw) = (Rc::downgrade(&a), s.scope.clone(), i.clone(), redraw.clone());
+                    add.connect_clicked(move |_| {
+                        if let Some(a) = w.upgrade() {
+                            let fd = Fund { id: 0, name: i.payee.clone(), amount: i.amount.round_dp(0), currency: ccy, every_months: i.every_months, next_due: i.next_due, stem: i.stem.clone() };
+                            let _ = a.db.save_fund(&sc, &fd);
+                            redraw();
+                        }
+                    });
+                    r.add_suffix(&add);
+                    lb.append(&r);
+                }
+                let add = adw::ButtonRow::builder().title("Add a Bill…").start_icon_name("list-add-symbolic").build();
+                {
+                    let (w, sc, redraw) = (Rc::downgrade(&a), s.scope.clone(), redraw.clone());
+                    add.connect_activated(move |_| {
+                        if let Some(a) = w.upgrade() {
+                            fund_dialog(&a, &sc, None, ccy, redraw.clone());
+                        }
+                    });
+                }
+                lb.append(&add);
+                funds_box.append(&lb);
+                if !s.funds.is_empty() {
+                    let total: Decimal = s.funds.iter().map(|fd| s.fx.convert(fd.set_aside(today()), fd.currency, ccy)).sum();
+                    funds_box.append(&dim(&format!("{} a month in all; {} should be set aside by now.", money(set_aside), money(total))));
+                }
+            }
+
             // ── one row per category that has a budget, spending or a usual amount
             list.remove_all();
-            let mut shown: Vec<_> = s.cats.iter().filter(|c| s.budgets.contains_key(&c.id) || now.contains_key(&c.name) || usual.contains_key(&c.name)).collect();
-            shown.sort_by_key(|c| std::cmp::Reverse(now.get(&c.name).copied().unwrap_or_default().max(s.budgets.get(&c.id).copied().unwrap_or_default())));
+            let mut shown: Vec<_> = s.cats.iter().filter(|c| in_budget(c.id) || now.contains_key(&c.name) || usual.contains_key(&c.name)).collect();
+            shown.sort_by_key(|c| std::cmp::Reverse(now.get(&c.name).copied().unwrap_or_default().max(bm.get(&c.id).copied().unwrap_or_default())));
+            let names: Rc<Vec<(i64, String, Decimal)>> = Rc::new(s.cats.iter().map(|c| (c.id, c.name.clone(), env.get(&c.id).map(Envelope::available).unwrap_or_default())).collect());
             let use_col = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
             let kind_col = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
             for c in shown {
                 let sp = now.get(&c.name).copied().unwrap_or_default();
-                let b = s.budgets.get(&c.id).copied();
+                let b = bm.get(&c.id).copied();
+                let e = env.get(&c.id).copied().unwrap_or_default();
+                let rolls = rollovers.contains_key(&c.id);
+                // what it had to spend: the budget, plus what rolled in and money moved
+                let fb = (b.is_some() || rolls).then(|| e.funded());
                 let u = usual.get(&c.name).copied();
                 let mut sub = vec![match u {
                     Some(u) => {
@@ -574,6 +745,12 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     if slope.abs() >= (u / Decimal::from(20)).max(Decimal::from(5)) {
                         sub.push(format!("trending {} {} a month", if slope.is_sign_positive() { "up" } else { "down" }, money(slope.abs())));
                     }
+                }
+                if !e.carried.is_zero() {
+                    sub.push(if e.carried.is_sign_positive() { format!("{} rolled over", money(e.carried)) } else { format!("{} overspent last month", money(-e.carried)) });
+                }
+                if !e.moved.is_zero() {
+                    sub.push(format!("{} {}", if e.moved.is_sign_positive() { "moved in" } else { "moved out" }, money(e.moved.abs())));
                 }
                 let row = adw::ActionRow::builder().title(glib::markup_escape_text(&c.name)).subtitle(sub.join(" · ")).build();
                 let is_fixed = s.is_fixed(&c.name);
@@ -597,8 +774,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
                 let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).valign(gtk::Align::Center).width_request(260).build();
                 let status = gtk::Label::builder().xalign(1.0).css_classes(["tnum", "caption"]).build();
-                match b {
-                    Some(b) => match core::alert(sp, b, elapsed(m)) {
+                match fb {
+                    Some(b) => match core::alert(sp, b, elapsed(m, through)) {
                         Some(Alert::Over) => {
                             status.set_label(&format!("{} of {} · over by {}", money(sp), money(b), money(sp - b)));
                             status.add_css_class("amount-out");
@@ -620,7 +797,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 bar.remove_offset_value(Some("full"));
                 bar.add_offset_value("ok", 0.85);
                 bar.add_offset_value("near", 1.0);
-                if let Some(b) = b.filter(|b| !b.is_zero()) {
+                if let Some(b) = fb.filter(|b| *b > Decimal::ZERO) {
                     let r = f(sp / b);
                     bar.set_value(r.min(1.0));
                     if r > 1.0 {
@@ -668,8 +845,173 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     use_col.add_widget(&pad);
                     row.add_suffix(&pad);
                 }
+                // ⋯: roll over, move money
+                let menu = gtk::MenuButton::builder().icon_name("view-more-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Rollover and moving money").build();
+                let pop = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(6).margin_bottom(6).margin_start(6).margin_end(6).build();
+                let roll = gtk::CheckButton::builder().label("Roll leftovers into next month").active(rolls).tooltip_text("What's left (or overspent) carries into the next month's budget").build();
+                pop.append(&roll);
+                let move_in = gtk::Button::builder().label(if e.available().is_sign_negative() { "Cover Overspending…" } else { "Move Money In…" }).css_classes(["flat"]).build();
+                let move_out = gtk::Button::builder().label("Move Money Out…").css_classes(["flat"]).build();
+                pop.append(&move_in);
+                pop.append(&move_out);
+                let mine: Vec<core::Move> = a.db.moves(&s.scope, m).unwrap_or_default().into_iter().filter(|mv| mv.from == c.id || mv.to == c.id).collect();
+                if !mine.is_empty() {
+                    let undo = gtk::Button::builder().label(format!("Undo {} Move{} This Month", mine.len(), if mine.len() == 1 { "" } else { "s" })).css_classes(["flat"]).build();
+                    let (w, redraw) = (Rc::downgrade(&a), redraw.clone());
+                    undo.connect_clicked(move |_| {
+                        if let Some(a) = w.upgrade() {
+                            for mv in &mine {
+                                let _ = a.db.delete_move(mv.id);
+                            }
+                            redraw();
+                        }
+                    });
+                    pop.append(&undo);
+                }
+                let popover = gtk::Popover::builder().child(&pop).build();
+                menu.set_popover(Some(&popover));
+                {
+                    let (w, sc, id, redraw, popover) = (Rc::downgrade(&a), s.scope.clone(), c.id, redraw.clone(), popover.clone());
+                    roll.connect_toggled(move |cb| {
+                        if let Some(a) = w.upgrade() {
+                            let _ = a.db.set_rollover(&sc, id, cb.is_active().then_some(m));
+                            popover.popdown();
+                            redraw();
+                        }
+                    });
+                }
+                for (btn, into) in [(&move_in, true), (&move_out, false)] {
+                    let (w, sc, id, redraw, names, popover) = (Rc::downgrade(&a), s.scope.clone(), c.id, redraw.clone(), names.clone(), popover.clone());
+                    btn.connect_clicked(move |_| {
+                        popover.popdown();
+                        if let Some(a) = w.upgrade() {
+                            move_dialog(&a, &sc, m, id, into, &names, ccy, redraw.clone());
+                        }
+                    });
+                }
+                row.add_suffix(&menu);
                 list.append(&row);
             }
+            // ── watchlists
+            clear(&watch_box);
+            {
+                watch_box.append(&heading("Watchlists"));
+                watch_box.append(&dim("A monthly limit on a merchant or any wording on your statements (Amazon, Foster's, DoorDash) — it counts across categories, and going over shows up with the budget alerts."));
+                let lb = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
+                let watches = a.db.watchlists(&s.scope);
+                for (i, wl) in watches.iter().enumerate() {
+                    let limit = s.fx.convert(wl.limit, wl.currency, ccy);
+                    let (sp, ids) = core::watched(&s.rows, wl, m, end, ccy, &s.fx);
+                    let r = adw::ActionRow::builder().title(glib::markup_escape_text(&wl.name)).subtitle(glib::markup_escape_text(&format!("Matches “{}” · {} charge{} in {}", wl.pattern, ids.len(), if ids.len() == 1 { "" } else { "s" }, m.format("%B")))).build();
+                    let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).valign(gtk::Align::Center).width_request(220).build();
+                    let st = gtk::Label::builder().label(format!("{} of {}", money(sp), money(limit))).xalign(1.0).css_classes(["tnum", "caption"]).build();
+                    match core::alert(sp, limit, elapsed(m, through)) {
+                        Some(Alert::Over) => st.add_css_class("amount-out"),
+                        Some(Alert::Near) => st.add_css_class("warning"),
+                        None => {}
+                    }
+                    col.append(&st);
+                    let bar = gtk::LevelBar::builder().min_value(0.0).max_value(1.0).value(if limit.is_zero() { 0.0 } else { f(sp / limit).min(1.0) }).build();
+                    if sp > limit {
+                        bar.add_css_class("over");
+                    }
+                    col.append(&bar);
+                    r.add_suffix(&col);
+                    if !ids.is_empty() {
+                        let show = gtk::Button::builder().icon_name("view-list-bullet-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Show these transactions").build();
+                        let w = Rc::downgrade(&a);
+                        show.connect_clicked(move |_| {
+                            if let Some(a) = w.upgrade() {
+                                a.show_transactions(ids.clone());
+                            }
+                        });
+                        r.add_suffix(&show);
+                    }
+                    let rm = gtk::Button::builder().icon_name("user-trash-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Stop watching").build();
+                    let (w, sc, watches, redraw) = (Rc::downgrade(&a), s.scope.clone(), watches.clone(), redraw.clone());
+                    rm.connect_clicked(move |_| {
+                        if let Some(a) = w.upgrade() {
+                            let mut v = watches.clone();
+                            v.remove(i);
+                            let _ = a.db.save_watchlists(&sc, &v);
+                            redraw();
+                        }
+                    });
+                    r.add_suffix(&rm);
+                    lb.append(&r);
+                }
+                // add one: what to match, and the limit
+                let add = gtk::Box::builder().spacing(6).margin_top(6).margin_bottom(6).margin_start(12).margin_end(12).build();
+                let pat = gtk::Entry::builder().placeholder_text("Merchant or wording, e.g. Amazon").hexpand(true).build();
+                let lim = gtk::Entry::builder().placeholder_text(format!("{} a month", ccy.symbol())).width_chars(10).input_purpose(gtk::InputPurpose::Number).build();
+                let go = gtk::Button::builder().label("Watch").build();
+                add.append(&pat);
+                add.append(&lim);
+                add.append(&go);
+                let add_row = gtk::ListBoxRow::builder().child(&add).activatable(false).build();
+                lb.append(&add_row);
+                {
+                    let (w, sc, watches, redraw, pat, lim2) = (Rc::downgrade(&a), s.scope.clone(), watches.clone(), redraw.clone(), pat.clone(), lim.clone());
+                    let save = move || {
+                        let lim = &lim2;
+                        let Some(a) = w.upgrade() else { return };
+                        let p = pat.text().trim().to_string();
+                        let Some(l) = parse_user(&lim.text()).map(|v| v.abs()).filter(|v| !v.is_zero()) else { return a.toast("Type a monthly limit, like 150") };
+                        if p.is_empty() {
+                            return a.toast("Type the merchant or wording to watch");
+                        }
+                        let mut v = watches.clone();
+                        v.push(core::Watch { name: fingraph_core::rules::title_case(&p), pattern: p, limit: l, currency: ccy });
+                        let _ = a.db.save_watchlists(&sc, &v);
+                        redraw();
+                    };
+                    let save = Rc::new(save);
+                    let s2 = save.clone();
+                    go.connect_clicked(move |_| s2());
+                    lim.connect_activate(move |_| save());
+                }
+                watch_box.append(&lb);
+            }
+
+            // ── where the money went
+            {
+                flow_title.set_label(&format!("Where the Money Went · {}", m.format("%B %Y")));
+                let mut income: BTreeMap<String, Decimal> = BTreeMap::new();
+                for t in s.rows.iter().filter(|t| t.posted >= m && t.posted <= end && !t.is_transfer()) {
+                    let v = fingraph_core::insights::value(t, ccy, &s.fx);
+                    if v.is_sign_positive() {
+                        let who = if t.clean_payee.is_empty() { fingraph_core::rules::title_case(&fingraph_core::rules::merchant_stem(&t.raw_description, &t.memo)) } else { t.clean_payee.clone() };
+                        *income.entry(who).or_default() += v;
+                    }
+                }
+                // the biggest few, the rest together
+                let top = |mut v: Vec<(String, Decimal)>, n: usize| -> Vec<(String, Decimal)> {
+                    v.sort_by_key(|x| std::cmp::Reverse(x.1));
+                    if v.len() > n {
+                        let rest: Decimal = v[n - 1..].iter().map(|x| x.1).sum();
+                        v.truncate(n - 1);
+                        v.push(("Everything else".into(), rest));
+                    }
+                    v
+                };
+                let ins = top(income.into_iter().collect(), 5);
+                let outs = top(now.iter().map(|(k, v)| (k.clone(), *v)).collect(), 9);
+                let (ti, to): (Decimal, Decimal) = (ins.iter().map(|x| x.1).sum(), outs.iter().map(|x| x.1).sum());
+                let mut left: Vec<(String, f64, charts::Rgb)> = ins.iter().map(|(n, v)| (format!("{n}  {}", money(*v)), f(*v), charts::GREEN)).collect();
+                let mut right: Vec<(String, f64, charts::Rgb)> = outs.iter().enumerate().map(|(i, (n, v))| (format!("{n}  {}", money(*v)), f(*v), charts::PALETTE[(i + 1) % charts::PALETTE.len()])).collect();
+                let mut tips: Vec<String> = ins.iter().map(|(n, v)| format!("{n}: {} in", money(*v))).collect();
+                if to > ti {
+                    left.push((format!("From savings  {}", money(to - ti)), f(to - ti), charts::SLATE));
+                    tips.push(format!("Spent {} more than came in", money(to - ti)));
+                }
+                tips.extend(outs.iter().map(|(n, v)| format!("{n}: {} ({}% of spending)", money(*v), if to.is_zero() { Decimal::ZERO } else { (*v / to * Decimal::ONE_HUNDRED).round_dp(0) })));
+                if ti > to {
+                    right.push((format!("Saved  {}", money(ti - to)), f(ti - to), charts::GREEN));
+                    tips.push(format!("Kept {} ({}% of what came in)", money(ti - to), ((ti - to) / ti * Decimal::ONE_HUNDRED).round_dp(0)));
+                }
+                flow.set(Data::Flow { left, right, tips });
+            }
+
             if let Some(u) = now.get("Uncategorized") {
                 let row = adw::ActionRow::builder().title("Uncategorized").subtitle(format!("{} this month can't count against a budget until it has a category — To Review sorts it", money(*u))).activatable(true).build();
                 row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
@@ -687,9 +1029,88 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     (page.upcast(), refresh)
 }
 
+/// Move money between two categories in month `m`. `into`: this category receives (from the one
+/// with the most left), else it gives. An overspent category is offered exactly its overspend.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn move_dialog(app: &Rc<App>, sc: &str, m: NaiveDate, this: i64, into: bool, names: &[(i64, String, Decimal)], ccy: Currency, done: crate::Refresh) {
+    let others: Vec<&(i64, String, Decimal)> = names.iter().filter(|n| n.0 != this).collect();
+    let Some(me) = names.iter().find(|n| n.0 == this) else { return };
+    if others.is_empty() {
+        return;
+    }
+    // the most left over goes first
+    let mut others = others;
+    others.sort_by_key(|n| std::cmp::Reverse(n.2));
+    let labels: Vec<String> = others.iter().map(|n| format!("{} ({} left)", n.1, fmt_money(n.2, ccy))).collect();
+    let pick = gtk::DropDown::builder().model(&gtk::StringList::new(&labels.iter().map(String::as_str).collect::<Vec<_>>())).build();
+    let amount = gtk::Entry::builder().placeholder_text(ccy.symbol()).input_purpose(gtk::InputPurpose::Number).activates_default(true).build();
+    let suggest = if into && me.2.is_sign_negative() { -me.2 } else if !into && me.2.is_sign_positive() { me.2 } else { Decimal::ZERO };
+    if !suggest.is_zero() {
+        amount.set_text(&amount_text(suggest));
+    }
+    let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
+    body.append(&gtk::Label::builder().label(if into { "From" } else { "To" }).xalign(0.0).css_classes(["caption-heading"]).build());
+    body.append(&pick);
+    body.append(&gtk::Label::builder().label("Amount").xalign(0.0).css_classes(["caption-heading"]).build());
+    body.append(&amount);
+    let dlg = adw::AlertDialog::builder()
+        .heading(if into { format!("Move Money Into {}", me.1) } else { format!("Move Money Out of {}", me.1) })
+        .body(format!("For {} only. Both categories' budgets stay as they are; Undo is on the ⋯ menu.", m.format("%B %Y")))
+        .extra_child(&body)
+        .build();
+    dlg.add_responses(&[("cancel", "Cancel"), ("move", "Move")]);
+    dlg.set_response_appearance("move", adw::ResponseAppearance::Suggested);
+    dlg.set_default_response(Some("move"));
+    let (w, sc, ids) = (Rc::downgrade(app), sc.to_string(), others.iter().map(|n| n.0).collect::<Vec<_>>());
+    dlg.connect_response(Some("move"), move |_, _| {
+        let Some(a) = w.upgrade() else { return };
+        let Some(v) = parse_user(&amount.text()).map(|v| v.abs()).filter(|v| !v.is_zero()) else { return a.toast("Type an amount to move") };
+        let other = ids[(pick.selected() as usize).min(ids.len() - 1)];
+        let (from, to) = if into { (other, this) } else { (this, other) };
+        let _ = a.db.add_move(&sc, m, from, to, v, ccy);
+        done();
+    });
+    dlg.present(Some(&app.win));
+}
+
+/// Add (`f` = None) or change a yearly / quarterly bill.
+fn fund_dialog(app: &Rc<App>, sc: &str, f: Option<Fund>, ccy: Currency, done: crate::Refresh) {
+    let f = f.unwrap_or(Fund { id: 0, name: String::new(), amount: Decimal::ZERO, currency: ccy, every_months: 12, next_due: add_months(month_start(today()), 6), stem: String::new() });
+    let g = adw::PreferencesGroup::new();
+    let name = adw::EntryRow::builder().title("Bill (e.g. Car insurance)").text(&f.name).build();
+    let amount = adw::EntryRow::builder().title(format!("Amount each time ({})", f.currency.symbol())).text(amount_text(f.amount)).build();
+    const EVERY: [(i32, &str); 4] = [(3, "Every 3 months"), (6, "Every 6 months"), (12, "Once a year"), (24, "Every 2 years")];
+    let every = adw::ComboRow::builder().title("Comes").model(&gtk::StringList::new(&EVERY.map(|e| e.1))).build();
+    every.set_selected(EVERY.iter().position(|e| e.0 == f.every_months).unwrap_or(2) as u32);
+    let due = adw::EntryRow::builder().title("Next due (e.g. 15 Mar 2027)").text(f.next_due.format("%d %b %Y").to_string()).build();
+    for r in [name.upcast_ref::<gtk::Widget>(), amount.upcast_ref(), every.upcast_ref(), due.upcast_ref()] {
+        g.add(r);
+    }
+    let dlg = adw::AlertDialog::builder()
+        .heading(if f.id == 0 { "Add a Non-Monthly Bill" } else { "Change Bill" })
+        .body("Set aside a share every month so the bill is covered when it comes.")
+        .extra_child(&g)
+        .build();
+    dlg.add_responses(&[("cancel", "Cancel"), ("save", "Save")]);
+    dlg.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+    let (w, sc) = (Rc::downgrade(app), sc.to_string());
+    dlg.connect_response(Some("save"), move |_, _| {
+        let Some(a) = w.upgrade() else { return };
+        let (Some(v), Some(d)) = (parse_user(&amount.text()), parse_date(&due.text())) else { return a.toast("Type the amount, and the due date like 15 Mar 2027") };
+        let mut nf = f.clone();
+        nf.name = if name.text().trim().is_empty() { "Bill".into() } else { name.text().trim().to_string() };
+        nf.amount = v.abs();
+        nf.every_months = EVERY[(every.selected() as usize).min(3)].0;
+        nf.next_due = d;
+        let _ = a.db.save_fund(&sc, &nf);
+        done();
+    });
+    dlg.present(Some(&app.win));
+}
+
 // ──────────────────────────────────────────────────────────────── the setup wizard
 
-fn parse_date(t: &str) -> Option<NaiveDate> {
+pub(crate) fn parse_date(t: &str) -> Option<NaiveDate> {
     let t = t.trim();
     ["%d %b %Y", "%d %B %Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%b %d %Y", "%B %d %Y"].iter().find_map(|f| NaiveDate::parse_from_str(&t.replace(',', ""), f).ok())
 }
@@ -700,7 +1121,7 @@ fn parse_amount(t: &str) -> Option<(Decimal, bool)> {
     parse_user(t.trim().trim_end_matches('%')).map(|d| (d.abs(), pct))
 }
 
-fn amount_text(d: Decimal) -> String {
+pub(crate) fn amount_text(d: Decimal) -> String {
     if d.is_zero() { String::new() } else { d.round_dp(2).normalize().to_string() }
 }
 
@@ -725,7 +1146,7 @@ impl CatLine {
     }
 }
 
-fn step_page(title: &str, intro: &str) -> (gtk::ScrolledWindow, gtk::Box) {
+pub(crate) fn step_page(title: &str, intro: &str) -> (gtk::ScrolledWindow, gtk::Box) {
     let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(12).margin_bottom(18).margin_start(24).margin_end(24).build();
     let h = heading(title);
     h.add_css_class("title-2");

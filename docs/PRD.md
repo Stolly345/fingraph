@@ -1,7 +1,7 @@
 # FinGraph — PRD / System Reference
 
-**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.1.0 `.deb`
-**Owner:** alex · **Doc written:** 2026-10-27 (as built) · **Status:** in daily personal use; not published
+**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.0 `.deb`
+**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Status:** in daily personal use; not published
 
 > Single source of truth for what FinGraph is, how it's built, and why it behaves the way it does.
 > It replaces the Python/Flet prototype in `~/Projects/FinGraph` (left untouched; its
@@ -31,7 +31,11 @@ workspaces.
 - 100% local and private: no cloud APIs, telemetry or LLMs. Data in `~/.local/share/fingraph/`.
 - No bank connections or live balances: balances shown are the last ones printed on a statement.
 - No OCR: image-only (scanned) PDFs are rejected with a clear message.
-- Not multi-user, not a budgeting app (no budgets/envelopes), not double-entry accounting.
+- Not multi-user, not double-entry accounting. Budgeting is plan-based (Monarch-style budgets with
+  rollovers, YNAB-style money moves and non-monthly bills), not strict envelope assigning of cash:
+  statements arrive a month late, so the cash figure to assign from is always stale.
+- No manual entry of day-to-day spending: everything comes from statements. Estimates between
+  statements (Outlook) say they're estimates.
 
 ---
 
@@ -71,6 +75,10 @@ property. Three ways of using the app shaped the layout:
 | `fingraph-core/src/rules.rs` | Merchant stems, learned rules, truncation-tolerant matching, Smart Triage grouping |
 | `fingraph-core/src/merchants.rs` + `data/merchants.tsv` | Merchant directory (571 entries) and keyword rules |
 | `fingraph-core/src/insights.rs` | KPIs, chart series, subscriptions, "What changed?" cards, balances |
+| `fingraph-core/src/budget.rs` | Budgets (with history), rollovers, moves, envelopes, non-monthly bills, watchlists, the pay plan, month closes |
+| `fingraph-core/src/outlook.rs` | Age of Money, regular payments and the bills checklist, balance forecasts and their checks |
+| `fingraph-core/src/wealth.rs` | Net worth (account balances + manual items), goals and progress, debt payoff, rate estimates |
+| `fingraph-core/src/learn.rs` | Naive-Bayes category guesser trained on the ledger (To Review suggestions) |
 | `fingraph-core/src/export/` | CSV, QIF, OFX 1.0.2 SGML, QBO, P&L CSV |
 | `fingraph-core/src/prefs.rs` | Preferences (stored in the ledger, so they travel with backups) |
 | `fingraph-core/src/demo.rs` | Simulated statements for all five banks (tests + Load Demo Data) |
@@ -82,7 +90,7 @@ from a terminal.
 
 ---
 
-## 5. Data model (schema v5)
+## 5. Data model (schema v6)
 
 `entities` (workspaces: Personal / Business / RentalProperty, base currency) · `bank_profiles` ·
 `accounts` (bank, masked number, type, currency, OFX ids, `hidden`) · `fx_rates` (peg 1 KYD = 1.20 USD)
@@ -96,7 +104,13 @@ transfer, cadence, workspace scope, business workspace, optional amount range) �
 a split charge: amount, category, workspace, tag, memo) · `reimbursements` (which business charge or
 split line was paid back by which incoming transaction) · `attachments` (receipt files, keyed by
 account + FITID so they survive rescans) · `budgets` (view scope = sorted workspace ids,
-top-level category, monthly amount + currency) · `settings` (incl. the preferences JSON).
+top-level category, monthly amount + currency) · `budget_history` (scope, category, month it applies
+from, amount; `budgets_in(month)` reads the latest at or before a month) · `budget_moves` (money moved
+between two categories in one month) · `sinking_funds` (non-monthly bills: amount, every n months, next
+due) · `month_closes` (scope, month, summary JSON) · `manual_items` + `manual_values` (assets and debts
+valued by hand over time, optional rate) · `goals` + `goal_entries` · `settings` (incl. the preferences
+JSON, and JSON settings for rollovers `budget_rollover:<scope>`, watchlists `watchlists:<scope>`,
+rate overrides `apr:<account>`, payoff amount `payoff_monthly:<scope>`, `forecast_checks`).
 
 - **FITID** = SHA-256 of account, date, amount, normalised description and same-day sequence:
   re-importing a statement or an overlapping one never duplicates.
@@ -107,7 +121,8 @@ top-level category, monthly amount + currency) · `settings` (incl. the preferen
   lines. Transfers can't be split. Splits, reimbursements and attachments follow the FITID through rescans.
 - **Attachments** are copied (named by content hash) into `~/.local/share/fingraph/attachments/`.
 - Migrations: v1 base, v2 business-expense columns, v3 hidden accounts, v4 amount rules, splits,
-  reimbursements, attachments; v5 budgets. Missing categories are
+  reimbursements, attachments; v5 budgets; v6 budget history (existing budgets copied in from
+  2000-01-01), moves, non-monthly bills, month closes, manual items, goals. Missing categories are
   seeded into older ledgers on open; nothing is renamed or removed.
 
 ---
@@ -167,6 +182,11 @@ A transaction you set to Uncategorized by hand is left alone by steps 2–5. Che
 owner's hand-categorised ledger: the directory agreed 360 times and differed 37 (mostly
 business/property choices, which the owner's rules keep).
 
+**Learned guesses** (`learn.rs`, Copilot-style): once ≥ 30 transactions have a category, a naive-Bayes
+model (merchant words, amount band in powers of two, weekday, account, direction) suggests up to two
+categories (≥ 15% likely) per To Review card. They lead the chips, highlighted, with a tooltip; nothing
+is filed automatically. Held-out check on the demo ledger: 77 of 79 in the top two.
+
 **Smart Triage / To Review** groups uncategorised charges by merchant stem, treating truncated
 spellings as one merchant (`DISCOVERYDI HELP` / `HEL` / `HE`) and well-known services printed
 differently as one (`HBO MAX` / `PAYPAL *HBOMAX`). Each card lists every charge with date, account
@@ -204,6 +224,8 @@ only).
   breakdown; for an online order it suggests the freight-forwarder (MyUS, Tropical, Aeropost,
   Caribex, Hyde…) and customs charges that followed it — **Add N freight & duty** tags them.
 - **Subscriptions**: per merchant, cost per cycle, yearly cost, last charge, price rises, lapsed.
+  A known service (Netflix, Spotify, Disney+, YouTube, Audible, Prime, Adobe, Microsoft, Apple,
+  Google, Claude…; `merchants::manage_url`) gets a button opening its manage/cancel page.
   Billing cycle from the charges' rhythm; a lone charge is guessed **yearly** (a monthly plan
   corrects itself on its next charge); a picker (weekly … yearly) overrides any guess.
 - **Budget**: per top-level expense category, a monthly amount kept per view (Personal, the
@@ -233,6 +255,67 @@ only).
     trend (each category's 6-month least-squares line carried forward, floored at 0) vs goal; next
     three paydays (monthly pay keeps its day, clamped to month end). Rows note a trend of ≥ 5%
     (min CI$ 5) a month.
+  - **Budget history**: a budget applies from the month it was set; a category's first budget also
+    covers earlier months (so last month can be closed against it). Past months show the budget
+    they had.
+  - **Rollovers** (Monarch): per category from a month on (⋯ menu); each month's leftover — or
+    overspend — carries into the next (`envelopes`, walking back at most 24 months). Row subtitle
+    shows "rolled over" / "overspent last month".
+  - **Move money** (YNAB rule 3): ⋯ → Move Money In / Out / Cover Overspending…, one month only, from
+    the category with the most left by default; an overspent category is offered exactly its
+    overspend. Undo on the same menu. Alerts, bars and Left use budget + rollover + moves.
+  - **Statements arrive late**: "how far through the month" for alerts and Heading For is measured
+    to the newest statement's end date, not today; a month with no statement yet says so.
+  - **Non-monthly bills** (YNAB true expenses / Monarch non-monthly): amount, every 3/6/12/24 months,
+    next due; a share a month, "set aside by now" = one share per month of the cycle so far (the
+    month after the last due date is the first). Suggested from the statements: bills at a steady
+    91/365-day rhythm, and yearly/quarterly subscriptions ("Set Aside For It"). The monthly total
+    comes off Your Plan's savings and shows as its own part of the Fixed vs Variable bar.
+  - **Watchlists** (Simplifi): a monthly limit on any wording (matched in description, memo and
+    payee), across categories; over / near limit joins the budget alerts and badge; list button
+    shows the matching transactions.
+  - **Where the Money Went** (Monarch Sankey): income sources (top 5) → one bar → categories
+    (top 9) + Saved (or From savings on the left); labels thin out when bands are small.
+- **Monthly Close** (Budget → Monthly Close…, dialog): pick a month (✓ = closed; default the newest
+  month that's over and not closed). Steps: Statements (each account's coverage for the month) →
+  Sort What's New (uncategorised count, Start Smart Triage) → Budget (overspent first, Cover…) →
+  Bills (the checklist below) → Goals (progress; record contributions to unlinked goals) → Close the
+  Month (money in, spending, saved and rate, Age of Money, net worth, over-budget count, bills
+  missed; earlier closes for comparison; Close / Close Again / Reopen). Closing also remembers the
+  balance forecast for the end of next month.
+- **Outlook** page (between statements):
+  - **Balance forecast** per bank account (not cards/loans): from the last verified balance, regular
+    payments in and out (incl. transfers and card payments) on their rhythm, plus everything else at
+    the last 90 days' average per day; 45 days ahead; chart (from at most 30 days back), per-account
+    "≈ today", low point, next payment, and — once a statement covers a remembered forecast date —
+    "estimated X, the statement says Y (off by Z)". Coming Up: the next 30 days of regular payments.
+  - **Regular payments** (`regulars`): same account + merchant + direction at a 7/14/30/91/365-day
+    rhythm, flagged recurring/subscription, or ≥ 3 charges within 25% of the typical amount (median
+    of the last three).
+  - **Bills checklist** (`bills_for`, also in Monthly Close): Paid (dates), **Missed** (the account's
+    statement covers the due date and no charge), **Not yet seen** (statement not in), New. A bill
+    due in the last 4 days and charged just after the month counts as paid; three skipped cycles =
+    stopped.
+  - **Safe to Spend** (PocketGuard, adapted): variable categories' money left this month (budget +
+    rollover + moves − spent) ÷ days from the newest statement to month end, with a reminder that
+    spending since the statement isn't in yet.
+  - **Lowest Balance Ahead**: an account heading below zero, else the account most bills go through.
+- **Age of Money** (YNAB rule 4): income into bank accounts (not transfers) stacked oldest first,
+  each statement's opening balance counting from its first day; every purchase (cards included, at
+  purchase) spends the oldest money; age = average of the last 10 purchases; month-end series.
+  Overview tile, Outlook tile + chart with a 30-day line, Monthly Close summary.
+- **Net Worth** page (Monarch): ribbon (net, assets, debts, change over 12 months), chart from the
+  first month with data (net, assets, debts), accounts with their last verified balance, **Other
+  Assets & Debts** (added by hand, valued over time — Update Value…, optional rate).
+  - **Goals**: save up or pay down; amount, monthly, optional date; follow an account (save: its
+    balance; pay down: owed at the start − owed now) or record contributions (Monthly Close).
+    Status: Done; with a date — At risk if the planned amount finishes after it, Ahead if it needs
+    ≤ 80% of the plan, else On track; without — pace since creation (≥ 110% Ahead, ≥ 90% On track).
+  - **Paying Off Debt** (PocketGuard): cards/loans owing money + hand-added debts; rate estimated
+    from the last three months of interest charges against what's owed now (typed rate wins,
+    `apr:<id>`); minimum 3% of the balance, at least CI$ 25; avalanche vs snowball side by side
+    (debt-free month, interest, payoff order) for the monthly amount (default the plan's loan
+    payments, else the minimums).
 - **Combined Statement**: every transaction of the ticked accounts (default all in the workspace)
   in date order, a heading per month (in / out / net, transfers not counted, closing combined
   balance), the combined balance after each line (printed balances, else carried from the
@@ -247,7 +330,8 @@ Thresholds, chart months, hidden cards and categories left out of spending are p
 
 ## 9. Interface
 
-**Sidebar** (`AdwNavigationSplitView`): each page has a white symbolic icon on a coloured rounded
+**Sidebar** (`AdwNavigationSplitView`; 0.2.0 adds **Outlook** and **Net Worth** after Budget — no
+Ctrl shortcut, Ctrl+1–9 are taken): each page has a white symbolic icon on a coloured rounded
 tile (Setup pages slate); icons are all from Adwaita so none fall back to full-colour images; workspace switcher (one workspace or Consolidated across a
 chosen set) at the top; Overview, To Review *(count)*, What Changed *(count)*, Transactions,
 Combined Statement, Budget, Subscriptions *(monthly cost)*, Statements *(⚠ when one doesn't balance)*, Reports & Export
@@ -284,21 +368,24 @@ banks, one deliberately unreadable line to show the inspector).
 
 ## 10. Packaging & operations
 
-- `cargo deb -p fingraph` → `target/debian/fingraph_0.1.0-1_amd64.deb` (binary, desktop entry with
+- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.0-1_amd64.deb` (binary, desktop entry with
   PDF "Open With", icon; depends on poppler-utils, GTK 4, libadwaita).
-- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.1.0-1_amd64.deb`.
+- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.0-1_amd64.deb`.
 - Data: `~/.local/share/fingraph/ledger.db` (+ `statements/`, `backups/`). Hand backups made during
   development sit beside the ledger as `ledger-backup-2026-10-27-*.db`.
 - Terminal: `cargo run -p fingraph-core --example ledger -- reset|rescan|reapply|cards`.
 - Debug builds only: `FINGRAPH_SHOT=out.png` (with `FINGRAPH_DB`, `FINGRAPH_DEMO`, `FINGRAPH_VIEW`,
-  `FINGRAPH_DIALOG` (`triage|onboarding|report|preferences|split:<id>|owed:<id>`), `FINGRAPH_PAGE`, `FINGRAPH_SHOT_STEPS`, `FINGRAPH_SCROLL`, `FINGRAPH_CLICK=label,label…` clicks buttons in turn) renders the window to
+  `FINGRAPH_DIALOG` (`triage|onboarding|report|preferences|budget|close|split:<id>|owed:<id>|tx:<id>`), `FINGRAPH_PAGE`, `FINGRAPH_SHOT_STEPS`, `FINGRAPH_SCROLL`, `FINGRAPH_CLICK=label,label…` clicks buttons in turn) renders the window to
   a PNG for visual checks without a person at the screen.
 
 ---
 
 ## 11. Quality
 
-- `cargo test --workspace`: 47 tests — five bank layouts, rollover, date inheritance, sign healing,
+- `cargo test --workspace`: 59 tests (0.2.0 added rollovers/moves/history, non-monthly bills,
+  watchlists and closes, Age of Money incl. a hand-checked FIFO case, the bills checklist incl.
+  missed vs not-yet-seen, forecasts and their checks, net worth, goal status, avalanche vs snowball,
+  rate estimates, the guesser's held-out accuracy, manage links) — earlier: — five bank layouts, rollover, date inheritance, sign healing,
   both Pass-5 recoveries, a whole demo year, ledger (dedup, transfers, card payments, business
   expenses, backups/restore/erase, rescan keeping edits), rules and truncation matching, amount and reference rules, splits,
   attachments, coverage, directory and keywords, insights, subscriptions, exports. Plus `-- --ignored real` re-scanning the owner's
@@ -340,6 +427,9 @@ banks, one deliberately unreadable line to show the inspector).
 | Budgeting from past spending | Budget page: 6-month median suggestions, per-view budgets, pace projection |
 | Consolidated statement | Combined Statement page: chosen accounts, months, combined balance, click to edit |
 | CUC summer bills, annual renewals | Year-over-year spike check; Annual renewals card |
+| Best of YNAB, Monarch, Copilot, Simplifi, PocketGuard, Rocket Money — statements come monthly (0.2.0) | Monarch-style plan + rollovers, YNAB moves, non-monthly bills and Age of Money; Monthly Close; Outlook (forecast, safe to spend, bills checklist); Net Worth, goals, avalanche/snowball; learned guesses; watchlists; Sankey; manage links. No manual spending entry (statement-driven by choice); bill negotiation, credit scores, live sync, sharing, AI chat left out |
+| Monthly Close for last month showed "No budget yet" | A category's first budget covers earlier months; later changes apply from their month |
+| Dated goal "At risk" while finishing before its date | A dated goal is judged by finishing in time (and Ahead when it needs ≤ 80% of the plan); pace only without a date |
 
 ---
 
@@ -358,3 +448,8 @@ banks, one deliberately unreadable line to show the inspector).
   `merchants.tsv` plus a rebuild.
 - The Python prototype's ledger was never migrated (statements re-imported instead).
 - Not committed to a remote; no CI.
+- 0.2.0 limits: rollovers walk back at most 24 months; the debt minimum is one rule (3%, ≥ CI$ 25)
+  for every card and loan, so a loan's payoff is the slowest case; the forecast spreads everything
+  irregular (including card payments that vary) evenly per day; Age of Money grows without bound
+  when large balances sit unspent (as YNAB's does); weekly/fortnightly bills show as one checklist
+  line per month; manual items belong to the first workspace of the view they were added in.

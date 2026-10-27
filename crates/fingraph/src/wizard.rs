@@ -468,13 +468,19 @@ pub fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn(
     // category chips (hidden behind "pick category" for subscription/transfer cards)
     let chips_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).visible(g.kind == TriageKind::Merchant).build();
     let flow = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).max_children_per_line(4).column_spacing(6).row_spacing(6).build();
+    // the directory's suggestion, then what your own categorising suggests, then the usual ones
     let mut names: Vec<&str> = Vec::new();
     if let Some(s) = g.suggested_category {
         names.push(s);
     }
-    names.extend(QUICK.iter().copied().filter(|n| Some(*n) != g.suggested_category));
+    names.extend(g.guesses.iter().map(String::as_str));
+    let lead = names.len();
+    names.extend(QUICK.iter().copied().filter(|n| !names.contains(n)).collect::<Vec<_>>());
     for (i, name) in names.iter().enumerate() {
-        let b = gtk::Button::builder().label(*name).css_classes(if i == 0 && g.suggested_category.is_some() { vec!["chip", "suggested-action"] } else { vec!["chip"] }).build();
+        let b = gtk::Button::builder().label(*name).css_classes(if i < lead { vec!["chip", "suggested-action"] } else { vec!["chip"] }).build();
+        if i < lead && g.suggested_category != Some(*name) {
+            b.set_tooltip_text(Some("Suggested from how you've categorised similar transactions"));
+        }
         let (w, g2, id, payee, scope, next, ans) = (Rc::downgrade(app), g.clone(), cat_id(name), payee.clone(), scope.clone(), next.clone(), answered.clone());
         b.connect_clicked(move |_| {
             if let Some(a) = w.upgrade() {

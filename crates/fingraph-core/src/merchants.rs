@@ -136,6 +136,39 @@ pub fn keyword_category(text: &str) -> Option<&'static str> {
     KEYWORD_TOKENS.iter().find(|(keys, _)| keys.iter().any(|k| keyword_hit(&words, k))).map(|(_, c)| *c)
 }
 
+/// Where to manage or cancel a subscription, by a word in its name (checked in order, so a
+/// service beats the store that billed it).
+const MANAGE: &[(&str, &str)] = &[
+    ("NETFLIX", "https://www.netflix.com/cancelplan"),
+    ("SPOTIFY", "https://www.spotify.com/account/subscription/"),
+    ("DISNEY", "https://www.disneyplus.com/account"),
+    ("HULU", "https://secure.hulu.com/account"),
+    ("PARAMOUNT", "https://www.paramountplus.com/account/"),
+    ("PEACOCK", "https://www.peacocktv.com/account"),
+    ("YOUTUBE", "https://www.youtube.com/paid_memberships"),
+    ("AUDIBLE", "https://www.audible.com/account/overview"),
+    ("KINDLE", "https://www.amazon.com/kindle-dbs/ku/ku-central"),
+    ("PRIME", "https://www.amazon.com/mc"),
+    ("ADOBE", "https://account.adobe.com/plans"),
+    ("MICROSOFT", "https://account.microsoft.com/services"),
+    ("DROPBOX", "https://www.dropbox.com/account/plan"),
+    ("NORDVPN", "https://my.nordaccount.com/dashboard/"),
+    ("PATREON", "https://www.patreon.com/settings/memberships"),
+    ("CLAUDE", "https://claude.ai/settings/billing"),
+    ("ANTHROPIC", "https://claude.ai/settings/billing"),
+    ("GOOGLE PLAY", "https://play.google.com/store/account/subscriptions"),
+    ("GOOGLE", "https://myaccount.google.com/payments-and-subscriptions"),
+    ("APPLE", "https://apps.apple.com/account/subscriptions"),
+    ("ITUNES", "https://apps.apple.com/account/subscriptions"),
+    ("PAYPAL", "https://www.paypal.com/myaccount/autopay/"),
+];
+
+/// The page where a subscription can be managed or cancelled, when it's a service we know.
+pub fn manage_url(text: &str) -> Option<&'static str> {
+    let t = text.to_uppercase();
+    MANAGE.iter().find(|(k, _)| t.contains(k)).map(|x| x.1)
+}
+
 pub fn count() -> usize {
     DIRECTORY.len()
 }
@@ -169,6 +202,9 @@ mod tests {
         assert_eq!(name("AMAZON MKTPLACE PMTS, AMZN.COM/BILL"), Some(("Amazon", "Online Shopping")));
         assert_eq!(name("WAL-MART SUPERCENTER 5854, MIAMI"), Some(("Walmart", "Shopping")));
         assert_eq!(name("TORTUGA GREENERY, GEORGE TOWN"), None);
+        assert_eq!(manage_url("Netflix.com Los Gatos"), Some("https://www.netflix.com/cancelplan"));
+        assert_eq!(manage_url("GOOGLE *YouTubePremium"), Some("https://www.youtube.com/paid_memberships"));
+        assert_eq!(manage_url("Foster's"), None);
         // a platform gives way to the service it billed for
         assert_eq!(name("GOOGLE *YouTubePremium g.co/helppay#"), Some(("YouTube", "Subscriptions & Digital")));
         assert_eq!(name("PP*GOOGLE FLIGHTRADAR24 4029357733 US"), Some(("Flightradar24", "Subscriptions & Digital")));

@@ -313,6 +313,9 @@ pub struct TriageGroup {
     pub stem: String,
     pub suggested_payee: String,
     pub suggested_category: Option<&'static str>,
+    /// What your own ledger suggests (category names, likeliest first; see `learn`), besides
+    /// `suggested_category`.
+    pub guesses: Vec<String>,
     pub kind: TriageKind,
     pub tx_ids: Vec<i64>,
     pub entity_ids: Vec<i64>,
@@ -379,6 +382,7 @@ pub fn triage_groups(items: &[TriageInput]) -> Vec<TriageGroup> {
             TriageGroup {
                 suggested_payee: payee,
                 suggested_category: if kind == TriageKind::Subscription { Some("Subscriptions & Digital") } else { cat },
+                guesses: Vec::new(),
                 kind,
                 tx_ids: v.iter().map(|t| t.id).collect(),
                 entity_ids,

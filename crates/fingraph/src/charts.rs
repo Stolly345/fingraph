@@ -51,6 +51,9 @@ pub enum Data {
     Lines { x_labels: Vec<(f64, String)>, series: Vec<LineSeries>, band: Option<Band>, stops: Vec<(f64, String)> },
     /// Bars descending plus the cumulative share (0–100) on a right-hand axis.
     Pareto { items: Vec<(String, f64)>, cum_pct: Vec<f64>, tips: Vec<String> },
+    /// Where money came from (left) and went (right), through one bar in the middle; bands are
+    /// sized by amount. Both sides should add up to the same total. Hits: left 0…, then right.
+    Flow { left: Vec<(String, f64, Rgb)>, right: Vec<(String, f64, Rgb)>, tips: Vec<String> },
 }
 
 enum Shape {
@@ -445,6 +448,64 @@ fn draw(cr: &cairo::Context, w: f64, h: f64, fg: Rgb, data: &Data, hover: Option
             }
             let leg: Vec<(&str, Rgb)> = series.iter().take(6).map(|s| (s.name.as_str(), s.color)).collect();
             legend(cr, fg, &leg, right, 10.0);
+        }
+        Data::Flow { left, right, tips } => {
+            let (sl, sr): (f64, f64) = (left.iter().map(|x| x.1).sum(), right.iter().map(|x| x.1).sum());
+            let total = sl.max(sr);
+            if total <= 0.0 {
+                rgb(cr, fg, 0.5);
+                text(cr, "Nothing in or out this month", w / 2.0, h / 2.0, 0.5);
+                return;
+            }
+            let (top, bottom) = (8.0, h - 8.0);
+            let gap = 5.0;
+            let label_w = (w * 0.24).min(210.0);
+            let (lx, mx, rx, bw) = (label_w, w / 2.0 - 6.0, w - label_w - 12.0, 12.0);
+            // the scale leaves room for the gaps on the busier side
+            let k = (bottom - top - gap * (left.len().max(right.len()).max(1) - 1) as f64) / total;
+            let mid_h = total * k;
+            let mid_top = top + (bottom - top - mid_h) / 2.0;
+            let band = |x0: f64, a0: f64, a1: f64, x1: f64, b0: f64, b1: f64| {
+                let c = (x0 + x1) / 2.0;
+                cr.move_to(x0, a0);
+                cr.curve_to(c, a0, c, b0, x1, b0);
+                cr.line_to(x1, b1);
+                cr.curve_to(c, b1, c, a1, x0, a1);
+                cr.close_path();
+            };
+            let mut idx = 0;
+            for (side, items) in [(0, left), (1, right)] {
+                let n = items.len();
+                let used: f64 = items.iter().map(|x| x.1).sum::<f64>() * k + gap * n.saturating_sub(1) as f64;
+                let mut y = top + (bottom - top - used) / 2.0;
+                let mut my = mid_top;
+                // small bands share their space: a label only where it won't touch the one above
+                let mut last_label = f64::MIN;
+                for (name, v, c) in items.iter() {
+                    let hgt = (v * k).max(1.0);
+                    let lit = hover.is_none() || hover == Some(idx);
+                    rgb(cr, *c, if lit { 0.38 } else { 0.16 });
+                    if side == 0 { band(lx + bw, y, y + hgt, mx, my, my + hgt) } else { band(mx + bw, my, my + hgt, rx, y, y + hgt) }
+                    let _ = cr.fill();
+                    rgb(cr, *c, 0.95);
+                    cr.rectangle(if side == 0 { lx } else { rx }, y, bw, hgt);
+                    let _ = cr.fill();
+                    rgb(cr, fg, 0.8);
+                    let ty = (y + hgt / 2.0 + 4.0).max(last_label + 14.0);
+                    if ty <= bottom + 4.0 && ty - (y + hgt) < 10.0 {
+                        if side == 0 { text(cr, &ellipsize(cr, name, label_w - 10.0), lx - 6.0, ty, 1.0) } else { text(cr, &ellipsize(cr, name, label_w - 4.0), rx + bw + 6.0, ty, 0.0) }
+                        last_label = ty;
+                    }
+                    let hit_x = if side == 0 { 0.0 } else { rx };
+                    hits.push(Hit { shape: Shape::Rect(hit_x, y - gap / 2.0, if side == 0 { lx + bw } else { w - rx }, hgt + gap), index: idx, tip: tips.get(idx).cloned().unwrap_or_default() });
+                    y += hgt + gap;
+                    my += hgt;
+                    idx += 1;
+                }
+            }
+            rgb(cr, fg, 0.55);
+            cr.rectangle(mx, mid_top, bw, mid_h);
+            let _ = cr.fill();
         }
         Data::Pareto { items, cum_pct, tips } => {
             let max = items.iter().map(|i| i.1).fold(0.0, f64::max);

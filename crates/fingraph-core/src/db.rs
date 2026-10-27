@@ -180,6 +180,81 @@ CREATE TABLE budgets (
     currency TEXT NOT NULL,
     PRIMARY KEY (scope, category_id)
 );
+"#, r#"
+-- what each budget was from a month on, so changing it doesn't rewrite past months' rollovers
+CREATE TABLE budget_history (
+    scope TEXT NOT NULL,
+    category_id INTEGER NOT NULL,
+    month TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    PRIMARY KEY (scope, category_id, month)
+);
+INSERT INTO budget_history SELECT scope, category_id, '2000-01-01', amount, currency FROM budgets;
+-- money moved between categories in one month (cover an overspend)
+CREATE TABLE budget_moves (
+    id INTEGER PRIMARY KEY,
+    scope TEXT NOT NULL,
+    month TEXT NOT NULL,
+    from_category INTEGER NOT NULL,
+    to_category INTEGER NOT NULL,
+    amount TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+-- yearly or quarterly bills set aside for monthly
+CREATE TABLE sinking_funds (
+    id INTEGER PRIMARY KEY,
+    scope TEXT NOT NULL,
+    name TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    every_months INTEGER NOT NULL,
+    next_due TEXT NOT NULL,
+    stem TEXT NOT NULL DEFAULT ''
+);
+-- a month you've been through in Monthly Close
+CREATE TABLE month_closes (
+    scope TEXT NOT NULL,
+    month TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    closed_at TEXT NOT NULL,
+    PRIMARY KEY (scope, month)
+);
+-- assets and debts that aren't on a statement: the house, the car, a pension
+CREATE TABLE manual_items (
+    id INTEGER PRIMARY KEY,
+    entity_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    liability INTEGER NOT NULL,
+    currency TEXT NOT NULL,
+    apr TEXT
+);
+CREATE TABLE manual_values (
+    item_id INTEGER NOT NULL,
+    as_of TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (item_id, as_of)
+);
+CREATE TABLE goals (
+    id INTEGER PRIMARY KEY,
+    scope TEXT NOT NULL,
+    name TEXT NOT NULL,
+    paydown INTEGER NOT NULL,
+    target TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    target_date TEXT,
+    monthly TEXT NOT NULL,
+    account_id INTEGER,
+    start_value TEXT NOT NULL,
+    created TEXT NOT NULL
+);
+CREATE TABLE goal_entries (
+    goal_id INTEGER NOT NULL,
+    month TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    PRIMARY KEY (goal_id, month)
+);
 "#];
 
 /// (name, kind, children). Missing ones are added to existing ledgers on open; lists are shown A–Z.
@@ -1638,6 +1713,23 @@ impl Db {
             .map(|t| rules::TriageInput { id: t.id, entity_id: t.entity_id, posted: t.posted, raw: t.raw_description.clone(), memo: t.memo.clone(), amount: t.amount, currency: t.currency, account: t.account_name.clone() })
             .collect();
         let mut groups = rules::triage_groups(&items);
+        // what your own categorising suggests, from the group's latest charge
+        let known = self.transactions(&TxFilter { entity_ids: entity_ids.to_vec(), ..Default::default() })?;
+        if let Some(model) = crate::learn::Model::train(&known) {
+            let cats = self.categories()?;
+            for g in &mut groups {
+                let Some(t) = g.charges.first() else { continue };
+                let acct = rows.iter().find(|r| r.id == t.id).map_or(0, |r| r.account_id);
+                g.guesses = model
+                    .guess(&crate::learn::features(&t.raw, &t.memo, t.amount, t.posted, acct))
+                    .into_iter()
+                    .filter(|(_, p)| *p >= 0.15)
+                    .filter_map(|(id, _)| cats.iter().find(|c| c.id == id).map(|c| c.name.clone()))
+                    .filter(|n| Some(n.as_str()) != g.suggested_category && n != "Uncategorized")
+                    .take(2)
+                    .collect();
+            }
+        }
         if !self.prefs().ask_subscriptions {
             for g in groups.iter_mut().filter(|g| g.kind == rules::TriageKind::Subscription) {
                 g.kind = rules::TriageKind::Merchant;

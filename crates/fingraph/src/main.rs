@@ -5,9 +5,11 @@ mod account;
 mod budget;
 mod changes;
 mod charts;
+mod close;
 mod dashboard;
 mod directory;
 mod export;
+mod outlook;
 mod owed;
 mod preferences;
 mod profiles;
@@ -18,6 +20,7 @@ mod statement;
 mod statements;
 mod transactions;
 mod txedit;
+mod wealth;
 mod wizard;
 
 use adw::prelude::*;
@@ -33,8 +36,8 @@ use std::rc::Rc;
 
 const APP_ID: &str = "dev.fingraph.FinGraph";
 
-/// Ctrl+1 to Ctrl+7.
-const MAIN_PAGES: [&str; 9] = ["overview", "review", "changes", "transactions", "subscriptions", "statements", "export", "statement", "budget"];
+/// Ctrl+1 to Ctrl+9 for the first nine; all of them can be the page FinGraph reopens on.
+const MAIN_PAGES: [&str; 11] = ["overview", "review", "changes", "transactions", "subscriptions", "statements", "export", "statement", "budget", "outlook", "networth"];
 
 /// Which workspaces the window shows.
 #[derive(Clone, PartialEq)]
@@ -199,6 +202,8 @@ impl App {
         let (t, tr) = transactions::build(&app);
         let (cs, csr) = statement::build(&app);
         let (bu, bur) = budget::build(&app);
+        let (ol, olr) = outlook::build(&app);
+        let (nw, nwr) = wealth::build(&app);
         let (sb, sbr) = rules::build(&app, rules::Part::Subscriptions);
         let (st, str_) = statements::build(&app);
         let (e, er) = export::build(&app);
@@ -216,6 +221,8 @@ impl App {
             ("transactions", "Transactions", "view-list-bullet-symbolic", t, tr),
             ("statement", "Combined Statement", "view-paged-symbolic", cs, csr),
             ("budget", "Budget", "accessories-calculator-symbolic", bu, bur),
+            ("outlook", "Outlook", "x-office-calendar-symbolic", ol, olr),
+            ("networth", "Net Worth", "starred-symbolic", nw, nwr),
             ("subscriptions", "Subscriptions", "media-playlist-repeat-symbolic", sb, sbr),
             ("statements", "Statements", "x-office-document-symbolic", st, str_),
             ("export", "Reports & Export", "document-save-symbolic", e, er),
@@ -354,7 +361,7 @@ impl App {
             g.set_accels_for_action("win.find", &["<Control>f"]);
             g.set_accels_for_action("win.import", &["<Control>o"]);
             g.set_accels_for_action("win.preferences", &["<Control>comma"]);
-            for i in 0..MAIN_PAGES.len() {
+            for i in 0..MAIN_PAGES.len().min(9) {
                 g.set_accels_for_action(&format!("win.page-{}", i + 1), &[&format!("<Control>{}", i + 1)]);
             }
         }
@@ -592,7 +599,7 @@ impl App {
         }
         // the header shows only what this page uses
         self.range_dd.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "export" | "account"));
-        self.ccy_box.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "budget" | "subscriptions" | "export"));
+        self.ccy_box.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "budget" | "subscriptions" | "export" | "outlook" | "networth"));
         if MAIN_PAGES.contains(&name) {
             let mut p = self.db.prefs();
             if p.last_page != name {
@@ -614,6 +621,8 @@ impl App {
             "transactions" => "tile-teal",
             "statement" => "tile-indigo",
             "budget" => "tile-green",
+            "outlook" => "tile-cyan",
+            "networth" => "tile-purple",
             "subscriptions" => "tile-pink",
             "statements" => "tile-yellow",
             "export" => "tile-cyan",
@@ -626,7 +635,7 @@ impl App {
         row.append(&gtk::Label::builder().label(title).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build());
         let badge = gtk::Label::builder().css_classes(["dim-label", "caption", "tnum"]).build();
         row.append(&badge);
-        if let Some(n) = MAIN_PAGES.iter().position(|p| *p == name) {
+        if let Some(n) = MAIN_PAGES.iter().position(|p| *p == name).filter(|n| *n < 9) {
             row.set_tooltip_text(Some(&format!("Ctrl+{}", n + 1)));
         }
         if let Some(&key) = ["review", "changes", "subscriptions", "statements", "budget"].iter().find(|k| **k == name) {
@@ -914,6 +923,7 @@ fn debug_shot(app: &Rc<App>) {
         Ok(d) if d.starts_with("split:") => split::dialog(app, d[6..].parse().unwrap_or(0)),
         Ok(d) if d.starts_with("owed:") => owed::debug_open(app, d[5..].parse().unwrap_or(0)),
         Ok("budget") => budget::wizard(app, Rc::new(|| {})),
+        Ok("close") => close::open(app, None, Rc::new(|| {})),
         Ok(d) if d.starts_with("tx:") => txedit::dialog(app, d[3..].parse().unwrap_or(0), None),
         Ok("preferences") => {
             preferences::show(app);

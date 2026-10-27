@@ -55,7 +55,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let (c2, k_rate) = kpi_card("Savings / Operating Margin");
     let (c3, k_subs) = kpi_card("Active Subscription Burn");
     let (c4, k_rec) = kpi_card("Reconciliation & Triage");
-    for c in [&c1, &c2, &c3, &c4] {
+    let (c5, k_age) = kpi_card("Age of Money");
+    for c in [&c1, &c2, &c3, &c4, &c5] {
         ribbon.append(c);
     }
     body.append(&ribbon);
@@ -153,6 +154,17 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             k_subs.sub.set_label(&format!("{} a year across KYD & USD", money(k.subs_annual)));
             k_rec.value.set_label(&format!("{}/{} Reconciled", k.reconciled, k.statements));
             k_rec.sub.set_label(&format!("{} statements verified to the cent · {} uncategorized", k.reconciled, k.uncategorized));
+            // split lines add up to their charge, so they age money the same way
+            match fingraph_core::outlook::age_of_money(&all_rows, &docs, ccy, &fx) {
+                Some(x) => {
+                    k_age.value.set_label(&format!("{} days", x.days));
+                    k_age.sub.set_label(&format!("How long money sits before it's spent, as of {} · aim for 30+", x.as_of.format("%d %b")));
+                }
+                None => {
+                    k_age.value.set_label("—");
+                    k_age.sub.set_label("Needs statements with money in and out");
+                }
+            }
 
             // monthly bars + net line: 12 months ending at the range end
             let end = to.min(today());

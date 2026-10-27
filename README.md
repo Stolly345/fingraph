@@ -25,7 +25,20 @@ PDFs, backups). Full product and system reference: [`docs/PRD.md`](docs/PRD.md).
   wizard takes your pay cycle, gross pay and deductions (pension 5%, health insurance), other income,
   loan payments and a savings goal, does the arithmetic (and solves how much flexible spending must
   shrink to reach the goal), and projects savings 12 months ahead on budget and on trend. Alerts when
-  a category is over or 85% used early in the month (sidebar count + Overview card).
+  a category is over or 85% used early in the month (sidebar count + Overview card). Leftovers can
+  **roll over**, money can be **moved** to cover an overspend, yearly and quarterly bills get a
+  monthly **set-aside**, **watchlists** cap a merchant (Amazon CI$ 150), and a **flow diagram**
+  shows where the month's money went.
+- **Monthly Close**: when a month's statements are in — check they're all there, sort what's new,
+  settle the budget, tick off the regular bills (paid, missed, or statement not in yet), update
+  goals, and close the month with a summary.
+- **Outlook** (statements come a month late): each bank account's estimated balance until the next
+  statement, what's safe to spend, the month's bills, and **Age of Money** (how long money sits
+  before it's spent).
+- **Net Worth**: statement balances plus assets and debts you value by hand, over time; **goals**
+  (save up, or pay a card down) with on-track status; **debt payoff** — highest rate first vs
+  smallest balance first, with rates read from your interest charges.
+- **Learns** your categorising: To Review suggests categories from how you filed similar charges.
 - **Rules** can be limited to an amount (*only when CI$ 125.00*) or match a reference number.
 - **Receipts**: drop a PDF or photo on a transaction; export the P&L with every receipt for your
   accountant.
@@ -56,7 +69,7 @@ wins for that transaction.
 ```sh
 sudo apt install poppler-utils libgtk-4-dev libadwaita-1-dev
 cargo deb -p fingraph
-sudo apt install ./target/debian/fingraph_0.1.0-1_amd64.deb
+sudo apt install ./target/debian/fingraph_0.2.0-1_amd64.deb
 ```
 
 Or run from source: `cargo run -p fingraph --release`. Main menu → **Load Demo Data** imports a
