@@ -431,7 +431,12 @@ pub struct Insight {
     pub title: String,
     pub detail: String,
     pub tx_ids: Vec<i64>,
+    /// A breakdown to expand.
+    pub parts: Vec<InsightPart>,
 }
+
+/// One line of an insight's breakdown: (title, detail, transactions).
+pub type InsightPart = (String, String, Vec<i64>);
 
 #[derive(Debug, Clone)]
 pub struct FeeLine {
@@ -474,6 +479,7 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
                 title: format!("{} increased by +{pc:.1}% {since}", s.payee),
                 detail: format!("{old} → {new} {} per charge ({} a year)", s.currency, money(s.annual)),
                 tx_ids: s.tx_ids.clone(),
+                parts: Vec::new(),
             });
         }
     }
@@ -483,7 +489,9 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
     let mut bills: BTreeMap<(i64, String), Months> = BTreeMap::new();
     for t in rows.iter().filter(|t| t.amount.is_sign_negative() && counts(t) && t.posted <= to) {
         let utility = t.category_id.is_some_and(|id| parents.get(&id).map_or(t.category_name.as_deref() == Some("Utilities"), |p| p == "Utilities"));
-        if utility || t.is_recurring {
+        // fees have their own card; only bills and vendors here
+        let fee = t.category_name.as_deref() == Some("Bank Fees & Interest") || rules::is_bank_fee(&t.raw_description, &t.memo);
+        if (utility || t.is_recurring) && !fee {
             let e = bills.entry((t.account_id, payee(t))).or_default().entry(month_start(t.posted)).or_default();
             e.0 += -value(t, ccy, fx);
             e.1.push(t.id);
@@ -513,29 +521,45 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
                 title: format!("{name} up {p:.0}% vs 6-month average"),
                 detail: format!("{} in {} against an average of {}", money(*last_v), last_m.format("%B"), money(round2(avg))),
                 tx_ids: ids.clone(),
+                parts: Vec::new(),
             });
         }
     }
 
-    // duplicates: same account, merchant and amount within 72 hours
-    let mut seen: Vec<&TxRow> = rows.iter().filter(|t| in_range(t, from, to) && t.amount.is_sign_negative() && counts(t)).collect();
-    seen.sort_by_key(|t| (t.account_id, t.posted));
-    for (i, a) in seen.iter().enumerate() {
-        for b in seen[i + 1..].iter().take_while(|b| b.account_id == a.account_id && (b.posted - a.posted).num_days() <= 3) {
-            if a.amount == b.amount && merchant_stem(&a.raw_description, &a.memo) == merchant_stem(&b.raw_description, &b.memo) && !a.is_subscription {
-                out.push(Insight {
-                    kind: InsightKind::Duplicate,
-                    title: format!("{} charged {} twice", payee(a), fmt_money(-a.amount, a.currency)),
-                    detail: format!("{} and {} on {}", a.posted.format("%d %b"), b.posted.format("%d %b"), a.account_name),
-                    tx_ids: vec![a.id, b.id],
-                });
-            }
+    // duplicates: same account, merchant and amount, each within 72 hours of the last. Bank fees
+    // repeat by design (one per transfer) and subscriptions by schedule, so neither counts.
+    let mut seen: Vec<(&TxRow, String)> = rows
+        .iter()
+        .filter(|t| in_range(t, from, to) && t.amount.is_sign_negative() && counts(t) && !t.is_subscription)
+        .filter(|t| t.category_name.as_deref() != Some("Bank Fees & Interest") && !rules::is_bank_fee(&t.raw_description, &t.memo))
+        .map(|t| (t, merchant_stem(&t.raw_description, &t.memo)))
+        .collect();
+    seen.sort_by(|(a, sa), (b, sb)| (a.account_id, sa, a.amount, a.posted).cmp(&(b.account_id, sb, b.amount, b.posted)));
+    let mut i = 0;
+    while i < seen.len() {
+        let mut j = i + 1;
+        while j < seen.len() && (seen[j].0.account_id, &seen[j].1, seen[j].0.amount) == (seen[i].0.account_id, &seen[i].1, seen[i].0.amount) && (seen[j].0.posted - seen[j - 1].0.posted).num_days() <= 3 {
+            j += 1;
         }
+        if j - i >= 2 {
+            let run = &seen[i..j];
+            let a = run[0].0;
+            let times = if run.len() == 2 { "twice".to_string() } else { format!("{} times", run.len()) };
+            out.push(Insight {
+                kind: InsightKind::Duplicate,
+                title: format!("{} charged {} {times}", payee(a), fmt_money(-a.amount, a.currency)),
+                detail: format!("{} on {}", run.iter().map(|(t, _)| t.posted.format("%d %b").to_string()).collect::<Vec<_>>().join(", "), a.account_name),
+                tx_ids: run.iter().map(|(t, _)| t.id).collect(),
+                parts: Vec::new(),
+            });
+        }
+        i = j;
     }
 
     // fees: this window, per bank
     let window: Vec<TxRow> = rows.iter().filter(|t| in_range(t, from, to)).cloned().collect();
     let fees = bank_fees(&window, ccy, fx);
+    let fee_rows: Vec<&TxRow> = window.iter().filter(|t| t.amount.is_sign_negative() && !t.is_transfer() && (t.category_name.as_deref() == Some("Bank Fees & Interest") || rules::is_bank_fee(&t.raw_description, &t.memo))).collect();
     if !fees.is_empty() {
         let total: Decimal = fees.iter().map(|f| f.total).sum();
         let mut per: BTreeMap<String, Decimal> = BTreeMap::new();
@@ -548,7 +572,19 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
             kind: InsightKind::BankFees,
             title: format!("Banks charged you {}", money(total)),
             detail: per.iter().map(|(b, v)| format!("{b} {}", money(*v))).collect::<Vec<_>>().join(" · "),
-            tx_ids: window.iter().filter(|t| t.amount.is_sign_negative() && (t.category_name.as_deref() == Some("Bank Fees & Interest") || rules::is_bank_fee(&t.raw_description, &t.memo))).map(|t| t.id).collect(),
+            tx_ids: fee_rows.iter().map(|t| t.id).collect(),
+            parts: {
+                // one line per bank and kind of fee: "Scotiabank · Special Service Charge ×38"
+                let mut by: BTreeMap<(String, String), (Decimal, Vec<i64>)> = BTreeMap::new();
+                for t in &fee_rows {
+                    let e = by.entry((t.bank_short.clone(), payee(t))).or_default();
+                    e.0 += -value(t, ccy, fx);
+                    e.1.push(t.id);
+                }
+                let mut v: Vec<_> = by.into_iter().collect();
+                v.sort_by_key(|x| std::cmp::Reverse(x.1.0));
+                v.into_iter().map(|((bank, name), (sum, ids))| (format!("{name} · {}", money(sum)), format!("{bank} · {} charge{}", ids.len(), if ids.len() == 1 { "" } else { "s" }), ids)).collect()
+            },
         });
     }
 
@@ -573,6 +609,7 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
             title: format!("{k} is {p:.0}% above its 3-month average"),
             detail: format!("{} so far in {} vs {} a month", money(v), this.format("%B"), money(round2(avg))),
             tx_ids: Vec::new(),
+            parts: Vec::new(),
         });
     }
 
@@ -584,6 +621,7 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
             title: format!("{} — {} net YTD", r.label, money(r.net)),
             detail: format!("Income {} · Expenses {}", money(r.income), money(r.expenses)),
             tx_ids: Vec::new(),
+            parts: Vec::new(),
         });
     }
     out
@@ -616,7 +654,12 @@ mod tests {
         assert!(ins.iter().any(|i| i.kind == InsightKind::BankFees));
         let all = Range::All.resolve(today, data_span(&rows));
         let dup = insights(&rows, &[], all.0, all.1, Currency::KYD, &fx, &parents);
-        assert!(dup.iter().any(|i| i.kind == InsightKind::Duplicate && i.title.contains("Cayman Cabs")), "{:#?}", dup.iter().filter(|i| i.kind == InsightKind::Duplicate).collect::<Vec<_>>());
+        let dups: Vec<&Insight> = dup.iter().filter(|i| i.kind == InsightKind::Duplicate).collect();
+        assert!(dups.iter().any(|i| i.title.contains("Cayman Cabs")), "{dups:#?}");
+        // fees repeat by design: never "double charges"; they're broken down inside the fees card instead
+        assert!(dups.iter().all(|i| !i.title.to_lowercase().contains("fee") && !i.title.to_lowercase().contains("charge ")), "{dups:#?}");
+        let fees_card = dup.iter().find(|i| i.kind == InsightKind::BankFees).unwrap();
+        assert!(fees_card.parts.len() > 1 && fees_card.parts.iter().map(|p| p.2.len()).sum::<usize>() == fees_card.tx_ids.len());
         let k = kpis(&rows, &db.documents(&[]).unwrap(), all.0, all.1, Currency::KYD, &fx, today);
         assert_eq!(k.statements, k.reconciled + 1, "all but the deliberately garbled demo statement");
         assert!(k.subs_monthly > Decimal::ZERO);

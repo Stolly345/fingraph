@@ -5,6 +5,7 @@ use chrono::{Datelike, Duration, NaiveDate};
 use fingraph_core::Decimal;
 use fingraph_core::db::{DocumentRow, TxFilter};
 use fingraph_core::insights::{self, InsightKind};
+use gtk::glib;
 use rust_decimal::prelude::ToPrimitive;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -383,23 +384,62 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             }
             let ins = insights::insights(&rows, &ents, from, to, ccy, &fx, &parents);
             let mut shown = 0;
-            for i in ins.iter().filter(|i| !hidden.contains(&format!("{:?}", i.kind))) {
-                let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
-                let top = gtk::Box::builder().spacing(8).build();
-                top.append(&gtk::Image::from_icon_name(i.kind.icon()));
-                top.append(&gtk::Label::builder().label(i.kind.label()).xalign(0.0).css_classes(["caption-heading", "dim-label"]).build());
-                card.append(&top);
-                card.append(&gtk::Label::builder().label(&i.title).xalign(0.0).wrap(true).css_classes(["heading"]).build());
-                card.append(&dim(&i.detail));
-                if !i.tx_ids.is_empty() {
-                    let b = gtk::Button::builder().label(format!("Show {} transaction{}", i.tx_ids.len(), if i.tx_ids.len() == 1 { "" } else { "s" })).css_classes(["flat"]).halign(gtk::Align::Start).build();
-                    let (w, ids) = (Rc::downgrade(&a), i.tx_ids.clone());
+            // one card per kind: a summary up front, every item behind an expander
+            for kind in InsightKind::ALL.into_iter().filter(|k| !hidden.contains(&format!("{k:?}"))) {
+                let of_kind: Vec<&insights::Insight> = ins.iter().filter(|i| i.kind == kind).collect();
+                if of_kind.is_empty() {
+                    continue;
+                }
+                let (title, detail, rows): (String, String, Vec<insights::InsightPart>) = match of_kind.as_slice() {
+                    [one] => (one.title.clone(), one.detail.clone(), one.parts.clone()),
+                    many => {
+                        let n = many.len();
+                        let title = match kind {
+                            InsightKind::Duplicate => format!("{n} possible double charges"),
+                            InsightKind::Spike => format!("{n} bills above their usual"),
+                            InsightKind::PriceCreep => format!("{n} subscriptions got dearer"),
+                            InsightKind::CategoryDrift => format!("{n} categories trending up"),
+                            InsightKind::TaxSummary => "Net income year to date".into(),
+                            InsightKind::BankFees => format!("{n} fee summaries"),
+                        };
+                        let preview = many.iter().take(2).map(|i| i.title.as_str()).collect::<Vec<_>>().join(" · ");
+                        let detail = if n > 2 { format!("{preview} · and {} more", n - 2) } else { preview };
+                        (title, detail, many.iter().map(|i| (i.title.clone(), i.detail.clone(), i.tx_ids.clone())).collect())
+                    }
+                };
+                let all_ids: Vec<i64> = of_kind.iter().flat_map(|i| i.tx_ids.iter().copied()).collect();
+                let show = |ids: Vec<i64>, label: String| {
+                    let b = gtk::Button::builder().label(label).css_classes(["flat"]).halign(gtk::Align::Start).valign(gtk::Align::Center).build();
+                    let w = Rc::downgrade(&a);
                     b.connect_clicked(move |_| {
                         if let Some(a) = w.upgrade() {
                             a.show_transactions(ids.clone());
                         }
                     });
-                    card.append(&b);
+                    b
+                };
+                let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
+                let top = gtk::Box::builder().spacing(8).build();
+                top.append(&gtk::Image::from_icon_name(kind.icon()));
+                top.append(&gtk::Label::builder().label(kind.label()).xalign(0.0).css_classes(["caption-heading", "dim-label"]).build());
+                card.append(&top);
+                card.append(&gtk::Label::builder().label(&title).xalign(0.0).wrap(true).css_classes(["heading"]).build());
+                card.append(&dim(&detail));
+                if !all_ids.is_empty() {
+                    let n = all_ids.len();
+                    card.append(&show(all_ids, format!("Show {n} transaction{}", if n == 1 { "" } else { "s" })));
+                }
+                if !rows.is_empty() {
+                    let list = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
+                    for (t, d, ids) in &rows {
+                        let r = adw::ActionRow::builder().title(glib::markup_escape_text(t)).subtitle(glib::markup_escape_text(d)).build();
+                        if !ids.is_empty() {
+                            r.add_suffix(&show(ids.clone(), "Show".into()));
+                        }
+                        list.append(&r);
+                    }
+                    let exp = gtk::Expander::builder().label(format!("Details ({})", rows.len())).child(&list).build();
+                    card.append(&exp);
                 }
                 cards.insert(&card, -1);
                 shown += 1;
