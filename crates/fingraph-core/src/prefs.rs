@@ -16,6 +16,8 @@ pub struct Prefs {
     pub default_range: String,
     /// `system`, `light` or `dark`.
     pub appearance: String,
+    /// The page that was open last (FinGraph reopens on it).
+    pub last_page: String,
 
     // Money
     /// A rate printed on the statement beats the configured exchange rate.
@@ -65,6 +67,7 @@ impl Default for Prefs {
             last_workspace: String::new(),
             default_range: "This Year".into(),
             appearance: "system".into(),
+            last_page: "overview".into(),
             statement_fx_wins: true,
             currency_codes: false,
             brackets: false,

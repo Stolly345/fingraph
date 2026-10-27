@@ -15,6 +15,15 @@ use crate::App;
 
 thread_local! {
     static SEARCH: RefCell<Option<gtk::SearchEntry>> = const { RefCell::new(None) };
+    /// An account picked in the sidebar, applied to the account filter on the next refresh.
+    static PENDING_ACCOUNT: std::cell::Cell<Option<Option<i64>>> = const { std::cell::Cell::new(None) };
+}
+
+/// The sidebar's account rows: this account's transactions.
+pub fn show_account(app: &Rc<App>, id: i64) {
+    *app.focus_ids.borrow_mut() = None;
+    PENDING_ACCOUNT.with(|p| p.set(Some(Some(id))));
+    app.show_view("transactions");
 }
 
 pub fn focus_search(_app: &Rc<App>) {
@@ -219,9 +228,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     if a.db.set_category(&[id], new).is_ok() {
                         let name = a.categories().into_iter().find(|c| Some(c.id) == new).map_or("Uncategorized".to_string(), |c| c.name);
                         offer_rule(&a, &t, new, None, &format!("categorize as {name}"));
-                        let n = a.db.uncategorized_count(&a.entity_ids()).unwrap_or(0);
-                        a.triage_btn.set_visible(n > 0);
-                        a.triage_btn.set_label(&format!("Triage ({n})"));
+                        a.update_sidebar();
                     }
                 });
                 item.set_child(Some(&dd));
@@ -380,7 +387,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             // filter choices (keep the current pick when it still exists)
             let ents = a.entity_ids();
             let accts: Vec<_> = a.db.accounts().unwrap_or_default().into_iter().filter(|x| ents.contains(&x.entity_id) && !x.hidden).collect();
-            let prev_acct = account_ids.borrow().get(account_dd.selected() as usize).copied().flatten();
+            let prev_acct = PENDING_ACCOUNT.with(|p| p.take()).unwrap_or_else(|| account_ids.borrow().get(account_dd.selected() as usize).copied().flatten());
             let mut names = vec!["All accounts".to_string()];
             names.extend(accts.iter().map(|x| x.name.clone()));
             *account_ids.borrow_mut() = std::iter::once(None).chain(accts.iter().map(|x| Some(x.id))).collect();

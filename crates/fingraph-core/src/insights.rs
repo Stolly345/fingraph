@@ -310,6 +310,31 @@ pub fn balances(rows: &[TxRow], docs: &[DocumentRow], ccy: Currency, fx: &Fx) ->
     out
 }
 
+/// Each account's latest verified balance in its own currency (cards and loans negative: what you
+/// owe) and the date it was printed: a running balance or a statement's closing balance.
+pub fn latest_balances(rows: &[TxRow], docs: &[DocumentRow]) -> BTreeMap<i64, (NaiveDate, Decimal)> {
+    let liab: BTreeMap<i64, bool> = rows.iter().map(|t| (t.account_id, t.account_type.is_liability())).collect();
+    let mut out: BTreeMap<i64, (NaiveDate, Decimal)> = BTreeMap::new();
+    let mut put = |acct: i64, d: NaiveDate, b: Decimal| {
+        let b = if liab.get(&acct).copied().unwrap_or(false) { -b } else { b };
+        if out.get(&acct).is_none_or(|(od, _)| d >= *od) {
+            out.insert(acct, (d, b));
+        }
+    };
+    let mut with_balance: Vec<&TxRow> = rows.iter().filter(|t| t.balance.is_some()).collect();
+    with_balance.sort_by_key(|t| (t.posted, t.id));
+    for t in with_balance {
+        put(t.account_id, t.posted, t.balance.unwrap_or_default());
+    }
+    // a closing balance covers everything up to its date, so it wins a tie
+    for d in docs {
+        if let (Some(c), Some((_, end))) = (d.closing, d.period) {
+            put(d.account_id, end, c);
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct PnlRow {
     pub label: String,
@@ -681,6 +706,8 @@ mod tests {
         assert!(k.subs_monthly > Decimal::ZERO);
         // transfers never count: card payments don't show up as spending
         assert!(by_category(&rows, all.0, all.1, Currency::KYD, &fx, &parents).iter().all(|(k, _)| k != "Transfers"));
+        let bal = latest_balances(&rows, &db.documents(&[]).unwrap());
+        assert!(bal.len() >= 7, "every demo account has a balance: {bal:?}");
         let fees = bank_fees(&rows, Currency::KYD, &fx);
         assert!(fees.iter().any(|f| f.bank == "Scotiabank") && fees.iter().any(|f| f.bank == "Butterfield"));
     }

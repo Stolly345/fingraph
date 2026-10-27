@@ -1,11 +1,13 @@
 //! FinGraph: a local-first ledger for Cayman bank statements. Drop PDFs in, the 5-pass scanner reads
 //! and proves them, Smart Triage learns your merchants, and the dashboard shows where money goes.
 
+mod changes;
 mod charts;
 mod dashboard;
 mod export;
 mod preferences;
 mod profiles;
+mod review;
 mod rules;
 mod statements;
 mod transactions;
@@ -19,10 +21,13 @@ use fingraph_core::money::fmt_money;
 use fingraph_core::{Currency, Decimal};
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 const APP_ID: &str = "dev.fingraph.FinGraph";
+
+/// Ctrl+1 to Ctrl+7.
+const MAIN_PAGES: [&str; 7] = ["overview", "review", "changes", "transactions", "subscriptions", "statements", "export"];
 
 /// Which workspaces the window shows.
 #[derive(Clone, PartialEq)]
@@ -48,7 +53,14 @@ pub struct App {
     range_dd: gtk::DropDown,
     range_items: RefCell<Vec<Range>>,
     custom_range: Cell<Option<(NaiveDate, NaiveDate)>>,
-    triage_btn: gtk::Button,
+    side_list: gtk::ListBox,
+    ccy_box: gtk::Box,
+    /// Sidebar counts, by page name.
+    badges: RefCell<HashMap<&'static str, gtk::Label>>,
+    /// What the account rows were last built from; unchanged → left alone.
+    accounts_key: RefCell<String>,
+    /// True while the sidebar rebuilds itself: its selection changes aren't the user's.
+    quiet: Cell<bool>,
     kyd_btn: gtk::ToggleButton,
     usd_btn: gtk::ToggleButton,
     /// The watched folder (Preferences → Import), while watching.
@@ -81,14 +93,14 @@ impl App {
         let content_title = adw::WindowTitle::new("Dashboard & Insights", "");
 
         // ── header: workspace, currency, range, triage
-        let workspace_btn = gtk::MenuButton::builder().tooltip_text("Workspace").always_show_arrow(true).build();
+        // the workspace decides everything below it, so it heads the sidebar
+        let workspace_btn = gtk::MenuButton::builder().tooltip_text("Workspace").always_show_arrow(true).hexpand(true).margin_start(8).margin_end(8).margin_bottom(6).build();
         let kyd_btn = gtk::ToggleButton::builder().label("KYD").active(true).tooltip_text("Show amounts in Cayman dollars").build();
         let usd_btn = gtk::ToggleButton::builder().label("USD").group(&kyd_btn).tooltip_text("Show amounts in US dollars").build();
         let ccy_box = gtk::Box::builder().css_classes(["linked"]).build();
         ccy_box.append(&kyd_btn);
         ccy_box.append(&usd_btn);
         let range_dd = gtk::DropDown::builder().tooltip_text("Date range").build();
-        let triage_btn = gtk::Button::builder().label("Triage").css_classes(["suggested-action"]).tooltip_text("Smart Triage: categorize new merchants").visible(false).build();
         let menu = gio::Menu::new();
         let s1 = gio::Menu::new();
         s1.append(Some("Import Statements…"), Some("win.import"));
@@ -104,11 +116,9 @@ impl App {
         let menu_btn = gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).primary(true).tooltip_text("Main Menu").build();
 
         let content_header = adw::HeaderBar::builder().title_widget(&content_title).build();
-        content_header.pack_start(&workspace_btn);
         content_header.pack_start(&ccy_box);
         content_header.pack_start(&range_dd);
         content_header.pack_end(&menu_btn);
-        content_header.pack_end(&triage_btn);
         let content_tv = adw::ToolbarView::new();
         content_tv.add_top_bar(&content_header);
         content_tv.set_content(Some(&stack));
@@ -116,11 +126,26 @@ impl App {
 
         // ── sidebar
         let side_list = gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build();
+        side_list.set_header_func(|row, before| {
+            let name = row.widget_name();
+            let prev = before.map(|b| b.widget_name().to_string()).unwrap_or_default();
+            let title = if name.starts_with("account:") && !prev.starts_with("account:") {
+                Some("Accounts")
+            } else if name == "rules" {
+                Some("Setup")
+            } else {
+                None
+            };
+            row.set_header(title.map(|t| gtk::Label::builder().label(t).xalign(0.0).margin_start(12).margin_top(14).margin_bottom(4).css_classes(["caption-heading", "dim-label"]).build()).as_ref());
+        });
+        let side_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+        side_box.append(&workspace_btn);
+        side_box.append(&gtk::ScrolledWindow::builder().child(&side_list).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build());
         let side_tv = adw::ToolbarView::new();
         side_tv.add_top_bar(&adw::HeaderBar::builder().title_widget(&adw::WindowTitle::new("FinGraph", "")).build());
-        side_tv.set_content(Some(&gtk::ScrolledWindow::builder().child(&side_list).vexpand(true).build()));
+        side_tv.set_content(Some(&side_box));
         let sidebar = adw::NavigationPage::builder().title("FinGraph").child(&side_tv).build();
-        let split = adw::NavigationSplitView::builder().sidebar(&sidebar).content(&content).min_sidebar_width(220.0).max_sidebar_width(260.0).build();
+        let split = adw::NavigationSplitView::builder().sidebar(&sidebar).content(&content).min_sidebar_width(240.0).max_sidebar_width(290.0).build();
         toasts.set_child(Some(&split));
         win.set_content(Some(&toasts));
         let bp = adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 900sp").unwrap());
@@ -138,7 +163,11 @@ impl App {
             range_dd,
             range_items: RefCell::new(Vec::new()),
             custom_range: Cell::new(None),
-            triage_btn,
+            side_list: side_list.clone(),
+            ccy_box: ccy_box.clone(),
+            badges: RefCell::new(HashMap::new()),
+            accounts_key: RefCell::new(String::new()),
+            quiet: Cell::new(false),
             kyd_btn,
             usd_btn: usd_btn.clone(),
             watch: RefCell::new(None),
@@ -156,42 +185,57 @@ impl App {
             usd_btn.set_active(true);
         }
 
-        // views
-        let pages: [(&'static str, &str, &str, gtk::Widget, Refresh); 6] = {
-            let (d, dr) = dashboard::build(&app);
-            let (s, sr) = statements::build(&app);
-            let (t, tr) = transactions::build(&app);
-            let (r, rr) = rules::build(&app);
-            let (p, pr) = profiles::build(&app);
-            let (e, er) = export::build(&app);
-            [
-                ("dashboard", "Dashboard & Insights", "view-grid-symbolic", d, dr),
-                ("statements", "Statements & Inspector", "x-office-document-symbolic", s, sr),
-                ("transactions", "Transactions", "view-list-symbolic", t, tr),
-                ("rules", "Subscriptions & Rules", "media-playlist-repeat-symbolic", r, rr),
-                ("profiles", "Bank Profiles", "preferences-system-symbolic", p, pr),
-                ("export", "Export & Reports", "document-save-symbolic", e, er),
-            ]
-        };
+        // pages, in the order you use them; Accounts and Setup follow (see update_sidebar)
+        let (o, or) = dashboard::build(&app);
+        let (rv, rvr) = review::build(&app);
+        let (c, cr) = changes::build(&app);
+        let (t, tr) = transactions::build(&app);
+        let (sb, sbr) = rules::build(&app, rules::Part::Subscriptions);
+        let (st, str_) = statements::build(&app);
+        let (e, er) = export::build(&app);
+        let (r, rr) = rules::build(&app, rules::Part::Rules);
+        let (p, pr) = profiles::build(&app);
+        let pages: Vec<(&'static str, &str, &str, gtk::Widget, Refresh)> = vec![
+            ("overview", "Overview", "view-grid-symbolic", o, or),
+            ("review", "To Review", "mail-unread-symbolic", rv, rvr),
+            ("changes", "What Changed", "dialog-information-symbolic", c, cr),
+            ("transactions", "Transactions", "view-list-symbolic", t, tr),
+            ("subscriptions", "Subscriptions", "media-playlist-repeat-symbolic", sb, sbr),
+            ("statements", "Statements", "x-office-document-symbolic", st, str_),
+            ("export", "Reports & Export", "document-save-symbolic", e, er),
+            ("rules", "Rules & Categories", "edit-find-replace-symbolic", r, rr),
+            ("profiles", "Bank Profiles", "preferences-system-symbolic", p, pr),
+        ];
         for (name, title, icon, w, refresh) in pages {
             app.stack.add_titled(&w, Some(name), title);
-            let row = gtk::Box::builder().spacing(12).margin_top(6).margin_bottom(6).margin_start(6).build();
-            row.append(&gtk::Image::from_icon_name(icon));
-            row.append(&gtk::Label::new(Some(title)));
-            let lr = gtk::ListBoxRow::builder().child(&row).name(name).build();
-            side_list.append(&lr);
+            side_list.append(&app.side_row(name, title, icon));
             app.views.borrow_mut().push((name, refresh));
         }
+        side_list.append(&app.side_row("preferences", "Preferences", "emblem-system-symbolic"));
         {
             let w = Rc::downgrade(&app);
-            side_list.connect_row_selected(move |_, row| {
-                if let (Some(a), Some(row)) = (w.upgrade(), row) {
-                    a.show_view(&row.widget_name());
+            side_list.connect_row_selected(move |list, row| {
+                let (Some(a), Some(row)) = (w.upgrade(), row) else { return };
+                if a.quiet.get() {
+                    return;
+                }
+                let name = row.widget_name().to_string();
+                if let Some(id) = name.strip_prefix("account:").and_then(|s| s.parse::<i64>().ok()) {
+                    return transactions::show_account(&a, id);
+                }
+                if name == "preferences" {
+                    // a dialog, not a page: put the highlight back where you were
+                    let here = a.stack.visible_child_name().unwrap_or_default();
+                    if let Some(r) = a.row_named(&here) {
+                        list.select_row(Some(&r));
+                    }
+                    return preferences::show(&a);
+                }
+                if a.stack.visible_child_name().as_deref() != Some(name.as_str()) {
+                    a.show_view(&name);
                 }
             });
         }
-        side_list.select_row(side_list.row_at_index(0).as_ref());
-
         {
             let w = Rc::downgrade(&app);
             app.kyd_btn.connect_toggled(move |b| {
@@ -214,14 +258,6 @@ impl App {
                 }
             });
         }
-        {
-            let w = Rc::downgrade(&app);
-            app.triage_btn.connect_clicked(move |_| {
-                if let Some(a) = w.upgrade() {
-                    wizard::triage(&a);
-                }
-            });
-        }
         app.actions();
         // where to start: Preferences → General
         let prefs = app.db.prefs();
@@ -231,6 +267,8 @@ impl App {
             *app.scope.borrow_mut() = Scope::One(id);
         }
         app.reload_entities();
+        let last = app.db.prefs().last_page;
+        app.show_view(if app.stack.child_by_name(&last).is_some() { &last } else { "overview" });
         app.win.present();
         statements::watch(&app);
 
@@ -269,6 +307,9 @@ impl App {
         add("workspaces", Rc::new(wizard::workspaces_dialog));
         add("rescan", Rc::new(statements::rescan_all));
         add("preferences", Rc::new(preferences::show));
+        for (i, page) in MAIN_PAGES.iter().enumerate() {
+            add(&format!("page-{}", i + 1), Rc::new(move |a: &Rc<App>| a.show_view(page)));
+        }
         add("retriage", Rc::new(wizard::reset_and_retriage));
         add("fx", Rc::new(|a| a.fx_dialog()));
         add("welcome", Rc::new(wizard::onboarding));
@@ -296,6 +337,9 @@ impl App {
             g.set_accels_for_action("win.find", &["<Control>f"]);
             g.set_accels_for_action("win.import", &["<Control>o"]);
             g.set_accels_for_action("win.preferences", &["<Control>comma"]);
+            for i in 0..MAIN_PAGES.len() {
+                g.set_accels_for_action(&format!("win.page-{}", i + 1), &[&format!("<Control>{}", i + 1)]);
+            }
         }
     }
 
@@ -521,16 +565,121 @@ impl App {
         if let Some(c) = self.stack.child_by_name(name) {
             self.content_title.set_title(&self.stack.page(&c).title().unwrap_or_default());
         }
+        // highlight it in the sidebar (an account row stays highlighted over its transactions)
+        let on_account = self.side_list.selected_row().is_some_and(|r| r.widget_name().starts_with("account:"));
+        if !(on_account && name == "transactions")
+            && let Some(r) = self.row_named(name)
+            && self.side_list.selected_row().as_ref() != Some(&r)
+        {
+            self.side_list.select_row(Some(&r));
+        }
+        // the header shows only what this page uses
+        self.range_dd.set_visible(matches!(name, "overview" | "changes" | "transactions" | "export"));
+        self.ccy_box.set_visible(matches!(name, "overview" | "changes" | "transactions" | "subscriptions" | "export"));
+        if MAIN_PAGES.contains(&name) {
+            let mut p = self.db.prefs();
+            if p.last_page != name {
+                p.last_page = name.into();
+                let _ = self.db.save_prefs(&p);
+            }
+        }
         self.split.set_show_content(true);
         self.refresh();
     }
 
+    fn side_row(&self, name: &str, title: &str, icon: &str) -> gtk::ListBoxRow {
+        let row = gtk::Box::builder().spacing(12).margin_top(6).margin_bottom(6).margin_start(6).margin_end(6).build();
+        row.append(&gtk::Image::from_icon_name(icon));
+        row.append(&gtk::Label::builder().label(title).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build());
+        let badge = gtk::Label::builder().css_classes(["dim-label", "caption", "tnum"]).build();
+        row.append(&badge);
+        if let Some(n) = MAIN_PAGES.iter().position(|p| *p == name) {
+            row.set_tooltip_text(Some(&format!("Ctrl+{}", n + 1)));
+        }
+        if let Some(&key) = ["review", "changes", "subscriptions", "statements"].iter().find(|k| **k == name) {
+            self.badges.borrow_mut().insert(key, badge);
+        }
+        gtk::ListBoxRow::builder().child(&row).name(name).build()
+    }
+
+    fn row_named(&self, name: &str) -> Option<gtk::ListBoxRow> {
+        let mut i = 0;
+        while let Some(r) = self.side_list.row_at_index(i) {
+            if r.widget_name() == name {
+                return Some(r);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Counts beside the pages, and one row per account with its latest verified balance.
+    pub fn update_sidebar(self: &Rc<Self>) {
+        let ids = self.entity_ids();
+        let rows = self.db.transactions(&TxFilter { entity_ids: ids.clone(), ..Default::default() }).unwrap_or_default();
+        let docs = self.db.documents(&ids).unwrap_or_default();
+        let fx = self.db.fx().unwrap_or_default();
+        let set = |k: &str, text: String, warn: bool| {
+            if let Some(l) = self.badges.borrow().get(k) {
+                l.set_label(&text);
+                if warn {
+                    l.add_css_class("error");
+                } else {
+                    l.remove_css_class("error");
+                }
+            }
+        };
+        let review = self.db.triage(&ids).map(|g| g.len()).unwrap_or(0);
+        set("review", if review > 0 { review.to_string() } else { String::new() }, false);
+        let changes = changes::count(self);
+        set("changes", if changes > 0 { changes.to_string() } else { String::new() }, false);
+        let subs: Decimal = insights::subscriptions(&rows, self.display(), &fx, today()).iter().filter(|s| s.active).map(|s| s.monthly).sum();
+        set("subscriptions", if subs.is_zero() { String::new() } else { format!("{}/mo", fmt_money(subs.round_dp(0), self.display())) }, false);
+        let bad = docs.iter().filter(|d| matches!(d.reconciliation, fingraph_core::Reconciliation::Discrepancy(_))).count();
+        set("statements", if bad > 0 { format!("⚠ {bad}") } else { String::new() }, bad > 0);
+
+        // accounts: rebuilt in place, just above Setup, only when they or their balances changed
+        let balances = insights::latest_balances(&rows, &docs);
+        let accounts: Vec<_> = self.db.accounts().unwrap_or_default().into_iter().filter(|x| ids.contains(&x.entity_id) && !x.hidden).collect();
+        let key = format!("{:?}|{}", accounts.iter().map(|x| (x.id, &x.name, balances.get(&x.id))).collect::<Vec<_>>(), fingraph_core::money::fmt_money(Decimal::ONE, self.display()));
+        if *self.accounts_key.borrow() == key {
+            return;
+        }
+        *self.accounts_key.borrow_mut() = key;
+        self.quiet.set(true);
+        let selected = self.side_list.selected_row().map(|r| r.widget_name().to_string());
+        let mut i = 0;
+        while let Some(r) = self.side_list.row_at_index(i) {
+            if r.widget_name().starts_with("account:") {
+                self.side_list.remove(&r);
+            } else {
+                i += 1;
+            }
+        }
+        let at = self.row_named("rules").map_or(-1, |r| r.index());
+        for (k, acct) in accounts.iter().enumerate() {
+            let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_top(4).margin_bottom(4).margin_start(6).margin_end(6).build();
+            b.append(&gtk::Label::builder().label(&acct.name).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).build());
+            let (bal, tip) = match balances.get(&acct.id) {
+                Some((d, v)) => (fmt_money(*v, acct.currency), format!("Last verified balance, as of {} (from your statements, not live)", d.format("%d %b %Y"))),
+                None => ("—".into(), "No balance printed yet".into()),
+            };
+            let owed = balances.get(&acct.id).is_some_and(|(_, v)| v.is_sign_negative() && !v.is_zero());
+            b.append(&gtk::Label::builder().label(&bal).xalign(1.0).css_classes(["caption", "tnum", if owed { "amount-out" } else { "dim-label" }]).build());
+            let row = gtk::ListBoxRow::builder().child(&b).name(format!("account:{}", acct.id)).tooltip_text(tip).build();
+            self.side_list.insert(&row, if at < 0 { -1 } else { at + k as i32 });
+            if selected.as_deref() == Some(row.widget_name().as_str()) {
+                self.side_list.select_row(Some(&row));
+            }
+        }
+        self.side_list.invalidate_headers();
+        self.quiet.set(false);
+    }
+
     /// Re-read the ledger into the visible view and the header.
     pub fn refresh(self: &Rc<Self>) {
-        let n = self.db.uncategorized_count(&self.entity_ids()).unwrap_or(0);
-        self.triage_btn.set_visible(n > 0);
-        self.triage_btn.set_label(&format!("Triage ({n})"));
-        self.content_title.set_subtitle(&self.range_label());
+        self.update_sidebar();
+        self.content_title.set_subtitle(&if self.range_dd.is_visible() { self.range_label() } else { String::new() });
         let visible = self.stack.visible_child_name().unwrap_or_default();
         let f = self.views.borrow().iter().find(|(n, _)| *n == visible.as_str()).map(|v| v.1.clone());
         if let Some(f) = f {
@@ -689,7 +838,10 @@ fn debug_shot(app: &Rc<App>) {
         app.reload_entities();
     }
     if let Ok(v) = std::env::var("FINGRAPH_VIEW") {
-        app.show_view(&v);
+        match v.strip_prefix("account:").and_then(|id| app.row_named(&format!("account:{id}"))) {
+            Some(r) => app.side_list.select_row(Some(&r)),
+            None => app.show_view(&v),
+        }
     }
     if let Ok(r) = std::env::var("FINGRAPH_RANGE") {
         let items = app.range_items.borrow().clone();
@@ -733,9 +885,8 @@ fn debug_shot(app: &Rc<App>) {
             }
             let root: gtk::Widget = a.win.clone().upcast();
             let dlg = find(&root, &|w| w.downcast_ref::<adw::Dialog>().cloned());
-            if let Some(d) = dlg
-                && let Some(b) = find(d.upcast_ref(), &|w| w.downcast_ref::<gtk::Button>().filter(|b| b.has_css_class("suggested-action") && b.is_mapped()).cloned())
-            {
+            let scope: gtk::Widget = dlg.map(|d| d.upcast()).unwrap_or_else(|| a.stack.visible_child().unwrap_or(root.clone()));
+            if let Some(b) = find(&scope, &|w| w.downcast_ref::<gtk::Button>().filter(|b| b.has_css_class("suggested-action") && b.is_mapped()).cloned()) {
                 b.emit_clicked();
             }
             return glib::ControlFlow::Continue;

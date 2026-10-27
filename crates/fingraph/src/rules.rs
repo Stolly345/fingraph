@@ -11,7 +11,14 @@ use std::rc::Rc;
 
 use crate::{App, pill, today};
 
-pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
+/// Which page: Subscriptions (checked often) or Rules & Categories (set up once).
+#[derive(Clone, Copy, PartialEq)]
+pub enum Part {
+    Subscriptions,
+    Rules,
+}
+
+pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
     let page = adw::PreferencesPage::new();
     let subs = adw::PreferencesGroup::builder().title("Subscriptions").description("Recurring charges you've marked (or the wizard detected), costed in the display currency.").build();
     let rules = adw::PreferencesGroup::builder().title("Learned Rules").description("Applied to every new statement. Workspace rules beat global ones; newer beat older.").build();
@@ -21,12 +28,17 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     suffix.append(&gtk::Button::builder().label("Rescan…").css_classes(["flat"]).action_name("win.rescan").build());
     suffix.append(&add);
     rules.set_header_suffix(Some(&suffix));
-    page.add(&subs);
-    page.add(&rules);
+    if part == Part::Subscriptions {
+        page.add(&subs);
+    } else {
+        page.add(&rules);
+    }
     let cats = adw::PreferencesGroup::builder().title("Categories").description("Shown A–Z everywhere. Add your own; sub-categories roll up into their parent on the dashboard.").build();
     let add_cat = adw::ButtonRow::builder().title("Add a Category…").start_icon_name("list-add-symbolic").build();
     cats.add(&add_cat);
-    page.add(&cats);
+    if part == Part::Rules {
+        page.add(&cats);
+    }
     {
         let w = Rc::downgrade(app);
         add_cat.connect_activated(move |_| {

@@ -7,11 +7,9 @@ use fingraph_core::money::fmt_money;
 use fingraph_core::rules::{Rule, RuleKind, TriageGroup, TriageKind};
 use fingraph_core::{Currency, EntityKind, Reconciliation};
 use gtk::{gdk, glib};
-use std::cell::RefCell;
-use std::collections::HashSet;
 use std::rc::Rc;
 
-use crate::{App, clear, dim, pill};
+use crate::{App, dim, pill};
 
 const BANKS: [(&str, &str, &str); 5] = [
     ("butterfield_ky", "Butterfield", "Bank of Butterfield (Cayman)"),
@@ -327,67 +325,9 @@ pub fn reset_and_retriage(app: &Rc<App>) {
     d.present(Some(&app.win));
 }
 
+/// Smart Triage lives on the To Review page.
 pub fn triage(app: &Rc<App>) {
-    let skipped: Rc<RefCell<HashSet<String>>> = Rc::default();
-    let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(16).margin_top(18).margin_bottom(24).margin_start(28).margin_end(28).build();
-    let header_title = adw::WindowTitle::new("Smart Triage", "");
-    let skip = gtk::Button::builder().label("Skip").build();
-    let header = adw::HeaderBar::builder().title_widget(&header_title).build();
-    header.pack_start(&skip);
-    let tv = adw::ToolbarView::new();
-    tv.add_top_bar(&header);
-    tv.set_content(Some(&gtk::ScrolledWindow::builder().child(&content).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build()));
-    let dlg = adw::Dialog::builder().content_width(680).content_height(640).child(&tv).build();
-    let current: Rc<RefCell<Option<TriageGroup>>> = Rc::default();
-    let answered = Rc::new(std::cell::Cell::new(0usize));
-
-    let show: Rc<RefCell<Option<crate::Refresh>>> = Rc::default();
-    let show_fn: crate::Refresh = {
-        let (w, content, header_title, skipped, current, dlg, show, answered) = (Rc::downgrade(app), content.clone(), header_title.clone(), skipped.clone(), current.clone(), dlg.clone(), show.clone(), answered.clone());
-        Rc::new(move || {
-            let Some(a) = w.upgrade() else { return };
-            clear(&content);
-            let groups: Vec<TriageGroup> = a.db.triage(&a.entity_ids()).unwrap_or_default().into_iter().filter(|g| !skipped.borrow().contains(&g.stem)).collect();
-            let Some(g) = groups.first().cloned() else {
-                header_title.set_subtitle("All done");
-                let sp = adw::StatusPage::builder().icon_name("object-select-symbolic").title("All caught up").description(format!("{} answers learned. New statements will be categorized automatically.", answered.get())).build();
-                let close = gtk::Button::builder().label("Close").halign(gtk::Align::Center).css_classes(["pill", "suggested-action"]).build();
-                let d = dlg.clone();
-                close.connect_clicked(move |_| {
-                    d.close();
-                });
-                sp.set_child(Some(&close));
-                content.append(&sp);
-                *current.borrow_mut() = None;
-                a.refresh();
-                return;
-            };
-            header_title.set_subtitle(&format!("{} merchant{} left", groups.len(), if groups.len() == 1 { "" } else { "s" }));
-            *current.borrow_mut() = Some(g.clone());
-            let next = show.borrow().clone().unwrap();
-            card(&a, &content, &g, next, answered.clone());
-        })
-    };
-    *show.borrow_mut() = Some(show_fn.clone());
-    {
-        let (skipped, current, show) = (skipped.clone(), current.clone(), show_fn.clone());
-        skip.connect_clicked(move |_| {
-            if let Some(g) = current.borrow().as_ref() {
-                skipped.borrow_mut().insert(g.stem.clone());
-            }
-            show();
-        });
-    }
-    {
-        let w = Rc::downgrade(app);
-        dlg.connect_closed(move |_| {
-            if let Some(a) = w.upgrade() {
-                a.refresh();
-            }
-        });
-    }
-    show_fn();
-    dlg.present(Some(&app.win));
+    app.show_view("review");
 }
 
 /// Learn the answer for a group: a rule over its merchant stem, applied to every match.
@@ -423,7 +363,7 @@ fn answer(app: &Rc<App>, g: &TriageGroup, category_id: Option<i64>, payee: &str,
     next();
 }
 
-fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn()>, answered: Rc<std::cell::Cell<usize>>) {
+pub fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn()>, answered: Rc<std::cell::Cell<usize>>) {
     let cats: Vec<Category> = app.categories();
     let ents = app.entities.borrow().clone();
     let cat_id = |name: &str| cats.iter().find(|c| c.name == name).map(|c| c.id);
@@ -479,7 +419,7 @@ fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn()>, 
         .build();
     opts.add(&scope_row);
     // "this was a business expense": books every matching payment to a business workspace
-    let biz_row = adw::SwitchRow::builder().title("Business expense").subtitle("Count it in a business P&L, not personal spending").build();
+    let biz_row = adw::SwitchRow::builder().title("Business expense").subtitle("Count it in a business P&amp;L, not personal spending").build();
     opts.add(&biz_row);
     let biz: Rc<std::cell::Cell<Option<i64>>> = Rc::default();
     {
@@ -488,7 +428,7 @@ fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn()>, 
             let Some(a) = w.upgrade() else { return };
             if !row.is_active() {
                 biz.set(None);
-                row.set_subtitle("Count it in a business P&L, not personal spending");
+                row.set_subtitle("Count it in a business P&amp;L, not personal spending");
                 return;
             }
             if biz.get().is_some() {
