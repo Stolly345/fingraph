@@ -877,6 +877,7 @@ impl Db {
         tx.commit()?;
         self.match_transfers()?;
         self.mark_recurring()?;
+        rep.auto_categorized += self.apply_directory()?;
         Ok(rep)
     }
 
@@ -1370,6 +1371,37 @@ impl Db {
         for r in self.rules()? {
             n += self.apply_rule(&r, false)?;
         }
+        Ok(n + self.apply_directory()?)
+    }
+
+    /// File uncategorized charges from businesses in the merchant directory (and, if allowed in
+    /// Preferences, keyword guesses). Your rules always run first; a transaction you deliberately set
+    /// to Uncategorized is left alone. Returns how many were filed.
+    pub fn apply_directory(&self) -> Result<usize> {
+        let p = self.prefs();
+        if !p.auto_directory {
+            return Ok(0);
+        }
+        let mut ids: std::collections::HashMap<String, i64> = Default::default();
+        for c in self.categories()? {
+            // a top-level category wins a name clash with a sub-category
+            if c.parent_id.is_none() || !ids.contains_key(&c.name) {
+                ids.insert(c.name.clone(), c.id);
+            }
+        }
+        let rows = self.transactions(&TxFilter { uncategorized_only: true, ..Default::default() })?;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut n = 0;
+        for t in rows.iter().filter(|t| t.review != ReviewStatus::Confirmed) {
+            let Some((cat, name)) = rules::auto_category(&t.raw_description, &t.memo, p.auto_keywords) else { continue };
+            let Some(&id) = ids.get(cat) else { continue };
+            tx.execute(
+                "UPDATE transactions SET category_id = ?2, clean_payee = COALESCE(?3, clean_payee), is_subscription = is_subscription OR ?4, review_status = 'AutoCategorized' WHERE id = ?1",
+                params![t.id, id, name, cat == "Subscriptions & Digital"],
+            )?;
+            n += 1;
+        }
+        tx.commit()?;
         Ok(n)
     }
 
@@ -1572,11 +1604,11 @@ mod tests {
         let p = db.entity_by_name("Personal").unwrap().unwrap();
         let rep = db.import_scan(p, "x.pdf", "another-hash", &scan).unwrap();
         assert_eq!((rep.inserted, rep.duplicates), (0, scan.sections[0].transactions.len()));
-        // HBO is waiting in triage as a subscription
-        let groups = db.triage(&[p]).unwrap();
-        let hbo = groups.iter().find(|g| g.stem.starts_with("HBO")).expect("HBO group");
-        assert_eq!(hbo.kind, rules::TriageKind::Subscription);
-        assert_eq!(hbo.count, 12);
+        // HBO is a known service: filed as a subscription on import, so triage doesn't ask
+        let hbo = db.transactions(&TxFilter { search: "HBO MAX".into(), ..Default::default() }).unwrap();
+        assert_eq!(hbo.len(), 12);
+        assert!(hbo.iter().all(|t| t.category_name.as_deref() == Some("Subscriptions & Digital") && t.is_subscription && t.review == ReviewStatus::AutoCategorized));
+        assert!(db.triage(&[p]).unwrap().iter().all(|g| !g.stem.starts_with("HBO")));
     }
 
     #[test]
@@ -1596,7 +1628,7 @@ mod tests {
         db.load_demo().unwrap();
         let before = db.uncategorized_count(&[]).unwrap();
         let cat = db.category_id("Groceries").unwrap();
-        db.learn(&Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: "KIRK MARKET".into(), clean_payee: Some("Kirk".into()), category_id: cat, is_subscription: true, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None }).unwrap();
+        db.learn(&Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: "GENERAL LANDSCAPING".into(), clean_payee: Some("Landscaper".into()), category_id: cat, is_subscription: true, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None }).unwrap();
         assert!(db.uncategorized_count(&[]).unwrap() < before);
         db.reset_learning(&[]).unwrap();
         assert!(db.rules().unwrap().is_empty());
@@ -1689,6 +1721,26 @@ mod tests {
         db.restore_from(&backup).unwrap();
         assert_eq!(db.transactions(&TxFilter::default()).unwrap().len(), n);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn directory_categories_exist_and_respect_your_choices() {
+        let db = Db::open_in_memory().unwrap();
+        for m in crate::merchants::DIRECTORY.iter() {
+            assert!(db.category_id(&m.category).unwrap().is_some(), "{} → unknown category {}", m.name, m.category);
+        }
+        db.load_demo().unwrap();
+        // something you set to Uncategorized by hand stays that way
+        let t = db.transactions(&TxFilter { search: "NETFLIX".into(), ..Default::default() }).unwrap()[0].clone();
+        db.set_category(&[t.id], None).unwrap();
+        db.apply_directory().unwrap();
+        assert_eq!(db.transaction(t.id).unwrap().category_id, None);
+        // and switching it off in Preferences stops it
+        let mut p = db.prefs();
+        p.auto_directory = false;
+        db.save_prefs(&p).unwrap();
+        db.reset_learning(&[]).unwrap();
+        assert_eq!(db.apply_directory().unwrap(), 0);
     }
 
     #[test]

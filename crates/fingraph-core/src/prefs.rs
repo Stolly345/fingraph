@@ -42,6 +42,10 @@ pub struct Prefs {
     /// New rules apply to every workspace (otherwise just the one the charge came from).
     pub rules_all_workspaces: bool,
     pub ask_subscriptions: bool,
+    /// File charges from businesses in the directory automatically.
+    pub auto_directory: bool,
+    /// Also file keyword guesses (MARKET → Groceries) instead of only suggesting them.
+    pub auto_keywords: bool,
     /// Rescan keeps hand-made changes (categories, payees, tags, business flags) by transaction fingerprint.
     pub rescan_keeps_edits: bool,
 
@@ -79,6 +83,8 @@ impl Default for Prefs {
             fuzzy_merchants: true,
             rules_all_workspaces: false,
             ask_subscriptions: true,
+            auto_directory: true,
+            auto_keywords: false,
             rescan_keeps_edits: true,
             spike_percent: 20,
             drift_percent: 10,

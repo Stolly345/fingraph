@@ -120,8 +120,7 @@ pub fn same_merchant(a: &str, b: &str) -> bool {
 
 /// Which well-known merchant a stem names, if any. Short keys must be whole words ("FLOW" ≠ "FLOWERS").
 fn known_key(stem: &str) -> Option<&'static str> {
-    let words: Vec<&str> = stem.split(' ').collect();
-    KNOWN.iter().find(|(key, _, _)| if key.len() <= 4 { words.contains(key) } else { stem.contains(key) }).map(|k| k.1)
+    crate::merchants::lookup(stem).map(|m| m.name.as_str())
 }
 
 pub fn regex_ok(pattern: &str) -> bool {
@@ -202,51 +201,6 @@ pub fn title_case(stem: &str) -> String {
         .join(" ")
 }
 
-/// Well-known Cayman (and online) merchants, for nicer payee names and category chips.
-const KNOWN: &[(&str, &str, &str)] = &[
-    ("CUC", "Caribbean Utilities Company", "Utilities"),
-    ("C.U.C", "Caribbean Utilities Company", "Utilities"),
-    ("CARIBBEAN UTILITIES", "Caribbean Utilities Company", "Utilities"),
-    ("WATER AUTHORITY", "Water Authority", "Utilities"),
-    ("FLOW", "Flow", "Utilities"),
-    ("DIGICEL", "Digicel", "Utilities"),
-    ("HOME GAS", "Home Gas", "Utilities"),
-    ("FOSTER", "Foster's Food Fair", "Groceries"),
-    ("KIRK MARKET", "Kirk Market", "Groceries"),
-    ("HURLEY", "Hurley's Marketplace", "Groceries"),
-    ("KIRK HOME CENTRE", "Kirk Home Centre", "Home & Garden"),
-    ("A.L. THOMPSON", "A.L. Thompson's", "Repairs & Maintenance"),
-    ("A L THOMPSON", "A.L. Thompson's", "Repairs & Maintenance"),
-    ("RUBIS", "Rubis", "Transport"),
-    ("ESSO", "Esso", "Transport"),
-    ("CAYMAN CABS", "Cayman Cabs", "Transport"),
-    ("HBO", "HBO Max", "Subscriptions & Digital"),
-    ("HBOMAX", "HBO Max", "Subscriptions & Digital"),
-    ("DISCOVERY", "Discovery+", "Subscriptions & Digital"),
-    ("DISNEY", "Disney+", "Subscriptions & Digital"),
-    ("PARAMOUNT", "Paramount+", "Subscriptions & Digital"),
-    ("PEACOCK", "Peacock", "Subscriptions & Digital"),
-    ("APPLE.COM", "Apple", "Subscriptions & Digital"),
-    ("ICLOUD", "Apple iCloud", "Subscriptions & Digital"),
-    ("PRIME VIDEO", "Prime Video", "Subscriptions & Digital"),
-    ("NETFLIX", "Netflix", "Subscriptions & Digital"),
-    ("SPOTIFY", "Spotify", "Subscriptions & Digital"),
-    ("YOUTUBE", "YouTube Premium", "Subscriptions & Digital"),
-    ("GOOGLE ONE", "Google One", "Subscriptions & Digital"),
-    ("EXPRESSVPN", "ExpressVPN", "Subscriptions & Digital"),
-    ("ADOBE", "Adobe", "Subscriptions & Digital"),
-    ("AUDIBLE", "Audible", "Subscriptions & Digital"),
-    ("HULU", "Hulu", "Subscriptions & Digital"),
-    ("ANTHROPIC", "Anthropic", "Subscriptions & Digital"),
-    ("AMAZON", "Amazon", "Shopping"),
-    ("SALARY", "Salary", "Income"),
-    ("DIR PAY", "Salary", "Income"),
-    ("RENT RECEIVED", "Rent", "Rental Income"),
-    ("DIVIDEND", "Dividend", "Interest & Dividends"),
-    ("INTEREST PAID", "Interest", "Interest & Dividends"),
-    ("INSURANCE", "Insurance", "Insurance"),
-    ("GENERAL REGISTRY", "General Registry", "Government & Fees"),
-];
 
 static SUBSCRIPTION_HINT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(hbo|netflix|spotify|youtube|google one|expressvpn|adobe|audible|hulu|disney|apple\.com|icloud|prime video|anthropic|openai|dropbox|microsoft|office 365|signal|yahoo mail)").unwrap());
@@ -273,16 +227,27 @@ pub fn looks_like_transfer(raw: &str, memo: &str) -> bool {
 
 /// A friendlier payee and a category suggestion (by name) for a stem.
 pub fn known_merchant(stem: &str, raw: &str) -> (String, Option<&'static str>) {
-    let hay = format!("{stem} {}", raw.to_uppercase());
-    // the stem names it, or (for longer keys) the raw text does, e.g. "SALARY" in a generic row
-    let words: Vec<&str> = stem.split(' ').collect();
-    if let Some(&(_, name, cat)) = KNOWN.iter().find(|(key, _, _)| if key.len() <= 4 { words.contains(key) || hay.split(|c: char| !c.is_alphanumeric() && c != '.').any(|w| w == *key) } else { hay.contains(key) }) {
-        return (name.to_string(), Some(cat));
+    let hay = format!("{stem} {raw}");
+    // the directory names it (a confident match) ...
+    if let Some(m) = crate::merchants::lookup(&hay) {
+        return (m.name.clone(), Some(m.category.as_str()));
     }
     if FEE_HINT.is_match(&hay) {
         return (title_case(stem), Some("Bank Fees & Interest"));
     }
-    (title_case(stem), None)
+    // ... or a word in its name suggests one (MARKET → Groceries, DIGITAL → Subscriptions & Digital)
+    (title_case(stem), crate::merchants::keyword_category(stem))
+}
+
+/// A category FinGraph is sure enough of to file on its own: a directory match, or (when allowed)
+/// a keyword guess. Returns the category name and the merchant's proper name when known.
+pub fn auto_category(raw: &str, memo: &str, keywords_too: bool) -> Option<(&'static str, Option<&'static str>)> {
+    let stem = merchant_stem(raw, memo);
+    let hay = format!("{stem} {raw}");
+    if let Some(m) = crate::merchants::lookup(&hay) {
+        return Some((m.category.as_str(), Some(m.name.as_str())));
+    }
+    keywords_too.then(|| crate::merchants::keyword_category(&stem)).flatten().map(|c| (c, None))
 }
 
 /// Charges this regular (median gap 6–8, 13–16, 26–35 or 350–380 days, amounts within 25%) are recurring.

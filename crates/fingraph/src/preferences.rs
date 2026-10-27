@@ -335,6 +335,38 @@ fn triage(app: &Rc<App>) -> adw::PreferencesPage {
         p.fuzzy_merchants,
         |_, p, v| p.fuzzy_merchants = v,
     ));
+    page.add(&g);
+    let dir = adw::PreferencesGroup::builder()
+        .title("Business Directory")
+        .description(format!(
+            "{} Cayman businesses and online services FinGraph recognises on sight (supermarkets, restaurants, insurers, gas stations, telecoms, garages…). Your own rules always come first.",
+            fingraph_core::merchants::count()
+        ))
+        .build();
+    dir.add(&switch(app, "File known businesses automatically", "Charges from a business in the directory are categorized on import, marked for review", p.auto_directory, |_, p, v| p.auto_directory = v));
+    dir.add(&switch(
+        app,
+        "File keyword guesses too",
+        "Words like MARKET (groceries), DIGITAL (software & subscriptions), INSURANCE or PHARMACY. Off: they're only suggested in To Review",
+        p.auto_keywords,
+        |_, p, v| p.auto_keywords = v,
+    ));
+    let now = adw::ButtonRow::builder().title("Apply to Uncategorized Transactions").start_icon_name("view-refresh-symbolic").build();
+    {
+        let w = Rc::downgrade(app);
+        now.connect_activated(move |_| {
+            if let Some(a) = w.upgrade() {
+                match a.db.apply_directory() {
+                    Ok(n) => a.toast(&format!("Filed {n} transaction{}", if n == 1 { "" } else { "s" })),
+                    Err(e) => a.toast(&e.to_string()),
+                }
+                a.refresh();
+            }
+        });
+    }
+    dir.add(&now);
+    let g = adw::PreferencesGroup::new();
+    page.add(&dir);
     g.add(&switch(app, "Ask about subscriptions", "Offer “Is this a subscription?” for regular same-price charges", p.ask_subscriptions, |_, p, v| p.ask_subscriptions = v));
     let scope = combo("New rules apply to", "", &["The workspace the charge came from".into(), "All workspaces".into()], p.rules_all_workspaces as usize);
     {
