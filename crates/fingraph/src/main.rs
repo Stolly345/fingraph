@@ -4,6 +4,7 @@
 mod charts;
 mod dashboard;
 mod export;
+mod preferences;
 mod profiles;
 mod rules;
 mod statements;
@@ -49,6 +50,9 @@ pub struct App {
     custom_range: Cell<Option<(NaiveDate, NaiveDate)>>,
     triage_btn: gtk::Button,
     kyd_btn: gtk::ToggleButton,
+    usd_btn: gtk::ToggleButton,
+    /// The watched folder (Preferences → Import), while watching.
+    pub watch: RefCell<Option<gio::FileMonitor>>,
     scope: RefCell<Scope>,
     entities: RefCell<Vec<Entity>>,
     display: Cell<Currency>,
@@ -88,13 +92,10 @@ impl App {
         let menu = gio::Menu::new();
         let s1 = gio::Menu::new();
         s1.append(Some("Import Statements…"), Some("win.import"));
-        s1.append(Some("Rescan All Statements…"), Some("win.rescan"));
-        s1.append(Some("Reset Learning & Re-triage…"), Some("win.retriage"));
         s1.append(Some("Load Demo Data (Cayman Personal + Business across Butterfield, Scotiabank, CNB, RBC & Credit Union)"), Some("win.demo"));
         menu.append_section(None, &s1);
         let s2 = gio::Menu::new();
-        s2.append(Some("Workspaces…"), Some("win.workspaces"));
-        s2.append(Some("Exchange Rate…"), Some("win.fx"));
+        s2.append(Some("Preferences"), Some("win.preferences"));
         s2.append(Some("Welcome Tour"), Some("win.welcome"));
         menu.append_section(None, &s2);
         let s3 = gio::Menu::new();
@@ -139,6 +140,8 @@ impl App {
             custom_range: Cell::new(None),
             triage_btn,
             kyd_btn,
+            usd_btn: usd_btn.clone(),
+            watch: RefCell::new(None),
             scope: RefCell::new(Scope::Consolidated(Vec::new())),
             entities: RefCell::new(Vec::new()),
             display: Cell::new(Currency::KYD),
@@ -220,8 +223,16 @@ impl App {
             });
         }
         app.actions();
+        // where to start: Preferences → General
+        let prefs = app.db.prefs();
+        preferences::apply_appearance(&prefs.appearance);
+        let start = if prefs.start_workspace == "last" { prefs.last_workspace.clone() } else { prefs.start_workspace.clone() };
+        if let Ok(id) = start.parse::<i64>() {
+            *app.scope.borrow_mut() = Scope::One(id);
+        }
         app.reload_entities();
         app.win.present();
+        statements::watch(&app);
 
         let shot = cfg!(debug_assertions) && std::env::var_os("FINGRAPH_SHOT").is_some();
         if !shot && app.db.setting("onboarded").is_none() {
@@ -257,6 +268,7 @@ impl App {
         );
         add("workspaces", Rc::new(wizard::workspaces_dialog));
         add("rescan", Rc::new(statements::rescan_all));
+        add("preferences", Rc::new(preferences::show));
         add("retriage", Rc::new(wizard::reset_and_retriage));
         add("fx", Rc::new(|a| a.fx_dialog()));
         add("welcome", Rc::new(wizard::onboarding));
@@ -283,6 +295,7 @@ impl App {
         if let Some(g) = self.win.application() {
             g.set_accels_for_action("win.find", &["<Control>f"]);
             g.set_accels_for_action("win.import", &["<Control>o"]);
+            g.set_accels_for_action("win.preferences", &["<Control>comma"]);
         }
     }
 
@@ -316,6 +329,13 @@ impl App {
     fn rebuild_workspace_menu(self: &Rc<Self>) {
         let ents = self.entities.borrow().clone();
         let scope = self.scope.borrow().clone();
+        // remembered for "open where I left off"
+        let mut p = self.db.prefs();
+        p.last_workspace = match &scope {
+            Scope::One(id) => id.to_string(),
+            Scope::Consolidated(_) => "consolidated".into(),
+        };
+        let _ = self.db.save_prefs(&p);
         let label = match &scope {
             Scope::One(id) => ents.iter().find(|e| e.id == *id).map_or("Workspace".into(), |e| e.name.clone()),
             Scope::Consolidated(v) if v.len() == ents.len() => "Consolidated Overview".into(),
@@ -396,6 +416,17 @@ impl App {
         let prev = self.range_items.borrow().get(self.range_dd.selected() as usize).copied();
         *self.range_items.borrow_mut() = items.clone();
         let model = gtk::StringList::new(&labels.iter().map(String::as_str).collect::<Vec<_>>());
+        // first time: Preferences → General → Date range
+        let prev = prev.or_else(|| {
+            Some(match self.db.prefs().default_range.as_str() {
+                "This Month" => Range::ThisMonth,
+                "Last Month" => Range::LastMonth,
+                "Last 90 Days" => Range::Last90,
+                "Year to Date" => Range::Ytd,
+                "All Time" => Range::All,
+                _ => Range::Year(this_year),
+            })
+        });
         let pick = prev.and_then(|p| items.iter().position(|x| std::mem::discriminant(x) == std::mem::discriminant(&p) && (!matches!(p, Range::Year(_)) || *x == p))).unwrap_or(items.iter().position(|r| *r == Range::Year(this_year)).unwrap_or(3));
         self.range_dd.set_model(Some(&model));
         self.range_dd.set_selected(pick as u32);
@@ -438,6 +469,13 @@ impl App {
         match &*self.scope.borrow() {
             Scope::One(id) => Some(*id),
             Scope::Consolidated(v) => v.first().copied().or_else(|| self.entities.borrow().first().map(|e| e.id)),
+        }
+    }
+
+    pub fn set_display(&self, c: Currency) {
+        match c {
+            Currency::KYD => self.kyd_btn.set_active(true),
+            Currency::USD => self.usd_btn.set_active(true),
         }
     }
 
@@ -663,6 +701,12 @@ fn debug_shot(app: &Rc<App>) {
         Ok("triage") => wizard::triage(app),
         Ok("onboarding") => wizard::onboarding(app),
         Ok("report") => statements::open_first_report(app),
+        Ok("preferences") => {
+            preferences::show(app);
+            if let (Some(d), Ok(page)) = (app.win.visible_dialog().and_downcast::<adw::PreferencesDialog>(), std::env::var("FINGRAPH_PAGE")) {
+                d.set_visible_page_name(&page);
+            }
+        }
         _ => {}
     }
     let a = app.clone();

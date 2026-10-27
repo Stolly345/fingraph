@@ -143,7 +143,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             }
             let ents = a.entity_ids();
             let prev = selected().map(|x| x.id);
-            let list: Vec<Account> = a.db.accounts().unwrap_or_default().into_iter().filter(|x| ents.contains(&x.entity_id)).collect();
+            let list: Vec<Account> = a.db.accounts().unwrap_or_default().into_iter().filter(|x| ents.contains(&x.entity_id) && !x.hidden).collect();
             let mut names = vec!["All accounts in view".to_string()];
             names.extend(list.iter().map(|x| x.name.clone()));
             let pos = prev.and_then(|p| list.iter().position(|x| x.id == p)).map_or(0, |i| i + 1);

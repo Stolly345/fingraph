@@ -314,6 +314,7 @@ pub fn reset_and_retriage(app: &Rc<App>) {
         if r != "reset" {
             return;
         }
+        let _ = a.db.auto_backup("before-reset");
         match a.db.reset_learning(&a.entity_ids()) {
             Ok(n) => {
                 a.toast(&format!("Forgotten — {n} transactions are back in triage"));
@@ -474,7 +475,7 @@ fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn()>, 
     let scope_row = adw::ComboRow::builder()
         .title("Remember for")
         .model(&gtk::StringList::new(&scope_names.iter().map(String::as_str).collect::<Vec<_>>()))
-        .selected(if g.entity_ids.len() == 1 { 0 } else { scope_ids.len() as u32 - 1 })
+        .selected(if g.entity_ids.len() == 1 && !app.db.prefs().rules_all_workspaces { 0 } else { scope_ids.len() as u32 - 1 })
         .build();
     opts.add(&scope_row);
     // "this was a business expense": books every matching payment to a business workspace

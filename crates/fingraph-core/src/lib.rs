@@ -8,6 +8,7 @@ pub mod export;
 pub mod insights;
 pub mod money;
 pub mod parser;
+pub mod prefs;
 pub mod rules;
 
 pub use money::{Currency, Fx};

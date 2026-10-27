@@ -79,7 +79,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let (cat_card, cat_title) = chart_card("Spending by Category", cat_box.upcast_ref());
     let back = gtk::Button::builder().label("All categories").icon_name("go-previous-symbolic").css_classes(["flat"]).halign(gtk::Align::Start).visible(false).build();
     cat_card.append(&back);
-    let (b_card, _) = chart_card("Cumulative Daily Spend Pace (this month vs 6-month band)", burn.widget.upcast_ref());
+    let (b_card, _) = chart_card("Cumulative Daily Spend Pace (this month vs its usual pace)", burn.widget.upcast_ref());
     let (p_card, _) = chart_card("Top Merchants · Pareto", pareto.widget.upcast_ref());
     let (bal_card, _) = chart_card("Account Balance History (verified running balances)", balances.widget.upcast_ref());
     let (pnl_card, _) = chart_card("Workspace / Property P&L", pnl.widget.upcast_ref());
@@ -125,6 +125,13 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             }
             stack.set_visible_child_name("full");
             let docs: Vec<DocumentRow> = a.db.documents(&ids).unwrap_or_default();
+            let prefs = a.db.prefs();
+            let parents_early = a.parents();
+            let hidden_accounts: Vec<i64> = a.db.accounts().unwrap_or_default().iter().filter(|x| x.hidden).map(|x| x.id).collect();
+            // balances first (they need every row), then leave the excluded categories out of spending
+            let all_rows = rows.clone();
+            let top = |t: &fingraph_core::db::TxRow| t.category_id.and_then(|id| parents_early.get(&id).cloned()).or_else(|| t.category_name.clone());
+            let rows: Vec<fingraph_core::db::TxRow> = rows.into_iter().filter(|t| !(t.amount.is_sign_negative() && top(t).is_some_and(|c| prefs.excluded_categories.contains(&c)))).collect();
             let fx = a.db.fx().unwrap_or_default();
             let ccy = a.display();
             let (from, to) = a.range();
@@ -154,7 +161,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
             // monthly bars + net line: 12 months ending at the range end
             let end = to.min(today());
-            let mb = insights::monthly(&rows, end, 12, ccy, &fx);
+            let mb = insights::monthly(&rows, end, prefs.history_months.max(1), ccy, &fx);
             monthly.set(Data::Bars {
                 labels: mb.iter().map(|m| m.month.format("%b").to_string()).collect(),
                 series: vec![
@@ -268,7 +275,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             }
 
             // burn curve
-            let bc = insights::burn_curve(&rows, end, ccy, &fx);
+            let bc = insights::burn_curve(&rows, end, ccy, &fx, prefs.band_months);
             let pts = |v: &[Decimal]| v.iter().enumerate().map(|(i, d)| (i as f64 + 1.0, f(*d))).collect::<Vec<_>>();
             let days = bc.avg.len().max(bc.current.len());
             burn.set(Data::Lines {
@@ -276,12 +283,12 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 band: (!bc.lo.is_empty()).then(|| (pts(&bc.lo), pts(&bc.hi))),
                 series: vec![
                     LineSeries { name: format!("{}", bc.month.format("%B")), points: pts(&bc.current), color: charts::ORANGE, dashed: false },
-                    LineSeries { name: "6-month average".into(), points: pts(&bc.avg), color: charts::SLATE, dashed: true },
+                    LineSeries { name: format!("{}-month average", prefs.band_months), points: pts(&bc.avg), color: charts::SLATE, dashed: true },
                 ],
                 stops: (0..days)
                     .map(|d| {
                         let cur = bc.current.get(d).map(|v| format!("\nThis month {}", money(*v))).unwrap_or_default();
-                        let avg = bc.avg.get(d).map(|v| format!("\n6-month average {}", money(*v))).unwrap_or_default();
+                        let avg = bc.avg.get(d).map(|v| format!("\n{}-month average {}", prefs.band_months, money(*v))).unwrap_or_default();
                         (d as f64 + 1.0, format!("Day {}{cur}{avg}", d + 1))
                     })
                     .collect(),
@@ -308,7 +315,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             }
 
             // balances (x = days since the epoch): history wants at least the twelve months up to the range end
-            let ser = insights::balances(&rows, &docs, ccy, &fx);
+            let ser: Vec<_> = insights::balances(&all_rows, &docs.iter().filter(|d| !hidden_accounts.contains(&d.account_id)).cloned().collect::<Vec<_>>(), ccy, &fx)
+                .into_iter()
+                .filter(|s| !all_rows.iter().any(|t| hidden_accounts.contains(&t.account_id) && t.account_name == s.account))
+                .collect();
             let hist_from = from.min(insights::add_months(end, -11));
             let ord = |d: NaiveDate| d.num_days_from_ce() as f64;
             let mut stop_dates: Vec<NaiveDate> = ser.iter().flat_map(|s| s.points.iter().map(|p| p.0)).filter(|d| *d >= hist_from && *d <= to).collect();
@@ -382,7 +392,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             while let Some(c) = cards.first_child() {
                 cards.remove(&c);
             }
-            let ins = insights::insights(&rows, &ents, from, to, ccy, &fx, &parents);
+            let tune = insights::Tuning { duplicate_days: prefs.duplicate_days, spike_percent: prefs.spike_percent as f64, drift_percent: prefs.drift_percent as f64 };
+            let ins = insights::insights(&rows, &ents, from, to, ccy, &fx, &parents, &tune);
             let mut shown = 0;
             // one card per kind: a summary up front, every item behind an expander
             for kind in InsightKind::ALL.into_iter().filter(|k| !hidden.contains(&format!("{k:?}"))) {

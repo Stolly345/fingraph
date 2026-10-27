@@ -43,7 +43,7 @@ fn category_choices(cats: &[Category]) -> (Vec<String>, Vec<Option<i64>>) {
 /// Offer to turn a manual edit into a learned rule for this merchant.
 fn offer_rule(app: &Rc<App>, t: &TxRow, category_id: Option<i64>, payee: Option<String>, what: &str) {
     let stem = merchant_stem(&t.raw_description, &t.memo);
-    let rule = Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: stem.clone(), clean_payee: payee, category_id, is_subscription: t.is_subscription, is_transfer: false, expected_cadence: None, entity_id: Some(t.entity_id), business_entity_id: None };
+    let rule = Rule { id: 0, kind: RuleKind::NormalizedTokens, pattern: stem.clone(), clean_payee: payee, category_id, is_subscription: t.is_subscription, is_transfer: false, expected_cadence: None, entity_id: if app.db.prefs().rules_all_workspaces { None } else { Some(t.entity_id) }, business_entity_id: None };
     app.toast_action(
         &format!("Remember: {what} for every “{stem}”?"),
         "Remember",
@@ -379,7 +379,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             }
             // filter choices (keep the current pick when it still exists)
             let ents = a.entity_ids();
-            let accts: Vec<_> = a.db.accounts().unwrap_or_default().into_iter().filter(|x| ents.contains(&x.entity_id)).collect();
+            let accts: Vec<_> = a.db.accounts().unwrap_or_default().into_iter().filter(|x| ents.contains(&x.entity_id) && !x.hidden).collect();
             let prev_acct = account_ids.borrow().get(account_dd.selected() as usize).copied().flatten();
             let mut names = vec!["All accounts".to_string()];
             names.extend(accts.iter().map(|x| x.name.clone()));

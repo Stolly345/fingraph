@@ -177,7 +177,7 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
                 Ok((scan, sha)) => match a.db.import_scan(entity, &name, &sha, &scan) {
                     Ok(rep) => {
                         // kept so the statement can be rescanned after a scanner or profile change
-                        if let Err(e) = db::keep_pdf(&p, &sha) {
+                        if let Err(e) = a.db.keep_pdf(&p, &sha) {
                             a.toast(&format!("{name}: couldn't keep a copy for rescanning ({e})"));
                         }
                         files += 1;
@@ -209,13 +209,89 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
         a.reload_entities();
         if files > 0 {
             let msg = format!("Imported {inserted} transactions from {files} statement{} · {reconciled} reconciled", if files == 1 { "" } else { "s" });
-            if a.db.uncategorized_count(&a.entity_ids()).unwrap_or(0) > 0 {
+            let waiting = a.db.uncategorized_count(&a.entity_ids()).unwrap_or(0) > 0;
+            if waiting && a.db.prefs().triage_after_import {
+                a.toast(&msg);
+                crate::wizard::triage(&a);
+            } else if waiting {
                 a.toast_action(&msg, "Triage", Rc::new(crate::wizard::triage));
             } else {
                 a.toast(&msg);
             }
         }
     });
+}
+
+/// Preferences → Import → Watch a folder: import new bank statements that land there, now and
+/// while FinGraph is open. A PDF that isn't from a known bank is noted and left alone.
+pub fn watch(app: &Rc<App>) {
+    *app.watch.borrow_mut() = None;
+    let p = app.db.prefs();
+    let Some(dir) = p.watch_folder.clone().filter(|_| p.watch_enabled) else { return };
+    sweep(app, &dir);
+    let Ok(mon) = gio::File::for_path(&dir).monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) else {
+        return app.toast(&format!("Can't watch {}", dir.display()));
+    };
+    let w = Rc::downgrade(app);
+    mon.connect_changed(move |_, f, other, ev| {
+        let Some(a) = w.upgrade() else { return };
+        let file = if ev == gio::FileMonitorEvent::MovedIn || ev == gio::FileMonitorEvent::Renamed { other.cloned().unwrap_or_else(|| f.clone()) } else { f.clone() };
+        if matches!(ev, gio::FileMonitorEvent::ChangesDoneHint | gio::FileMonitorEvent::MovedIn | gio::FileMonitorEvent::Renamed)
+            && let Some(p) = file.path()
+        {
+            check(&a, vec![p]);
+        }
+    });
+    *app.watch.borrow_mut() = Some(mon);
+}
+
+fn sweep(app: &Rc<App>, dir: &std::path::Path) {
+    let pdfs: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))).collect();
+    check(app, pdfs);
+}
+
+/// Seen before (by path, size and time) → skip; otherwise scan, and import only real statements.
+fn check(app: &Rc<App>, paths: Vec<PathBuf>) {
+    let key = |p: &std::path::Path| std::fs::metadata(p).ok().map(|m| format!("{}|{}|{:?}", p.display(), m.len(), m.modified().ok()));
+    let seen: std::collections::HashSet<String> = app.db.setting("watch_seen").and_then(|j| serde_json_lite(&j)).unwrap_or_default();
+    let todo: Vec<(PathBuf, String)> = paths.into_iter().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))).filter_map(|p| Some((p.clone(), key(&p)?))).filter(|(_, k)| !seen.contains(k)).collect();
+    if todo.is_empty() {
+        return;
+    }
+    let profiles = app.db.profiles().unwrap_or_default();
+    let w = Rc::downgrade(app);
+    glib::spawn_future_local(async move {
+        for (p, k) in todo {
+            let (profiles, p2) = (profiles.clone(), p.clone());
+            let r = gio::spawn_blocking(move || -> Option<(ScanResult, String)> {
+                let sha = db::file_sha256(&p2).ok()?;
+                let scan = MultiPassScanner::new(&profiles).scan_pdf(&p2).ok()?;
+                Some((scan, sha))
+            })
+            .await
+            .ok()
+            .flatten();
+            let Some(a) = w.upgrade() else { return };
+            let mut seen: std::collections::HashSet<String> = a.db.setting("watch_seen").and_then(|j| serde_json_lite(&j)).unwrap_or_default();
+            seen.insert(k);
+            let _ = a.db.set_setting("watch_seen", &seen.iter().map(|s| format!("{s}\n")).collect::<String>());
+            let Some((scan, sha)) = r.filter(|(s, _)| s.profile_slug.is_some() && !s.sections.is_empty()) else { continue };
+            let Some(entity) = a.import_entity() else { continue };
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if let Ok(rep) = a.db.import_scan(entity, &name, &sha, &scan)
+                && !rep.already_imported
+            {
+                let _ = a.db.keep_pdf(&p, &sha);
+                a.reload_entities();
+                a.toast_action(&format!("Imported {name} from your watched folder · {} transactions", rep.inserted), "Triage", Rc::new(crate::wizard::triage));
+            }
+        }
+    });
+}
+
+/// The seen-list is stored one entry per line.
+fn serde_json_lite(s: &str) -> Option<std::collections::HashSet<String>> {
+    Some(s.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
 }
 
 /// Re-read every statement with the current scanner and profiles, after asking.
@@ -232,13 +308,14 @@ pub fn rescan_all(app: &Rc<App>) {
         if r != "go" {
             return;
         }
+        let _ = a.db.auto_backup("before-rescan");
         let files = a.db.statement_files().unwrap_or_default();
         let profiles = a.db.profiles().unwrap_or_default();
         let w = Rc::downgrade(&a);
         glib::spawn_future_local(async move {
             let (mut n, mut txs, mut missing) = (0, 0, Vec::new());
             for (sha, name, entity) in files {
-                let Some(path) = db::stored_pdf(&sha, &name) else {
+                let Some(path) = a.db.stored_pdf(&sha, &name) else {
                     missing.push(name);
                     continue;
                 };

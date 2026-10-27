@@ -7,6 +7,14 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static FUZZY: AtomicBool = AtomicBool::new(true);
+
+/// Whether truncated spellings count as one merchant (a preference; on by default).
+pub fn set_fuzzy(on: bool) {
+    FUZZY.store(on, Ordering::Relaxed);
+}
 
 use crate::Currency;
 
@@ -63,7 +71,7 @@ impl Rule {
                     return false;
                 }
                 // the same well-known service however the bank printed it (HBO MAX / PAYPAL *HBOMAX)
-                if known_key(&pat).is_some() && known_key(&pat) == known_key(&stem) {
+                if FUZZY.load(Ordering::Relaxed) && known_key(&pat).is_some() && known_key(&pat) == known_key(&stem) {
                     return true;
                 }
                 // every pattern word appears, allowing for names the bank cut short (HELP / HEL / HE)
@@ -86,6 +94,9 @@ fn word_match(a: &str, b: &str, first: bool) -> bool {
     if a == b {
         return true;
     }
+    if !FUZZY.load(Ordering::Relaxed) {
+        return false;
+    }
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     short.len() >= if first { 5 } else { 2 } && long.starts_with(short)
 }
@@ -95,6 +106,9 @@ fn word_match(a: &str, b: &str, first: bool) -> bool {
 pub fn same_merchant(a: &str, b: &str) -> bool {
     if a == b {
         return true;
+    }
+    if !FUZZY.load(Ordering::Relaxed) {
+        return false;
     }
     if known_key(a).is_some() && known_key(a) == known_key(b) {
         return true;

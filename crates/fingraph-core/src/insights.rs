@@ -224,10 +224,11 @@ fn cumulative(rows: &[TxRow], month: NaiveDate, days: u32, ccy: Currency, fx: &F
 }
 
 /// This month's cumulative spending against the band of the previous six.
-pub fn burn_curve(rows: &[TxRow], as_of: NaiveDate, ccy: Currency, fx: &Fx) -> BurnCurve {
+/// This month against the previous `band_months` months.
+pub fn burn_curve(rows: &[TxRow], as_of: NaiveDate, ccy: Currency, fx: &Fx, band_months: i32) -> BurnCurve {
     let month = month_start(as_of);
     let current = cumulative(rows, month, as_of.day(), ccy, fx);
-    let history: Vec<Vec<Decimal>> = (1..=6).map(|i| cumulative(rows, add_months(month, -i), 31, ccy, fx)).filter(|c| c.last().is_some_and(|x| !x.is_zero())).collect();
+    let history: Vec<Vec<Decimal>> = (1..=band_months.max(1)).map(|i| cumulative(rows, add_months(month, -i), 31, ccy, fx)).filter(|c| c.last().is_some_and(|x| !x.is_zero())).collect();
     let mut b = BurnCurve { month, current, ..Default::default() };
     if history.is_empty() {
         return b;
@@ -461,8 +462,23 @@ pub fn bank_fees(rows: &[TxRow], ccy: Currency, fx: &Fx) -> Vec<FeeLine> {
     v
 }
 
+/// The knobs behind the "What changed?" cards (Preferences → Dashboard).
+#[derive(Debug, Clone, Copy)]
+pub struct Tuning {
+    pub duplicate_days: i64,
+    pub spike_percent: f64,
+    pub drift_percent: f64,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Tuning { duplicate_days: 3, spike_percent: 20.0, drift_percent: 10.0 }
+    }
+}
+
 /// The "What changed?" cards for the window ending `to`.
-pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveDate, ccy: Currency, fx: &Fx, parents: &BTreeMap<i64, String>) -> Vec<Insight> {
+#[allow(clippy::too_many_arguments)]
+pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveDate, ccy: Currency, fx: &Fx, parents: &BTreeMap<i64, String>, tune: &Tuning) -> Vec<Insight> {
     let mut out = Vec::new();
     let money = |d: Decimal| fmt_money(d, ccy);
 
@@ -514,7 +530,7 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
             continue;
         }
         if let Some(p) = pct(*last_v, avg)
-            && p > 20.0
+            && p > tune.spike_percent
         {
             out.push(Insight {
                 kind: InsightKind::Spike,
@@ -538,7 +554,7 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
     let mut i = 0;
     while i < seen.len() {
         let mut j = i + 1;
-        while j < seen.len() && (seen[j].0.account_id, &seen[j].1, seen[j].0.amount) == (seen[i].0.account_id, &seen[i].1, seen[i].0.amount) && (seen[j].0.posted - seen[j - 1].0.posted).num_days() <= 3 {
+        while j < seen.len() && (seen[j].0.account_id, &seen[j].1, seen[j].0.amount) == (seen[i].0.account_id, &seen[i].1, seen[i].0.amount) && (seen[j].0.posted - seen[j - 1].0.posted).num_days() <= tune.duplicate_days {
             j += 1;
         }
         if j - i >= 2 {
@@ -599,7 +615,7 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
         .filter_map(|(k, v)| {
             let avg = prev.iter().map(|p| p.get(k).copied().unwrap_or_default()).sum::<Decimal>() / Decimal::from(3);
             let p = pct(*v, avg)?;
-            (p > 10.0 && !avg.is_zero()).then(|| (k.clone(), p, *v, avg))
+            (p > tune.drift_percent && !avg.is_zero()).then(|| (k.clone(), p, *v, avg))
         })
         .collect();
     drift.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -647,13 +663,13 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
         let (from, to) = Range::ThisMonth.resolve(today, None);
         let parents = BTreeMap::new();
-        let ins = insights(&rows, &db.entities().unwrap(), from, to, Currency::KYD, &fx, &parents);
+        let ins = insights(&rows, &db.entities().unwrap(), from, to, Currency::KYD, &fx, &parents, &Tuning::default());
         let titles: Vec<&str> = ins.iter().map(|i| i.title.as_str()).collect();
         assert!(titles.iter().any(|t| t.starts_with("HBO") && t.contains("+12.5% this month")), "{titles:#?}");
         assert!(titles.iter().any(|t| t.contains("Caribbean Utilities") && t.contains("vs 6-month")), "{titles:#?}");
         assert!(ins.iter().any(|i| i.kind == InsightKind::BankFees));
         let all = Range::All.resolve(today, data_span(&rows));
-        let dup = insights(&rows, &[], all.0, all.1, Currency::KYD, &fx, &parents);
+        let dup = insights(&rows, &[], all.0, all.1, Currency::KYD, &fx, &parents, &Tuning::default());
         let dups: Vec<&Insight> = dup.iter().filter(|i| i.kind == InsightKind::Duplicate).collect();
         assert!(dups.iter().any(|i| i.title.contains("Cayman Cabs")), "{dups:#?}");
         // fees repeat by design: never "double charges"; they're broken down inside the fees card instead

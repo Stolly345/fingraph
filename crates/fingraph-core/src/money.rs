@@ -5,6 +5,23 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static CODES: AtomicBool = AtomicBool::new(false);
+static BRACKETS: AtomicBool = AtomicBool::new(false);
+static STATEMENT_FX: AtomicBool = AtomicBool::new(true);
+
+/// Display preferences (`KYD 1.00` vs `CI$ 1.00`, brackets for negatives) and whether a rate
+/// printed on a statement beats the configured one. Set from `Prefs::apply_globals`.
+pub fn set_style(codes: bool, brackets: bool, statement_fx_wins: bool) {
+    CODES.store(codes, Ordering::Relaxed);
+    BRACKETS.store(brackets, Ordering::Relaxed);
+    STATEMENT_FX.store(statement_fx_wins, Ordering::Relaxed);
+}
+
+pub fn statement_fx_wins() -> bool {
+    STATEMENT_FX.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Currency {
@@ -108,9 +125,11 @@ pub fn fmt_plain(d: Decimal) -> String {
 /// `-CI$ 1,234.50` / `US$ 15.99`.
 pub fn fmt_money(d: Decimal, ccy: Currency) -> String {
     let p = fmt_plain(d);
+    let sym = if CODES.load(Ordering::Relaxed) { ccy.code() } else { ccy.symbol() };
     match p.strip_prefix('-') {
-        Some(rest) => format!("-{} {rest}", ccy.symbol()),
-        None => format!("{} {p}", ccy.symbol()),
+        Some(rest) if BRACKETS.load(Ordering::Relaxed) => format!("({sym} {rest})"),
+        Some(rest) => format!("-{sym} {rest}"),
+        None => format!("{sym} {p}"),
     }
 }
 

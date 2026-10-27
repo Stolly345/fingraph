@@ -9,6 +9,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::money::{to_minor, Fx};
+use crate::prefs::Prefs;
 use crate::parser::profiles::{self, BankProfile, HeaderAnchors, LayoutKind};
 use crate::parser::{Diagnostics, ScanResult, Section, SectionReport};
 use crate::rules::{self, Rule, RuleKind};
@@ -128,6 +129,9 @@ CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 -- a payment from a personal account that was really a business expense is booked to that workspace
 ALTER TABLE transactions ADD COLUMN business_entity_id INTEGER REFERENCES entities(id) ON DELETE SET NULL;
 ALTER TABLE learned_rules ADD COLUMN business_entity_id INTEGER REFERENCES entities(id) ON DELETE SET NULL;
+"#, r#"
+-- closed accounts can be hidden from lists and charts; their history still counts
+ALTER TABLE accounts ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
 "#];
 
 /// (name, kind, children). Missing ones are added to existing ledgers on open; lists are shown A–Z.
@@ -184,6 +188,8 @@ pub struct Account {
     pub currency: Currency,
     pub ofx_bank_id: String,
     pub ofx_intu_bid: String,
+    /// Closed: left out of account lists and the balance chart.
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,7 +411,133 @@ impl Db {
         let db = Db { conn };
         db.migrate()?;
         db.seed()?;
+        db.prefs().apply_globals();
         Ok(db)
+    }
+
+    // ---------------------------------------------------------------- preferences
+
+    pub fn prefs(&self) -> Prefs {
+        self.setting("preferences").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default()
+    }
+
+    pub fn save_prefs(&self, p: &Prefs) -> Result<()> {
+        self.set_setting("preferences", &serde_json::to_string(p)?)?;
+        p.apply_globals();
+        Ok(())
+    }
+
+    /// The ledger file, when it is one (not in memory).
+    pub fn path(&self) -> Option<std::path::PathBuf> {
+        self.conn.path().filter(|p| !p.is_empty()).map(std::path::PathBuf::from)
+    }
+
+    // ---------------------------------------------------------------- backups
+
+    /// A consistent copy of the whole ledger (settings and preferences included).
+    pub fn backup_to(&self, dest: &Path) -> Result<()> {
+        if let Some(dir) = dest.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        if dest.exists() {
+            std::fs::remove_file(dest)?;
+        }
+        self.conn.execute("VACUUM INTO ?1", [dest.to_string_lossy()])?;
+        Ok(())
+    }
+
+    pub fn backups_dir(&self) -> Option<std::path::PathBuf> {
+        Some(self.path()?.parent()?.join("backups"))
+    }
+
+    /// Before something drastic: a timestamped backup, keeping the newest ten. Off in Preferences = no-op.
+    pub fn auto_backup(&self, reason: &str) -> Result<Option<std::path::PathBuf>> {
+        let Some(dir) = self.backups_dir().filter(|_| self.prefs().auto_backup) else { return Ok(None) };
+        let dest = dir.join(format!("ledger-{}-{reason}.db", Local::now().format("%Y%m%d-%H%M%S")));
+        self.backup_to(&dest)?;
+        let mut old: Vec<_> = std::fs::read_dir(&dir)?.flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("ledger-"))).collect();
+        old.sort();
+        for p in old.iter().rev().skip(10) {
+            let _ = std::fs::remove_file(p);
+        }
+        Ok(Some(dest))
+    }
+
+    /// Replace the ledger's contents with a backup's (then bring it up to this version's schema).
+    pub fn restore_from(&self, src: &Path) -> Result<()> {
+        let from = Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        from.query_row("SELECT COUNT(*) FROM entities", [], |r| r.get::<_, i64>(0)).map_err(|_| Error("that file isn't a FinGraph ledger".into()))?;
+        let path = self.path().ok_or_else(|| Error("an in-memory ledger can't be restored into".into()))?;
+        // a second handle on the same file takes the pages; this one sees them on its next read
+        let mut to = Connection::open(&path)?;
+        {
+            let b = rusqlite::backup::Backup::new(&from, &mut to)?;
+            b.run_to_completion(256, std::time::Duration::from_millis(0), None)?;
+        }
+        drop(to);
+        self.migrate()?;
+        self.seed()?;
+        self.prefs().apply_globals();
+        Ok(())
+    }
+
+    /// Everything you put in goes: workspaces, accounts, statements, transactions, rules and
+    /// settings. Bank profiles, categories and preferences stay.
+    pub fn erase_all(&self) -> Result<()> {
+        let prefs = self.setting("preferences");
+        let tx = self.conn.unchecked_transaction()?;
+        for t in ["transactions", "documents", "accounts", "learned_rules", "entities", "settings"] {
+            tx.execute(&format!("DELETE FROM {t}"), [])?;
+        }
+        tx.commit()?;
+        if let Some(p) = prefs {
+            self.set_setting("preferences", &p)?;
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------- kept statement PDFs
+
+    /// Keep a copy of an imported PDF, named by its SHA-256, so it can be rescanned later.
+    pub fn keep_pdf(&self, src: &Path, sha256: &str) -> Result<()> {
+        let dir = self.prefs().statements_dir();
+        std::fs::create_dir_all(&dir)?;
+        let dst = dir.join(format!("{sha256}.pdf"));
+        if !dst.exists() {
+            std::fs::copy(src, &dst)?;
+        }
+        Ok(())
+    }
+
+    /// A statement's PDF: the kept copy, else a file with the same name and contents in the data folder.
+    pub fn stored_pdf(&self, sha256: &str, filename: &str) -> Option<std::path::PathBuf> {
+        let kept = self.prefs().statements_dir().join(format!("{sha256}.pdf"));
+        if kept.exists() {
+            return Some(kept);
+        }
+        let old = crate::data_dir().join("documents").join(filename);
+        (file_sha256(&old).ok().as_deref() == Some(sha256)).then_some(old)
+    }
+
+    /// Move the kept PDFs to a new folder and remember it. Returns how many moved.
+    pub fn move_statements_dir(&self, to: &Path) -> Result<usize> {
+        let mut p = self.prefs();
+        let from = p.statements_dir();
+        std::fs::create_dir_all(to)?;
+        let mut n = 0;
+        if from != to && from.exists() {
+            for e in std::fs::read_dir(&from)?.flatten() {
+                let dst = to.join(e.file_name());
+                if std::fs::rename(e.path(), &dst).is_err() {
+                    std::fs::copy(e.path(), &dst)?;
+                    std::fs::remove_file(e.path())?;
+                }
+                n += 1;
+            }
+        }
+        p.statements_dir = Some(to.to_path_buf());
+        self.save_prefs(&p)?;
+        Ok(n)
     }
 
     fn migrate(&self) -> Result<()> {
@@ -554,6 +686,10 @@ impl Db {
     }
 
     /// Recompute `amount_in_entity_currency` (keeping statement-quoted FX originals).
+    pub fn revalue_all(&self) -> Result<()> {
+        self.revalue(None)
+    }
+
     fn revalue(&self, entity: Option<i64>) -> Result<()> {
         let fx = self.fx()?;
         let rows: Vec<(i64, String, String, String, String)> = {
@@ -576,7 +712,7 @@ impl Db {
 
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let mut st = self.conn.prepare(
-            "SELECT a.id, a.entity_id, a.bank_profile_id, COALESCE(bp.short_name, ''), a.name, a.account_number_masked, a.account_type, a.currency, a.ofx_bank_id, a.ofx_intu_bid
+            "SELECT a.id, a.entity_id, a.bank_profile_id, COALESCE(bp.short_name, ''), a.name, a.account_number_masked, a.account_type, a.currency, a.ofx_bank_id, a.ofx_intu_bid, a.hidden
              FROM accounts a LEFT JOIN bank_profiles bp ON bp.id = a.bank_profile_id ORDER BY a.entity_id, a.name",
         )?;
         let rows = st.query_map([], |r| {
@@ -591,6 +727,7 @@ impl Db {
                 currency: ccy(&r.get::<_, String>(7)?),
                 ofx_bank_id: r.get(8)?,
                 ofx_intu_bid: r.get(9)?,
+                hidden: r.get(10)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -598,8 +735,8 @@ impl Db {
 
     pub fn update_account(&self, a: &Account) -> Result<()> {
         self.conn.execute(
-            "UPDATE accounts SET name = ?2, ofx_bank_id = ?3, ofx_intu_bid = ?4, entity_id = ?5 WHERE id = ?1",
-            params![a.id, a.name, a.ofx_bank_id, a.ofx_intu_bid, a.entity_id],
+            "UPDATE accounts SET name = ?2, ofx_bank_id = ?3, ofx_intu_bid = ?4, entity_id = ?5, hidden = ?6 WHERE id = ?1",
+            params![a.id, a.name, a.ofx_bank_id, a.ofx_intu_bid, a.entity_id, a.hidden],
         )?;
         self.revalue(Some(a.entity_id))
     }
@@ -819,8 +956,93 @@ impl Db {
     /// Swap a statement for a fresh scan of it: its old sections and transactions go, the new ones
     /// come in through the normal import (rules applied, transfers re-matched).
     pub fn replace_statement(&self, entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult) -> Result<ImportReport> {
+        // what you changed by hand, by transaction fingerprint, so a rescan doesn't lose it
+        struct Kept {
+            account: i64,
+            fitid: String,
+            category: Option<i64>,
+            payee: String,
+            tag: String,
+            business: Option<i64>,
+            subscription: bool,
+            confirmed: bool,
+            manual: Option<(NaiveDate, String, Decimal, String)>,
+        }
+        let keep = self.prefs().rescan_keeps_edits;
+        let kept: Vec<Kept> = if keep {
+            let mut st = self.conn.prepare(
+                "SELECT t.account_id, t.fitid, t.category_id, t.clean_payee, t.sub_entity_tag, t.business_entity_id, t.is_subscription, t.review_status, t.posted_date, t.raw_description, t.amount, t.memo
+                 FROM transactions t JOIN documents d ON d.id = t.document_id WHERE d.sha256_hash = ?1",
+            )?;
+            let rows = st.query_map([sha256], |r| {
+                let memo: String = r.get(11)?;
+                Ok(Kept {
+                    account: r.get(0)?,
+                    fitid: r.get(1)?,
+                    category: r.get(2)?,
+                    payee: r.get(3)?,
+                    tag: r.get(4)?,
+                    business: r.get(5)?,
+                    subscription: r.get(6)?,
+                    confirmed: r.get::<_, String>(7)? == "Confirmed",
+                    manual: memo.starts_with("Converted from skipped line").then(|| (date(&r.get::<_, String>(8).unwrap_or_default()), r.get(9).unwrap_or_default(), dec(&r.get::<_, String>(10).unwrap_or_default()), memo.clone())),
+                })
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        } else {
+            Vec::new()
+        };
         self.conn.execute("DELETE FROM documents WHERE sha256_hash = ?1", [sha256])?;
-        self.import_scan(entity_id, filename, sha256, scan)
+        let rep = self.import_scan(entity_id, filename, sha256, scan)?;
+        for k in kept {
+            let id: Option<i64> = self.conn.query_row("SELECT id FROM transactions WHERE account_id = ?1 AND fitid = ?2", params![k.account, k.fitid], |r| r.get(0)).optional()?;
+            let id = match (id, &k.manual) {
+                (Some(id), _) => Some(id),
+                // a line you converted in the inspector: put it back unless the scanner now reads it itself
+                (None, Some((day, desc, amt, memo))) => {
+                    let found: i64 = self.conn.query_row("SELECT COUNT(*) FROM transactions WHERE account_id = ?1 AND posted_date = ?2 AND amount = ?3", params![k.account, day.to_string(), amt.to_string()], |r| r.get(0))?;
+                    let doc: Option<i64> = self.conn.query_row("SELECT id FROM documents WHERE sha256_hash = ?1 AND account_id = ?2", params![sha256, k.account], |r| r.get(0)).optional()?;
+                    if found == 0 { Some(self.add_manual(k.account, doc, *day, desc, *amt, memo)?) } else { None }
+                }
+                _ => None,
+            };
+            let Some(id) = id else { continue };
+            if k.confirmed {
+                self.conn.execute(
+                    "UPDATE transactions SET category_id = ?2, clean_payee = ?3, is_subscription = ?4, review_status = 'Confirmed' WHERE id = ?1",
+                    params![id, k.category, k.payee, k.subscription],
+                )?;
+            }
+            if !k.tag.is_empty() {
+                self.set_tag(&[id], &k.tag)?;
+            }
+            if k.business.is_some() {
+                self.set_business(&[id], k.business)?;
+            }
+        }
+        self.recheck_documents(sha256)?;
+        Ok(rep)
+    }
+
+    fn recheck_documents(&self, sha256: &str) -> Result<()> {
+        let ids: Vec<(i64, String)> = {
+            let mut st = self.conn.prepare("SELECT id, currency FROM documents WHERE sha256_hash = ?1")?;
+            st.query_map([sha256], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, c) in ids {
+            // only a statement fixed by hand changes verdict; a clean rescan keeps the scanner's own
+            let has_manual: i64 = self.conn.query_row("SELECT COUNT(*) FROM transactions WHERE document_id = ?1 AND memo LIKE 'Converted from skipped line%'", [id], |r| r.get(0))?;
+            if has_manual > 0 {
+                self.recheck_document(id, ccy(&c))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove a workspace and everything in it: accounts, statements, transactions, its rules.
+    pub fn delete_entity(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM entities WHERE id = ?1", [id])?;
+        Ok(())
     }
 
     /// Re-read every statement whose PDF can still be found with the current scanner and profiles.
@@ -830,7 +1052,7 @@ impl Db {
         let scanner = crate::parser::MultiPassScanner::new(&profiles);
         let (mut n, mut txs, mut missing) = (0, 0, Vec::new());
         for (sha, name, entity) in self.statement_files()? {
-            let Some(path) = stored_pdf(&sha, &name) else {
+            let Some(path) = self.stored_pdf(&sha, &name) else {
                 missing.push(name);
                 continue;
             };
@@ -1240,7 +1462,13 @@ impl Db {
             .iter()
             .map(|t| rules::TriageInput { id: t.id, entity_id: t.entity_id, posted: t.posted, raw: t.raw_description.clone(), memo: t.memo.clone(), amount: t.amount, currency: t.currency, account: t.account_name.clone() })
             .collect();
-        Ok(rules::triage_groups(&items))
+        let mut groups = rules::triage_groups(&items);
+        if !self.prefs().ask_subscriptions {
+            for g in groups.iter_mut().filter(|g| g.kind == rules::TriageKind::Subscription) {
+                g.kind = rules::TriageKind::Merchant;
+            }
+        }
+        Ok(groups)
     }
 
     /// Mark a triage group as internal transfers: Transfers category, then pair them up.
@@ -1288,32 +1516,6 @@ impl Db {
     }
 }
 
-/// Where imported PDFs are kept, named by their SHA-256, so statements can be rescanned later.
-pub fn statements_dir() -> std::path::PathBuf {
-    crate::data_dir().join("statements")
-}
-
-/// Keep a copy of an imported PDF (no-op when it's already there).
-pub fn keep_pdf(src: &Path, sha256: &str) -> Result<()> {
-    let dir = statements_dir();
-    std::fs::create_dir_all(&dir)?;
-    let dst = dir.join(format!("{sha256}.pdf"));
-    if !dst.exists() {
-        std::fs::copy(src, &dst)?;
-    }
-    Ok(())
-}
-
-/// A statement's PDF: our kept copy, else a file of the same name and contents in the data folder.
-pub fn stored_pdf(sha256: &str, filename: &str) -> Option<std::path::PathBuf> {
-    let kept = statements_dir().join(format!("{sha256}.pdf"));
-    if kept.exists() {
-        return Some(kept);
-    }
-    let old = crate::data_dir().join("documents").join(filename);
-    (file_sha256(&old).ok().as_deref() == Some(sha256)).then_some(old)
-}
-
 /// `USD 145.00` style original from an FX memo line we stored.
 fn parse_fx_memo(memo: &str) -> Option<(Currency, Decimal)> {
     let i = memo.find("FX original ")?;
@@ -1328,6 +1530,7 @@ pub fn entity_amount(fx: &Fx, amount: Decimal, from: Currency, base: Currency, o
     if from == base {
         return amount;
     }
+    let original = original.filter(|_| crate::money::statement_fx_wins());
     match original {
         Some((c, v)) if c == base => {
             if amount.is_sign_negative() {
@@ -1445,6 +1648,47 @@ mod tests {
         let n = cats.len();
         db.seed().unwrap();
         assert_eq!(db.categories().unwrap().len(), n);
+    }
+
+    #[test]
+    fn rescan_keeps_hand_edits() {
+        let db = Db::open_in_memory().unwrap();
+        db.load_demo().unwrap();
+        let rows = db.transactions(&TxFilter { search: "KIRK HOME".into(), ..Default::default() }).unwrap();
+        let t = &rows[0];
+        let fam = db.category_id("Family Expense").unwrap();
+        db.set_category(&[t.id], fam).unwrap();
+        db.set_tag(&[t.id], "Kids room").unwrap();
+        let (sha, name, ent): (String, String, i64) = db
+            .conn
+            .query_row("SELECT d.sha256_hash, d.filename, a.entity_id FROM documents d JOIN accounts a ON a.id = d.account_id WHERE d.id = ?1", [t.document_id.unwrap()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        let doc = crate::demo::demo_documents().into_iter().find(|d| d.filename == name).unwrap();
+        let profiles = db.profiles().unwrap();
+        let scan = crate::parser::MultiPassScanner::new(&profiles).scan_tokens(doc.tokens).unwrap();
+        db.replace_statement(ent, &name, &sha, &scan).unwrap();
+        let again = db.transactions(&TxFilter { search: "KIRK HOME".into(), ..Default::default() }).unwrap();
+        let same = again.iter().find(|x| x.fitid == t.fitid).unwrap();
+        assert_eq!((same.category_id, same.tag.as_str()), (fam, "Kids room"));
+        assert_eq!(again.len(), rows.len(), "no duplicates");
+    }
+
+    #[test]
+    fn workspace_delete_backup_and_erase() {
+        let dir = std::env::temp_dir().join(format!("fingraph-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = Db::open(&dir.join("ledger.db")).unwrap();
+        db.load_demo().unwrap();
+        let n = db.transactions(&TxFilter::default()).unwrap().len();
+        let backup = db.auto_backup("test").unwrap().unwrap();
+        let biz = db.entity_by_name("Business — Property").unwrap().unwrap();
+        db.delete_entity(biz).unwrap();
+        assert!(db.transactions(&TxFilter::default()).unwrap().len() < n);
+        db.erase_all().unwrap();
+        assert!(db.entities().unwrap().is_empty() && db.transactions(&TxFilter::default()).unwrap().is_empty());
+        db.restore_from(&backup).unwrap();
+        assert_eq!(db.transactions(&TxFilter::default()).unwrap().len(), n);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
