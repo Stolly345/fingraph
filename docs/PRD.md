@@ -1,7 +1,7 @@
 # FinGraph — PRD / System Reference
 
-**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.6 `.deb`
-**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Updated:** 2026-10-28 for 0.2.6 · **Status:** in daily personal use; not published
+**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.7 `.deb`
+**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Updated:** 2026-10-28 for 0.2.7 · **Status:** in daily personal use; not published
 
 > Single source of truth for what FinGraph is, how it's built, and why it behaves the way it does.
 > It replaces the Python/Flet prototype in `~/Projects/FinGraph` (left untouched; its
@@ -342,11 +342,14 @@ only).
     overspend. Undo on the same menu. Alerts, bars and Left use budget + rollover + moves.
   - **Statements arrive late**: "how far through the month" for alerts and Heading For is measured
     to the newest statement's end date, not today; a month with no statement yet says so.
-  - **Non-monthly bills** (YNAB true expenses / Monarch non-monthly): amount, every 3/6/12/24 months,
+  - **Non-monthly bills** (YNAB true expenses / Monarch non-monthly): amount, every 3/4/6/12/24 months,
     next due; a share a month, "set aside by now" = one share per month of the cycle so far (the
     month after the last due date is the first). Suggested from the statements: bills at a steady
     91/365-day rhythm, and yearly/quarterly subscriptions ("Set Aside For It"). The monthly total
     comes off Your Plan's savings and shows as its own part of the Fixed vs Variable bar.
+    Since 0.2.7 the setup wizard asks for them (step 3, **Big Yearly Bills**, see the decisions log),
+    and Overview shows **Big Bills Coming Up** and **Big Bills Over the Next 12 Months**
+    (`budget::fill_big_bills`).
   - **Watchlists** (Simplifi): a monthly limit on any wording (matched in description, memo and
     payee), across categories; over / near limit joins the budget alerts and badge; list button
     shows the matching transactions.
@@ -492,10 +495,10 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 10. Packaging & operations
 
-- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.6-1_amd64.deb` (binary, desktop entry with
+- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.7-1_amd64.deb` (binary, desktop entry with
   PDF "Open With", icon, README; depends on poppler-utils, GTK 4, libadwaita; recommends
   tesseract-ocr for picture-only statements).
-- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.6-1_amd64.deb`. The
+- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.7-1_amd64.deb`. The
   version is bumped for every change to the app: apt skips a same-version `.deb` unless given
   `--reinstall`, and once that made a fix look missing. A docs-only rebuild keeps the version and
   is installed with `--reinstall`.
@@ -520,7 +523,7 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 11. Quality
 
-- `cargo test --workspace`: 69 tests (0.2.3–0.2.4 added the real CNB layout and OCR, multi-line
+- `cargo test --workspace`: 70 tests (0.2.7: a bill picked by its due month lands on the next one; 0.2.3–0.2.4 added the real CNB layout and OCR, multi-line
   rows, a layout mismatch that still reconciles, anonymised layout samples, import plans and holds,
   FITID re-keying and the one-time profile refresh; the guide release added whole-month suggestions and salary-with-a-bonus; 0.2.0 added rollovers/moves/history, non-monthly bills,
   watchlists and closes, Age of Money incl. a hand-checked FIFO case, the bills checklist incl.
@@ -578,6 +581,7 @@ Fixes found while testing the guide on the owner's real statements:
 | Sidebar and ⓘ (0.2.5) | Owner asked for To Review to disappear when empty — it became a banner on Overview instead; Setup pages moved to the main menu; an ⓘ explaining how to read each card on Overview, Budget, Outlook and Net Worth. "Top Merchants · Pareto" renamed "Where Most of Your Money Goes". Long card titles now wrap: the ⓘ had pushed Overview wider than the window |
 | Sidebar order (0.2.6) | Owner's order: Overview, Net Worth, Budget, Outlook, Transactions, Combined Statement, Statements, What Changed, then Subscriptions (not named, put last); Ctrl+1–9 follow it. Also in this round: Reports & Export moved from the sidebar to the main menu, and Load Demo Data left the menu (it stays on the empty Overview and in the guide). Versions now bump on every `.deb`: a same-version rebuild was once installed over without `--reinstall` and the change looked missing |
 | README screenshots (0.2.6, docs only) | Owner asked for pictures of the app in the README with none of their data: nine pages shot from the demo in a scratch ledger (see §10); past releases tagged at the owner's request |
+| Big yearly bills (0.2.7) | Owner: "does the software ask what are your once a year costs?" It didn't. Non-monthly bills existed only on the Budget page, and suggestions need two charges a year apart from the same payee. The budget setup gains step 3, **Big Yearly Bills**: 9 common ones (car / home insurance, HOA or strata, vehicle licence, health insurance if self-paid, school fees per term, memberships, travel, Christmas & birthdays) plus bills already planned and ones found in the statements, each with amount, how often (yearly, 6, 4 termly, 3 months, 2 years) and the month it's due. The set-aside comes out of "left to save", and is treated as fixed when trimming variable spending to reach the goal. An emptied row deletes that bill. Overview gains **Big Bills Coming Up** (next five, set aside so far) and **Big Bills Over the Next 12 Months** (what lands each month), or an Add Big Bills… card when none are planned. Getting Started's budget step lists the five steps and what's planned or found |
 
 ---
 

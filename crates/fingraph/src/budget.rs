@@ -190,6 +190,110 @@ pub fn fill_overview(app: &Rc<App>, into: &gtk::Box) {
     into.append(&list);
 }
 
+/// Overview's two big-bill cards: the next ones due with what's set aside, and which months the
+/// big spends land in over the next year. Without any, one card offers to add them.
+pub fn fill_big_bills(app: &Rc<App>, into: &gtk::Box) {
+    clear(into);
+    let s = snap(app);
+    let (ccy, t) = (s.ccy, today());
+    let money = |d: Decimal| fmt_money(d, ccy);
+    let card = |title: &str, help: &str| {
+        let c = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).hexpand(true).css_classes(["card", "chart-card"]).build();
+        c.append(&info_heading(title, help));
+        c
+    };
+    if s.funds.is_empty() {
+        let c = card(
+            "Big Yearly Bills",
+            "Car and home insurance, HOA fees, licences, school terms: bills that don't come every month. Add them and FinGraph sets a share aside each month, shows them here before they're due, and counts them in your budget.",
+        );
+        c.append(&dim("None planned yet. Add the big bills you pay once or a few times a year, so they're saved for before they land."));
+        let add = gtk::Button::builder().label("Add Big Bills…").halign(gtk::Align::Start).css_classes(["pill"]).build();
+        let w = Rc::downgrade(app);
+        add.connect_clicked(move |_| {
+            if let Some(a) = w.upgrade() {
+                let w2 = Rc::downgrade(&a);
+                wizard(&a, Rc::new(move || if let Some(a) = w2.upgrade() { a.refresh() }));
+            }
+        });
+        c.append(&add);
+        into.append(&c);
+        return;
+    }
+    let row = gtk::Box::builder().spacing(12).homogeneous(true).build();
+
+    // ── the next ones due
+    let next = card(
+        "Big Bills Coming Up",
+        "Your next big bills, soonest first. The bar shows how much has been set aside so far towards each one; a full bar means the money is there by its due date. Change them on the Budget page under Non-Monthly Bills.",
+    );
+    let mut funds: Vec<&Fund> = s.funds.iter().collect();
+    funds.sort_by_key(|f| f.due(t));
+    let l = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
+    for fd in funds.iter().take(5) {
+        let due = fd.due(t);
+        let months = (due.year() - t.year()) * 12 + due.month() as i32 - t.month() as i32;
+        let when = match months {
+            0 => "this month".to_string(),
+            1 => "next month".to_string(),
+            n => format!("in {n} months"),
+        };
+        let r = adw::ActionRow::builder().title(glib::markup_escape_text(&fd.name)).subtitle(format!("Due {} · {when}", due.format("%d %b %Y"))).build();
+        let (aside, whole) = (s.fx.convert(fd.set_aside(t), fd.currency, ccy), s.fx.convert(fd.amount, fd.currency, ccy));
+        let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).valign(gtk::Align::Center).width_request(170).build();
+        col.append(&gtk::Label::builder().label(format!("{} of {}", money(aside), money(whole))).xalign(1.0).css_classes(["tnum", "caption"]).build());
+        col.append(&gtk::LevelBar::builder().min_value(0.0).max_value(1.0).value(if whole.is_zero() { 0.0 } else { f(aside / whole).min(1.0) }).build());
+        r.add_suffix(&col);
+        l.append(&r);
+    }
+    next.append(&l);
+    if funds.len() > 5 {
+        next.append(&dim(&format!("and {} more on the Budget page", funds.len() - 5)));
+    }
+    row.append(&next);
+
+    // ── the year ahead, month by month
+    let year = card(
+        "Big Bills Over the Next 12 Months",
+        "Each bar is what your big bills add up to in that month, so you can see the expensive months coming. The monthly set-aside below is what covers them: put that much away every month and the tall bars are already paid for. Hover a bar to see which bills land then.",
+    );
+    let start = month_start(t);
+    let mut due: Vec<(Decimal, Vec<String>)> = vec![(Decimal::ZERO, Vec::new()); 12];
+    for f in &s.funds {
+        let mut d = month_start(f.due(t));
+        while d < add_months(start, 12) {
+            let k = ((d.year() - start.year()) * 12 + d.month() as i32 - start.month() as i32) as usize;
+            if let Some(slot) = due.get_mut(k) {
+                let v = s.fx.convert(f.amount, f.currency, ccy);
+                slot.0 += v;
+                slot.1.push(format!("{} {}", f.name, money(v)));
+            }
+            d = add_months(d, f.every_months.max(1));
+        }
+    }
+    let chart = Chart::new(200);
+    let sym = ccy.symbol();
+    *chart.axis.borrow_mut() = Rc::new(move |v| format!("{sym}{}", charts::compact(v)));
+    chart.set(Data::Bars {
+        labels: (0..12).map(|k| add_months(start, k).format("%b").to_string()).collect(),
+        series: vec![charts::Series { name: "Due".into(), values: due.iter().map(|d| f(d.0)).collect(), color: charts::PURPLE }],
+        line: None,
+        tips: (0..12)
+            .map(|k| {
+                let (v, names) = &due[k as usize];
+                let m = add_months(start, k).format("%B %Y");
+                if names.is_empty() { format!("{m}\nNo big bills") } else { format!("{m}\n{}\nTotal {}", names.join("\n"), money(*v)) }
+            })
+            .collect(),
+    });
+    year.append(&chart.widget);
+    let monthly: Decimal = s.funds.iter().map(|f| s.fx.convert(f.monthly(), f.currency, ccy)).sum();
+    let total: Decimal = due.iter().map(|d| d.0).sum();
+    year.append(&dim(&format!("{} due over the next 12 months · set aside {} a month to cover it", money(total), money(monthly))));
+    row.append(&year);
+    into.append(&row);
+}
+
 const SUBS: &str = "Subscriptions & Digital";
 
 /// What each category usually costs a month (`suggest`), except Subscriptions & Digital: that one is
@@ -1113,9 +1217,8 @@ fn fund_dialog(app: &Rc<App>, sc: &str, f: Option<Fund>, ccy: Currency, done: cr
     let g = adw::PreferencesGroup::new();
     let name = adw::EntryRow::builder().title("Bill (e.g. Car insurance)").text(&f.name).build();
     let amount = adw::EntryRow::builder().title(format!("Amount each time ({})", f.currency.symbol())).text(amount_text(f.amount)).build();
-    const EVERY: [(i32, &str); 4] = [(3, "Every 3 months"), (6, "Every 6 months"), (12, "Once a year"), (24, "Every 2 years")];
     let every = adw::ComboRow::builder().title("Comes").model(&gtk::StringList::new(&EVERY.map(|e| e.1))).build();
-    every.set_selected(EVERY.iter().position(|e| e.0 == f.every_months).unwrap_or(2) as u32);
+    every.set_selected(every_index(f.every_months));
     let due = adw::EntryRow::builder().title("Next due (e.g. 15 Mar 2027)").text(f.next_due.format("%d %b %Y").to_string()).build();
     for r in [name.upcast_ref::<gtk::Widget>(), amount.upcast_ref(), every.upcast_ref(), due.upcast_ref()] {
         g.add(r);
@@ -1134,12 +1237,69 @@ fn fund_dialog(app: &Rc<App>, sc: &str, f: Option<Fund>, ccy: Currency, done: cr
         let mut nf = f.clone();
         nf.name = if name.text().trim().is_empty() { "Bill".into() } else { name.text().trim().to_string() };
         nf.amount = v.abs();
-        nf.every_months = EVERY[(every.selected() as usize).min(3)].0;
+        nf.every_months = EVERY[(every.selected() as usize).min(EVERY.len() - 1)].0;
         nf.next_due = d;
         let _ = a.db.save_fund(&sc, &nf);
         done();
     });
     dlg.present(Some(&app.win));
+}
+
+/// How often a non-monthly bill comes.
+const EVERY: [(i32, &str); 5] = [(12, "Once a year"), (6, "Every 6 months"), (4, "Every 4 months (termly)"), (3, "Every 3 months"), (24, "Every 2 years")];
+
+fn every_index(months: i32) -> u32 {
+    EVERY.iter().position(|e| e.0 == months).unwrap_or(0) as u32
+}
+
+/// Big bills most households have, offered on the wizard's yearly-bills step:
+/// (name, hint, how often, due month if it's usually fixed).
+const BIG_BILLS: [(&str, &str, i32, Option<u32>); 9] = [
+    ("Car insurance", "Usually renewed once a year", 12, None),
+    ("Home or contents insurance", "Including hurricane cover", 12, None),
+    ("HOA or strata fees", "When they're billed yearly or quarterly", 12, None),
+    ("Vehicle licence & registration", "The yearly licensing and inspection", 12, None),
+    ("Health insurance", "Only if you pay it yourself, not through payroll", 12, None),
+    ("School fees", "Per term", 4, None),
+    ("Memberships & annual plans", "Gym, clubs, Costco, Amazon Prime, software", 12, None),
+    ("Travel", "A yearly trip, or flights home", 12, None),
+    ("Christmas & birthdays", "Gifts and celebrations", 12, Some(12)),
+];
+
+/// One bill on the wizard's yearly-bills step. An empty amount means you don't have it.
+struct BillLine {
+    /// The saved bill it came from (0 = new).
+    id: i64,
+    stem: String,
+    currency: Currency,
+    /// Its name: fixed for a listed bill, typed for one you add.
+    title: String,
+    name: Option<gtk::Entry>,
+    amount: gtk::Entry,
+    every: gtk::DropDown,
+    month: gtk::DropDown,
+    /// The saved due date, kept while its month isn't changed.
+    due: Option<NaiveDate>,
+}
+
+impl BillLine {
+    fn amount(&self) -> Option<Decimal> {
+        parse_user(&self.amount.text()).map(|d| d.abs()).filter(|d| !d.is_zero())
+    }
+    fn every(&self) -> i32 {
+        EVERY[(self.every.selected() as usize).min(EVERY.len() - 1)].0
+    }
+    fn name(&self) -> String {
+        let typed = self.name.as_ref().map(|e| e.text().trim().to_string()).unwrap_or_default();
+        if self.name.is_some() { if typed.is_empty() { "Bill".into() } else { typed } } else { self.title.clone() }
+    }
+    fn next_due(&self) -> NaiveDate {
+        let m = self.month.selected() + 1;
+        match self.due {
+            Some(d) if d.month() == m && month_start(d) >= month_start(today()) => d,
+            _ => core::due_in_month(m, today()),
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────── the setup wizard
@@ -1189,7 +1349,8 @@ pub(crate) fn step_page(title: &str, intro: &str) -> (gtk::ScrolledWindow, gtk::
     (gtk::ScrolledWindow::builder().child(&b).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build(), b)
 }
 
-/// Four steps: pay & deductions → other money in and out → spending → savings goal (with the maths).
+/// Five steps: pay & deductions → other money in and out → big yearly bills → spending → savings
+/// goal (with the maths, the yearly bills' monthly share included).
 pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
     let s = Rc::new(snap(app));
     let (ccy, m) = (s.ccy, month_start(today()));
@@ -1267,7 +1428,20 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
     b2.append(&g2);
     b2.append(&dim(&format!("Loan payments are filled in from the median of your last {MONTHS} months of Loan Payments.")));
 
-    // ── 3. spending
+    // ── 3. big yearly bills
+    let (p_y, b_y) = step_page(
+        "Big Yearly Bills",
+        "The costs that don't come every month — insurance, fees, licences, school terms — so a normal month never shows them and they land all at once. Put in what each costs and the month it's next due; FinGraph sets a share aside every month so the money is there when it comes. Leave any you don't have empty.",
+    );
+    let bill_list = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
+    b_y.append(&bill_list);
+    let add_bill_btn = gtk::Button::builder().label("+ Add Another").halign(gtk::Align::Start).css_classes(["pill"]).build();
+    b_y.append(&add_bill_btn);
+    let bills_total = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["heading", "tnum"]).build();
+    b_y.append(&bills_total);
+    let bills: Rc<RefCell<Vec<BillLine>>> = Rc::default();
+
+    // ── 4. spending
     let (p3, b3) = step_page(
         "Your Spending",
         "Each category starts at what you usually spend (the median of your last six months) or the budget you already have. Change any of them; leave one empty for no budget. Fixed expenses are marked (change which on the Budget page) — the savings step only trims the variable ones.",
@@ -1314,10 +1488,10 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
     let spend_total = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["heading", "tnum"]).build();
     b3.append(&spend_total);
 
-    // ── 4. savings
+    // ── 5. savings
     let (p4, b4) = step_page(
         "Your Savings Goal",
-        "How much you want to put away each month — an amount, or a percent of take-home (20%). FinGraph does the arithmetic: take-home − spending − loans = what's left, and if that's short of the goal, how much the variable categories need to shrink.",
+        "How much you want to put away each month — an amount, or a percent of take-home (20%). FinGraph does the arithmetic: take-home − spending − big yearly bills − loans = what's left, and if that's short of the goal, how much the variable categories need to shrink.",
     );
     let g4 = adw::PreferencesGroup::new();
     let goal = adw::EntryRow::builder().title(format!("Save per month ({} or %)", ccy.symbol())).text(amount_text(start.savings_goal)).build();
@@ -1364,8 +1538,18 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
     let factor: Rc<Cell<Option<Decimal>>> = Rc::default();
     let recalc: Rc<dyn Fn()> = {
         let (read, take_home, spend_total, maths, ahead, scale, cat_entries, factor, fixed_names) = (read.clone(), take_home.clone(), spend_total.clone(), maths.clone(), ahead.clone(), scale.clone(), cat_entries.clone(), factor.clone(), fixed_names.clone());
+        let (bills, bills_total, fx) = (bills.clone(), bills_total.clone(), s.fx.clone());
         Rc::new(move || {
             let (p, budgets) = read();
+            // the share of the big bills set aside each month, in the display currency
+            let aside: Decimal = bills.borrow().iter().filter_map(|l| Some(fx.convert(l.amount()? / Decimal::from(l.every()), l.currency, ccy))).sum::<Decimal>().round_dp(2);
+            let yearly: Decimal = bills.borrow().iter().filter_map(|l| Some(fx.convert(l.amount()? * Decimal::from(12) / Decimal::from(l.every()), l.currency, ccy))).sum::<Decimal>().round_dp(2);
+            let n = bills.borrow().iter().filter(|l| l.amount().is_some()).count();
+            bills_total.set_label(&if n == 0 {
+                "No big bills yet — add any you have, or skip this step.".to_string()
+            } else {
+                format!("{n} bill{} · {} a year · set aside {} a month", if n == 1 { "" } else { "s" }, money(yearly), money(aside))
+            });
             let deducted: Vec<String> = p.deductions.iter().map(|d| format!("{} {}", if d.name.is_empty() { "deduction" } else { &d.name }, money(p.deduction(d)))).collect();
             take_home.set_label(&format!(
                 "Gross {} a payday = {} a month.\nTake-home {} a payday{} → {} a month ({} × {} ÷ 12)",
@@ -1388,10 +1572,11 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
                 money(fixed),
                 money(flexible)
             ));
-            let save = p.monthly_savings(total);
+            let save = p.monthly_savings(total) - aside;
             let mut lines = vec![
                 format!("  Take-home per month        {:>14}", money(p.monthly_income())),
                 format!("− Spending budget            {:>14}", money(total)),
+                format!("− Big yearly bills set aside {:>14}", money(aside)),
                 format!("− Loan payments              {:>14}", money(p.loan_payments)),
                 format!("= Left to save               {:>14}", money(save)),
             ];
@@ -1403,13 +1588,15 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
                     lines.push(format!("\nOn track, with {} a month to spare.", money(save - p.savings_goal)));
                 } else {
                     lines.push(format!("\nShort by {} a month.", money(p.savings_goal - save)));
-                    match p.flexible_factor(fixed, flexible) {
+                    // the set-aside is as fixed as rent: only variable spending is trimmed
+                    match p.flexible_factor(fixed + aside, flexible) {
                         Some(k) => {
                             lines.push(format!(
-                                "Solve take-home − loans − fixed − k × variable = goal:\nk = ({} − {} − {} − {}) ÷ {} = {:.3}\nTrim every variable category by {}% ({} → {}).",
+                                "Solve take-home − loans − fixed − big bills − k × variable = goal:\nk = ({} − {} − {} − {} − {}) ÷ {} = {:.3}\nTrim every variable category by {}% ({} → {}).",
                                 money(p.monthly_income()),
                                 money(p.loan_payments),
                                 money(fixed),
+                                money(aside),
                                 money(p.savings_goal),
                                 money(flexible),
                                 k,
@@ -1471,6 +1658,68 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
             recalc();
         })
     };
+    // yearly-bill rows: what's saved, then what the statements show, then the usual big bills
+    type AddBill = Rc<dyn Fn(BillLine, &str)>;
+    // the amount and both drop-downs line up from row to row
+    let widths = [gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal), gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal), gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal)];
+    let add_bill: AddBill = {
+        let (bills, bill_list, recalc) = (bills.clone(), bill_list.clone(), recalc.clone());
+        Rc::new(move |l: BillLine, hint: &str| {
+            let r = adw::ActionRow::builder().title(glib::markup_escape_text(&l.title)).subtitle(glib::markup_escape_text(hint)).build();
+            if let Some(e) = &l.name {
+                e.set_hexpand(true);
+                e.set_valign(gtk::Align::Center);
+                r.add_prefix(e);
+            }
+            for (w, g) in [l.amount.upcast_ref::<gtk::Widget>(), l.every.upcast_ref(), l.month.upcast_ref()].into_iter().zip(&widths) {
+                g.add_widget(w);
+                r.add_suffix(w);
+            }
+            for e in std::iter::once(&l.amount).chain(l.name.as_ref()) {
+                let rc = recalc.clone();
+                e.connect_changed(move |_| rc());
+            }
+            for d in [&l.every, &l.month] {
+                let rc = recalc.clone();
+                d.connect_selected_notify(move |_| rc());
+            }
+            bill_list.append(&r);
+            bills.borrow_mut().push(l);
+            recalc();
+        })
+    };
+    let months: [&str; 12] = ["Due Jan", "Due Feb", "Due Mar", "Due Apr", "Due May", "Due Jun", "Due Jul", "Due Aug", "Due Sep", "Due Oct", "Due Nov", "Due Dec"];
+    let line = move |id: i64, stem: &str, cur: Currency, title: &str, typed: bool, amount: Decimal, every: i32, due: Option<NaiveDate>, month: u32| {
+        let a = gtk::Entry::builder().placeholder_text(cur.symbol()).width_chars(9).max_width_chars(9).hexpand(false).valign(gtk::Align::Center).input_purpose(gtk::InputPurpose::Number).text(amount_text(amount)).tooltip_text("What it costs each time").build();
+        let ev = gtk::DropDown::builder().model(&gtk::StringList::new(&EVERY.map(|e| e.1))).valign(gtk::Align::Center).tooltip_text("How often it comes").build();
+        ev.set_selected(every_index(every));
+        let mo = gtk::DropDown::builder().model(&gtk::StringList::new(&months)).valign(gtk::Align::Center).tooltip_text("The month it's next due").build();
+        mo.set_selected(month.clamp(1, 12) - 1);
+        let name = typed.then(|| gtk::Entry::builder().placeholder_text("What is it?").text(title).build());
+        BillLine { id, stem: stem.to_string(), currency: cur, title: title.to_string(), name, amount: a, every: ev, month: mo, due }
+    };
+    let next_month = add_months(month_start(today()), 1).month();
+    for f in &s.funds {
+        let d = f.due(today());
+        add_bill(line(f.id, &f.stem, f.currency, &f.name, false, f.amount, f.every_months, Some(d), d.month()), &format!("Already planned · {}", fmt_money(f.amount, f.currency)));
+    }
+    let ideas: Vec<core::FundIdea> = core::fund_ideas(&s.rows, ccy, &s.fx, today()).into_iter().filter(|i| !s.funds.iter().any(|f| f.stem == i.stem)).collect();
+    for i in &ideas {
+        add_bill(
+            line(0, &i.stem, ccy, &i.payee, false, i.amount.round_dp(0), i.every_months, Some(i.next_due), i.next_due.month()),
+            &format!("Seen in your statements: {} {}", money(i.amount), if i.every_months == 12 { "once a year" } else { "every 3 months" }),
+        );
+    }
+    let taken: Vec<String> = s.funds.iter().map(|f| f.name.to_lowercase()).chain(ideas.iter().map(|i| i.payee.to_lowercase())).collect();
+    for (name, hint, every, month) in BIG_BILLS {
+        if !taken.contains(&name.to_lowercase()) {
+            add_bill(line(0, "", ccy, name, false, Decimal::ZERO, every, None, month.unwrap_or(next_month)), hint);
+        }
+    }
+    {
+        let add = add_bill.clone();
+        add_bill_btn.connect_clicked(move |_| add(line(0, "", ccy, "", true, Decimal::ZERO, 12, None, next_month), ""));
+    }
     for d in &start.deductions {
         add_ded(&d.name, &if d.percent { format!("{}%", d.amount.normalize()) } else { amount_text(d.amount) });
     }
@@ -1537,7 +1786,7 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
 
     // ── the frame: Back / Next / Save
     let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::SlideLeftRight).vexpand(true).build();
-    let pages = [p1, p2, p3, p4];
+    let pages = [p1, p2, p_y, p3, p4];
     for (i, p) in pages.iter().enumerate() {
         stack.add_named(p, Some(&i.to_string()));
     }
@@ -1557,8 +1806,8 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
             step.set(i);
             stack.set_visible_child_name(&i.to_string());
             back.set_sensitive(i > 0);
-            fwd.set_label(if i == 3 { "Save Budget" } else { "Next" });
-            dlg.set_title(&format!("Set Up Your Budget · {} of 4", i + 1));
+            fwd.set_label(if i == 4 { "Save Budget" } else { "Next" });
+            dlg.set_title(&format!("Set Up Your Budget · {} of 5", i + 1));
         }
     };
     show(0);
@@ -1573,13 +1822,26 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
             if step.get() == 0 && !next_pay.text().trim().is_empty() && parse_date(&next_pay.text()).is_none() {
                 return a.toast("Type the payday like 31 Oct 2026");
             }
-            if step.get() < 3 {
+            if step.get() < 4 {
                 return show(step.get() + 1);
             }
             let (p, budgets) = read();
             let _ = a.db.save_plan(&s.scope, &p);
             for (id, v) in budgets {
                 let _ = a.db.set_budget(&s.scope, id, v.map(|v| (v, ccy)));
+            }
+            for l in bills.borrow().iter() {
+                match l.amount() {
+                    Some(v) => {
+                        let f = Fund { id: l.id, name: l.name(), amount: v, currency: l.currency, every_months: l.every(), next_due: l.next_due(), stem: l.stem.clone() };
+                        let _ = a.db.save_fund(&s.scope, &f);
+                    }
+                    // emptied: you don't have it any more
+                    None if l.id != 0 => {
+                        let _ = a.db.delete_fund(l.id);
+                    }
+                    None => {}
+                }
             }
             a.toast("Budget saved");
             dlg.close();

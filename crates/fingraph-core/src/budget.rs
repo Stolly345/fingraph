@@ -570,6 +570,14 @@ impl Db {
     }
 }
 
+/// The 1st of `month` (1–12) the next time it comes round: this year if it's this month or later,
+/// otherwise next year. For a bill picked by the month it's due.
+pub fn due_in_month(month: u32, today: NaiveDate) -> NaiveDate {
+    use chrono::Datelike;
+    let year = if month >= today.month() { today.year() } else { today.year() + 1 };
+    NaiveDate::from_ymd_opt(year, month.clamp(1, 12), 1).unwrap_or(today)
+}
+
 /// A quarterly or yearly bill seen in the statements, offered as a fund.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FundIdea {
@@ -879,6 +887,14 @@ mod tests {
         assert!(db.moves(sc, m(9)).unwrap().is_empty());
         db.set_rollover(sc, g, None).unwrap();
         assert!(db.rollovers(sc).is_empty());
+    }
+
+    #[test]
+    fn a_bill_due_in_a_month_is_the_next_one() {
+        let d = |y, m, dd| NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        assert_eq!(due_in_month(10, d(2026, 10, 28)), d(2026, 10, 1)); // this month still counts
+        assert_eq!(due_in_month(12, d(2026, 10, 28)), d(2026, 12, 1));
+        assert_eq!(due_in_month(3, d(2026, 10, 28)), d(2027, 3, 1));
     }
 
     #[test]

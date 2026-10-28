@@ -934,12 +934,33 @@ fn budget(g: &G, app: &Rc<App>) {
         l.append(&icon_row("starred-symbolic", "Your pay", &format!("{} {} from {} — the setup starts from this", fmt_money(p.amount, p.currency), p.cycle.label().to_lowercase(), p.payee)));
         g.body.append(&l);
     }
-    g.body.append(&heading("The setup takes four short steps"));
+    // the big bills a normal month never shows: what's planned, else what the statements suggest
+    let ideas = fingraph_core::budget::fund_ideas(&s.rows, ccy, &s.fx, today());
+    if !s.funds.is_empty() || !ideas.is_empty() {
+        let l = list();
+        let (title, sub) = if s.funds.is_empty() {
+            (
+                format!("{} big bill{} found in your statements", ideas.len(), if ideas.len() == 1 { "" } else { "s" }),
+                format!("{} — step 3 of the setup starts from these.", ideas.iter().take(4).map(|i| i.payee.clone()).collect::<Vec<_>>().join(", ")),
+            )
+        } else {
+            let a_month: Decimal = s.funds.iter().map(|f| s.fx.convert(f.monthly(), f.currency, ccy)).sum();
+            (format!("{} big yearly bill{} planned", s.funds.len(), if s.funds.len() == 1 { "" } else { "s" }), format!("Setting aside {} a month for them.", money(a_month)))
+        };
+        l.append(&icon_row("x-office-calendar-symbolic", &title, &sub));
+        g.body.append(&l);
+    }
+    g.body.append(&heading("The setup takes five short steps"));
     let l = list();
     l.append(&numbered(1, "Your pay", "How often you're paid, the gross amount, and what comes off it (pension, health insurance)."));
     l.append(&numbered(2, "Other money in and out", "Rent you receive, side work, and loan or car payments."));
-    l.append(&numbered(3, "Your spending", "Each category, starting from what you usually spend; change any of them."));
-    l.append(&numbered(4, "Your savings goal", "An amount or a percentage. If the numbers don't reach it, FinGraph works out how much to trim from the flexible categories."));
+    l.append(&numbered(
+        3,
+        "Big yearly bills",
+        "Car and home insurance, HOA fees, licences, school terms: what each costs and the month it's due. FinGraph sets a share aside every month, so the expensive months are already paid for.",
+    ));
+    l.append(&numbered(4, "Your spending", "Each category, starting from what you usually spend; change any of them."));
+    l.append(&numbered(5, "Your savings goal", "An amount or a percentage. If the numbers don't reach it, FinGraph works out how much to trim from the flexible categories."));
     g.body.append(&l);
     let has = !s.budgets.is_empty();
     let go = gtk::Button::builder().label(if has { "Change My Budget…" } else { "Set Up My Budget…" }).halign(gtk::Align::Start).css_classes(["suggested-action", "pill"]).build();
@@ -959,7 +980,7 @@ fn budget(g: &G, app: &Rc<App>) {
         });
     }
     g.body.append(&go);
-    g.body.append(&dim("Later, on the Budget page: let leftovers roll into next month, move money to cover an overspend, and set aside for yearly bills like insurance."));
+    g.body.append(&dim("Later, on the Budget page: let leftovers roll into next month, and move money to cover an overspend. Your big bills show on Overview before they're due."));
     next_to(g, if has { "Continue" } else { "Skip for Now" }, None);
 }
 

@@ -84,6 +84,9 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     body.append(&owed_box);
     let budget_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
     body.append(&budget_box);
+    // the big once-a-year bills, so the expensive months are planned for
+    let bills_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
+    body.append(&bills_box);
 
     // charts
     let monthly = Chart::new(240);
@@ -179,6 +182,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             // KPIs
             crate::owed::fill(&a, &owed_box);
             crate::budget::fill_overview(&a, &budget_box);
+            crate::budget::fill_big_bills(&a, &bills_box);
             let k = insights::kpis(&rows, &docs, from, to, ccy, &fx, today());
             k_net.value.set_label(&money(k.net));
             k_net.value.set_css_classes(&["value", "tnum", if k.net.is_sign_negative() { "amount-out" } else { "amount-in" }]);

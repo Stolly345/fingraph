@@ -22,7 +22,7 @@ never a real ledger.*
 ```sh
 sudo apt install poppler-utils tesseract-ocr libgtk-4-dev libadwaita-1-dev
 cargo deb -p fingraph
-sudo apt install ./target/debian/fingraph_0.2.6-1_amd64.deb
+sudo apt install ./target/debian/fingraph_0.2.7-1_amd64.deb
 ```
 
 Or run it from source with `cargo run -p fingraph --release`.
@@ -43,7 +43,7 @@ The first time it opens, **Getting Started** walks you through setup. After a we
 3. Put them in one folder, which FinGraph watches.
 4. Let FinGraph read them.
 5. Sort what it didn't recognise.
-6. Set up a budget.
+6. Set up a budget, including your big yearly bills.
 7. Learn the monthly routine.
 
 The guide stays in the main menu and remembers where you stopped. To explore without your own
@@ -67,7 +67,7 @@ personal and a property-business workspace, across all five banks, in KYD and US
 
 | Page | Ctrl+ | What it shows |
 |---|---|---|
-| Overview | 1 | Five headline numbers and six charts; a **Review** banner while merchants wait for an answer |
+| Overview | 1 | Five headline numbers, **Big Bills Coming Up** and **Big Bills Over the Next 12 Months**, and six charts; a **Review** banner while merchants wait for an answer |
 | Net Worth | 2 | What you own and owe over time, goals, and debt payoff |
 | Budget | 3 | This month against your plan, rollovers, non-monthly bills, watchlists, and where the money went |
 | Outlook | 4 | Balances until the next statement, safe to spend, the month's bills, and Age of Money |
@@ -154,9 +154,13 @@ The steps are tried in this order:
 - **Setting it up:**
   - **Monthly amounts** per category, filled from what you usually spend (the median of the last
     six months).
-  - **Setup wizard:** pay cycle, gross pay and deductions, other income, loan payments and a savings
-    goal. It does the arithmetic, including how much flexible spending must shrink to reach the
-    goal.
+  - **Setup wizard (5 steps):** pay cycle, gross pay and deductions; other income and loan
+    payments; **big yearly bills**; spending; a savings goal. It does the arithmetic, including how
+    much flexible spending must shrink to reach the goal.
+  - **Big yearly bills:** the setup asks about the costs a normal month never shows. These include car and
+    home insurance, HOA or strata fees, vehicle licence, school terms, memberships, travel, and
+    Christmas. Bills seen in your statements are filled in. Each one gets a monthly set-aside, which
+    comes out of what you can save.
 - **During the month:**
   - **Alerts** when a category is over budget, or 85% used early in the month.
   - **Fixed vs variable expenses**, and a **12-month savings projection**, both on budget and on
@@ -164,7 +168,7 @@ The steps are tried in this order:
 - **Changing it:**
   - **Rollovers:** leftovers carry over to the next month.
   - **Money moves** cover an overspend.
-  - **Set-asides** for yearly and quarterly bills.
+  - **Set-asides** for yearly and quarterly bills (Budget → Non-Monthly Bills).
   - **Watchlists** cap a merchant (Amazon CI$ 150).
 
 ![Budget: this month against the plan, and fixed vs variable expenses](docs/screenshots/budget.png)
@@ -271,7 +275,7 @@ back up on their own.
 ## Tests
 
 ```sh
-cargo test --workspace                                # 69 tests: banks and layouts, OCR, import rules, ledger, rules, directory, budget, insights, exports
+cargo test --workspace                                # 70 tests: banks and layouts, OCR, import rules, ledger, rules, directory, budget, insights, exports
 cargo test -p fingraph-core -- --ignored real         # also scans your own statements in ~/.local/share/fingraph/documents
 cargo test -p fingraph-core -- --ignored private      # layout samples in tests/fixtures/private/
 cargo clippy --workspace --all-targets
