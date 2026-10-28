@@ -493,14 +493,28 @@ Fixes found while testing the guide on the owner's real statements:
 ## 10. Packaging & operations
 
 - `cargo deb -p fingraph` → `target/debian/fingraph_0.2.6-1_amd64.deb` (binary, desktop entry with
-  PDF "Open With", icon; depends on poppler-utils, GTK 4, libadwaita).
-- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.6-1_amd64.deb`.
+  PDF "Open With", icon, README; depends on poppler-utils, GTK 4, libadwaita; recommends
+  tesseract-ocr for picture-only statements).
+- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.6-1_amd64.deb`. The
+  version is bumped for every change to the app: apt skips a same-version `.deb` unless given
+  `--reinstall`, and once that made a fix look missing. A docs-only rebuild keeps the version and
+  is installed with `--reinstall`.
+- Releases are tagged on master (annotated `v0.1.0` … `v0.2.6`). `v0.1.0` marks the last commit
+  before 0.2.0, and `v0.2.2` shares `0d049d5` with `v0.2.3` because the two were committed together.
+  The repo has no remote, so tags are local.
 - Data: `~/.local/share/fingraph/ledger.db` (+ `statements/`, `backups/`). Hand backups made during
   development sit beside the ledger as `ledger-backup-2026-10-27-*.db`.
 - Terminal: `cargo run -p fingraph-core --example ledger -- reset|rescan|reapply|cards`.
 - Debug builds only: `FINGRAPH_SHOT=out.png` (with `FINGRAPH_DB`, `FINGRAPH_DEMO`, `FINGRAPH_VIEW`,
   `FINGRAPH_DIALOG` (`triage|onboarding|report|preferences|budget|close|split:<id>|owed:<id>|tx:<id>`), `FINGRAPH_PAGE`, `FINGRAPH_SHOT_STEPS`, `FINGRAPH_SCROLL`, `FINGRAPH_CLICK=label,label…` clicks buttons in turn) renders the window to
-  a PNG for visual checks without a person at the screen.
+  a PNG for visual checks without a person at the screen. The hooks can't hover or open menus and
+  popovers.
+- **README screenshots** (`docs/screenshots/`: overview, guide, statements, review, budget, outlook,
+  networth, transactions, statement) come only from a fresh scratch ledger
+  (`FINGRAPH_DB=<scratch> FINGRAPH_DEMO=1`), never the owner's: watching is off in a new ledger, so
+  nothing from the watched folder can leak in. Budget is shot after `FINGRAPH_CLICK="Fill From My
+  Spending"`. Check the scratch ledger holds only the demo workspaces and accounts, look at every
+  image, then delete the ledger. The images stay out of the `.deb`.
 
 ---
 
@@ -563,6 +577,7 @@ Fixes found while testing the guide on the owner's real statements:
 | Snappier (0.2.2) | Transactions 1.9 s → 0.1 s per refresh (cell buttons instead of a DropDown/EditableLabel per row; only changed rows are replaced); refreshes coalesce to one per frame (start-up did 5); rows read once per refresh; sidebar 75 → 30 ms; Subscriptions 109 → 7 ms; Combined Statement skips rebuilding when nothing changed; index on `transactions(document_id)` (schema v7); `synchronous=NORMAL` under WAL |
 | Sidebar and ⓘ (0.2.5) | Owner asked for To Review to disappear when empty — it became a banner on Overview instead; Setup pages moved to the main menu; an ⓘ explaining how to read each card on Overview, Budget, Outlook and Net Worth. "Top Merchants · Pareto" renamed "Where Most of Your Money Goes". Long card titles now wrap: the ⓘ had pushed Overview wider than the window |
 | Sidebar order (0.2.6) | Owner's order: Overview, Net Worth, Budget, Outlook, Transactions, Combined Statement, Statements, What Changed, then Subscriptions (not named, put last); Ctrl+1–9 follow it. Also in this round: Reports & Export moved from the sidebar to the main menu, and Load Demo Data left the menu (it stays on the empty Overview and in the guide). Versions now bump on every `.deb`: a same-version rebuild was once installed over without `--reinstall` and the change looked missing |
+| README screenshots (0.2.6, docs only) | Owner asked for pictures of the app in the README with none of their data: nine pages shot from the demo in a scratch ledger (see §10); past releases tagged at the owner's request |
 
 ---
 
@@ -572,8 +587,8 @@ Fixes found while testing the guide on the owner's real statements:
   every statement from them is held for review on import.
 - Ledgers from before 0.2.4 may hold rows counted twice where one statement was imported from two
   files (the owner's: 7 Amex USD rows, US$919.61); Rescan All removes them. Nothing is deleted on upgrade.
-- The import questions (new account, which account, same period) are tested in the core, not by
-  screenshot. CNB is checked only against an
+- The import questions (new account, which account, same period), the ⓘ popovers and the main menu
+  are tested in the core or by hand, not by screenshot. CNB is checked only against an
   OCR'd savings statement: a CNB text PDF, a chequing account or a CNB card may still differ.
 - OCR reads the first 20 pages only, misses the bold `ACCOUNT #: SV` line next to a redaction box
   (the account shows as Checking), and can misspell names.
@@ -587,7 +602,7 @@ Fixes found while testing the guide on the owner's real statements:
 - The directory is read-only in the app (Business Directory page); additions are rules or edits to
   `merchants.tsv` plus a rebuild.
 - The Python prototype's ledger was never migrated (statements re-imported instead).
-- Not committed to a remote; no CI.
+- Not pushed to a remote (tags are local too); no CI.
 - 0.2.0 limits: rollovers walk back at most 24 months; the debt minimum is one rule (3%, ≥ CI$ 25)
   for every card and loan, so a loan's payoff is the slowest case; the forecast spreads everything
   irregular (including card payments that vary) evenly per day; Age of Money grows without bound
