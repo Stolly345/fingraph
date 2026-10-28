@@ -3,7 +3,7 @@
 use adw::prelude::*;
 use chrono::{Datelike, Duration, NaiveDate};
 use fingraph_core::Decimal;
-use fingraph_core::db::{DocumentRow, TxFilter};
+use fingraph_core::db::DocumentRow;
 use fingraph_core::insights::{self};
 use rust_decimal::prelude::ToPrimitive;
 use std::cell::RefCell;
@@ -112,7 +112,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
             let ids = a.entity_ids();
-            let rows = a.db.transactions(&TxFilter { entity_ids: ids.clone(), split_lines: true, ..Default::default() }).unwrap_or_default();
+            let rows = a.all_rows();
             if rows.is_empty() {
                 stack.set_visible_child_name("empty");
                 return;

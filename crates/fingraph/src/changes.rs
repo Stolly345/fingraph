@@ -22,7 +22,7 @@ pub fn counted_rows(app: &App, rows: Vec<TxRow>) -> Vec<TxRow> {
 
 /// The insights for what's on screen (workspaces, range, currency), minus kinds switched off.
 pub fn current(app: &App) -> Vec<Insight> {
-    let rows = counted_rows(app, app.db.transactions(&fingraph_core::db::TxFilter { entity_ids: app.entity_ids(), split_lines: true, ..Default::default() }).unwrap_or_default());
+    let rows = counted_rows(app, app.all_rows());
     let prefs = app.db.prefs();
     let (from, to) = app.range();
     let hidden: Vec<String> = app.db.setting("hidden_insights").unwrap_or_default().split(',').map(str::to_string).collect();

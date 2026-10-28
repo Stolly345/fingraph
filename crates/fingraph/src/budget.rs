@@ -7,7 +7,7 @@ use adw::prelude::*;
 use chrono::{Datelike, NaiveDate};
 use fingraph_core::Decimal;
 use fingraph_core::budget::{self as core, Alert, Deduction, Envelope, Fund, PayCycle, Plan, scope, suggest};
-use fingraph_core::db::{Category, TxFilter, TxRow};
+use fingraph_core::db::{Category, TxRow};
 use fingraph_core::insights::{add_months, by_category, month_start};
 use fingraph_core::money::{Currency, Fx, fmt_money, parse_user};
 use gtk::glib;
@@ -60,7 +60,7 @@ pub(crate) fn snap(app: &App) -> Snap {
     let ccy = app.display();
     let fx = app.db.fx().unwrap_or_default();
     let sc = scope(&app.entity_ids());
-    let rows = crate::changes::counted_rows(app, app.db.transactions(&TxFilter { entity_ids: app.entity_ids(), split_lines: true, ..Default::default() }).unwrap_or_default());
+    let rows = crate::changes::counted_rows(app, app.all_rows());
     let cats = app.categories().into_iter().filter(|c| c.parent_id.is_none() && c.kind == fingraph_core::db::CategoryKind::Expense).collect();
     let budgets = app.db.budgets(&sc).unwrap_or_default().into_iter().map(|(c, (v, k))| (c, fx.convert(v, k, ccy))).collect();
     let plan = app.db.plan(&sc).map(|p| plan_in(p, ccy, &fx));
@@ -118,6 +118,7 @@ pub fn alerts(app: &App) -> Vec<(String, Decimal, Decimal, Alert)> {
     let m = month_start(today());
     let env = envs(app, &s, m);
     let rolls = app.db.rollovers(&s.scope);
+    let done = elapsed(m, data_through(app));
     let mut out: Vec<_> = s
         .cats
         .iter()
@@ -126,7 +127,7 @@ pub fn alerts(app: &App) -> Vec<(String, Decimal, Decimal, Alert)> {
             if e.budget.is_zero() && !rolls.contains_key(&c.id) {
                 return None;
             }
-            core::alert(e.spent, e.funded(), elapsed(m, data_through(app))).map(|a| (c.name.clone(), e.spent, e.funded(), a))
+            core::alert(e.spent, e.funded(), done).map(|a| (c.name.clone(), e.spent, e.funded(), a))
         })
         .collect();
     // watchlists: a merchant over its monthly limit

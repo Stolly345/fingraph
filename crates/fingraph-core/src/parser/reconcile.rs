@@ -50,7 +50,11 @@ fn verify(s: &mut Section) -> Vec<Gap> {
     let mut segments = Vec::new();
     let mut gaps = Vec::new();
     let mut prev: Option<(usize, Decimal, Option<Key>)> = opening.map(|o| (0, o, None));
-    for &(pos, bal, at) in &pts {
+    let mut misread: Option<usize> = None;
+    for (k, &(pos, bal, at)) in pts.iter().enumerate() {
+        if misread == Some(k) {
+            continue;
+        }
         let Some((ppos, pbal, pkey)) = prev else {
             prev = Some((pos, bal, Some(at)));
             continue;
@@ -74,6 +78,26 @@ fn verify(s: &mut Section) -> Vec<Gap> {
                 s.report.sign_heals.push(format!("{} {}: sign set from the balance change ({})", t.posted, t.description, t.stmt_amount));
                 got = expected;
             }
+        }
+        // one balance off while its neighbours agree with every row between them: that balance was
+        // misprinted or (OCR) misread — skip it and check the stretch to the next one instead
+        if got != expected
+            && let Some(&(npos, nbal, _)) = pts.get(k + 1)
+            && npos >= pos
+            && s.transactions[ppos..npos].iter().map(|t| t.stmt_amount).sum::<Decimal>() == nbal - pbal
+        {
+            let read = pos.checked_sub(1).map(|i| &s.transactions[i]);
+            s.report.misread_balances.push(format!(
+                "{}: balance read as {} but the rows around it say {}",
+                read.map_or(String::new(), |t| format!("{} {}", t.posted, t.description)),
+                bal,
+                pbal + got
+            ));
+            misread = Some(k + 1);
+            let expected = nbal - pbal;
+            segments.push(SegmentCheck { from_tx: ppos.checked_sub(1), to_tx: npos.checked_sub(1), expected, got: expected, ok: true });
+            prev = Some((npos, nbal, Some(pts[k + 1].2)));
+            continue;
         }
         let ok = got == expected;
         segments.push(SegmentCheck { from_tx: ppos.checked_sub(1), to_tx: pos.checked_sub(1), expected, got, ok });

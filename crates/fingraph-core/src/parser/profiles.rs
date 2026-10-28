@@ -118,10 +118,17 @@ pub fn builtins() -> Vec<BankProfile> {
             display_name: "Cayman National Bank Ltd.".into(),
             short_name: "CNB".into(),
             routing_identifiers: s(&["Cayman National", "Cayman National Bank", "CNB", "CNBCKYKY", "caymannational.com"]),
-            default_date_format: "DD/MM/YYYY".into(),
-            column_layout_kind: LayoutKind::DebitCreditWithBalance,
-            header_anchors: HeaderAnchors { description: s(&["particulars", "description/particulars"]), ..Default::default() },
-            noise_patterns: s(&[r"(?i)cayman national bank ltd\. is licensed", r"(?i)please examine this statement"]),
+            // checked against a real statement (Feb 2026): `02/02` dates, one Amount column with a trailing
+            // minus for money out, the date on a description's first line and the amount on its last
+            default_date_format: "DD/MM".into(),
+            column_layout_kind: LayoutKind::SignedSingleAmount,
+            header_anchors: HeaderAnchors { description: s(&["description", "particulars"]), reference: s(&["cheque #"]), ..Default::default() },
+            noise_patterns: s(&[
+                r"(?i)cayman national bank ltd\. is licensed",
+                r"(?i)please examine this statement",
+                r"(?i)^\W*customer\s+copy\W*$",
+                r"(?i)celebrating half a century",
+            ]),
             fx_note_regex: GENERIC_FX.into(),
             is_builtin: true,
         },

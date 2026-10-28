@@ -229,12 +229,22 @@ pub fn parse_user(text: &str) -> Option<Decimal> {
     let neg = t.starts_with('-') || (t.starts_with('(') && t.ends_with(')'));
     let num: String = t.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
     let d = Decimal::from_str(&num).ok()?;
+    // nothing anyone types is near a trillion; bigger would overflow Decimal once multiplied
+    if d > Decimal::from(1_000_000_000_000i64) {
+        return None;
+    }
     Some(if neg { -d } else { d })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_amounts_are_bounded() {
+        assert_eq!(parse_user("1,234.50"), Some(Decimal::new(123450, 2)));
+        assert_eq!(parse_user("99999999999999999999"), None);
+    }
 
     fn d(s: &str) -> Decimal {
         s.parse().unwrap()

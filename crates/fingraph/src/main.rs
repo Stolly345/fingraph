@@ -26,7 +26,7 @@ mod wizard;
 
 use adw::prelude::*;
 use chrono::{Datelike, Local, NaiveDate};
-use fingraph_core::db::{Category, Db, Entity, TxFilter};
+use fingraph_core::db::{Category, Db, Entity, TxFilter, TxRow};
 use fingraph_core::insights::{self, Range};
 use fingraph_core::money::fmt_money;
 use fingraph_core::{Currency, Decimal};
@@ -72,6 +72,11 @@ pub struct App {
     accounts_key: RefCell<String>,
     /// True while the sidebar rebuilds itself: its selection changes aren't the user's.
     quiet: Cell<bool>,
+    /// A refresh is queued for just before the next frame.
+    refresh_queued: Cell<bool>,
+    /// Every row of the workspaces on screen, kept only while a refresh runs (several parts want it).
+    rows_cache: RefCell<Option<(Vec<i64>, Vec<TxRow>)>>,
+    refreshing: Cell<bool>,
     kyd_btn: gtk::ToggleButton,
     usd_btn: gtk::ToggleButton,
     /// The watched folder (Preferences → Import), while watching.
@@ -179,6 +184,9 @@ impl App {
             badges: RefCell::new(HashMap::new()),
             accounts_key: RefCell::new(String::new()),
             quiet: Cell::new(false),
+            refresh_queued: Cell::new(false),
+            rows_cache: RefCell::new(None),
+            refreshing: Cell::new(false),
             kyd_btn,
             usd_btn: usd_btn.clone(),
             watch: RefCell::new(None),
@@ -659,7 +667,7 @@ impl App {
     /// Counts beside the pages, and one row per account with its latest verified balance.
     pub fn update_sidebar(self: &Rc<Self>) {
         let ids = self.entity_ids();
-        let rows = self.db.transactions(&TxFilter { entity_ids: ids.clone(), split_lines: true, ..Default::default() }).unwrap_or_default();
+        let rows = self.all_rows();
         let docs = self.db.documents(&ids).unwrap_or_default();
         let fx = self.db.fx().unwrap_or_default();
         let set = |k: &str, text: String, warn: bool| {
@@ -672,7 +680,7 @@ impl App {
                 }
             }
         };
-        let review = self.db.triage(&ids).map(|g| g.len()).unwrap_or(0);
+        let review = self.db.triage_count(&ids).unwrap_or(0);
         set("review", if review > 0 { review.to_string() } else { String::new() }, false);
         let changes = changes::count(self);
         set("changes", if changes > 0 { changes.to_string() } else { String::new() }, false);
@@ -724,15 +732,52 @@ impl App {
         self.quiet.set(false);
     }
 
-    /// Re-read the ledger into the visible view and the header.
+    /// Re-read the ledger into the visible view and the header, once, just before the next frame:
+    /// a burst of changes (start-up fills three dropdowns, an edit also re-picks a page) costs one.
     pub fn refresh(self: &Rc<Self>) {
-        self.update_sidebar();
+        if self.refresh_queued.replace(true) {
+            return;
+        }
+        let w = Rc::downgrade(self);
+        glib::idle_add_local_full(glib::Priority::HIGH_IDLE, move || {
+            if let Some(a) = w.upgrade() {
+                a.refresh_queued.set(false);
+                a.refresh_now();
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    /// Every transaction (split lines apart) of the workspaces on screen. Read once per refresh.
+    pub fn all_rows(&self) -> Vec<TxRow> {
+        let ids = self.entity_ids();
+        if let Some((k, rows)) = &*self.rows_cache.borrow()
+            && *k == ids
+        {
+            return rows.clone();
+        }
+        let rows = self.db.transactions(&TxFilter { entity_ids: ids.clone(), split_lines: true, ..Default::default() }).unwrap_or_default();
+        if self.refreshing.get() {
+            *self.rows_cache.borrow_mut() = Some((ids, rows.clone()));
+        }
+        rows
+    }
+
+    pub fn refresh_now(self: &Rc<Self>) {
+        self.refreshing.set(true);
+        *self.rows_cache.borrow_mut() = None;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.update_sidebar()));
         self.content_title.set_subtitle(&if self.range_dd.is_visible() { self.range_label() } else { String::new() });
         let visible = self.stack.visible_child_name().unwrap_or_default();
         let f = self.views.borrow().iter().find(|(n, _)| *n == visible.as_str()).map(|v| v.1.clone());
         if let Some(f) = f {
-            f();
+            // a bug in one page shouldn't take the app down: a panic in a GTK callback aborts
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f())).is_err() {
+                self.toast("Something went wrong showing this page. Details are in crash.log in the data folder.");
+            }
         }
+        self.refreshing.set(false);
+        *self.rows_cache.borrow_mut() = None;
     }
 
     pub fn show_transactions(self: &Rc<Self>, ids: Vec<i64>) {
@@ -890,6 +935,7 @@ fn css() {
          .guide-num { min-width: 24px; min-height: 24px; border-radius: 99px; font-weight: 700; font-size: 0.9em; background: alpha(@window_fg_color, 0.10); }
          .guide-num.done { background: alpha(@success_color, 0.20); color: @success_color; }
          .guide-card { padding: 18px; }
+         button.cell { padding: 2px 6px; min-height: 0; font-weight: normal; }
          .bank-card { padding: 12px; min-width: 150px; }",
     );
     if let Some(d) = gdk::Display::default() {
@@ -973,7 +1019,7 @@ fn debug_shot(app: &Rc<App>) {
         if let Some(label) = std::env::var("FINGRAPH_CLICK").ok().and_then(|l| l.split(',').nth(clicked.get()).map(str::to_string)) {
             clicked.set(clicked.get() + 1);
             fn find_button(w: &gtk::Widget, label: &str) -> Option<gtk::Button> {
-                if let Some(b) = w.downcast_ref::<gtk::Button>().filter(|b| b.is_mapped() && b.label().as_deref() == Some(label)) {
+                if let Some(b) = w.downcast_ref::<gtk::Button>().filter(|b| b.is_mapped() && (b.label().as_deref() == Some(label) || b.child().and_downcast::<gtk::Label>().is_some_and(|l| l.label() == label))) {
                     return Some(b.clone());
                 }
                 let mut c = w.first_child();
@@ -1024,6 +1070,17 @@ fn debug_shot(app: &Rc<App>) {
 }
 
 fn main() -> glib::ExitCode {
+    // keep a record of any crash: the window just closes (or shows "Not Responding") otherwise
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let log = fingraph_core::data_dir().join("crash.log");
+        let entry = format!("── {} FinGraph {}\n{info}\n{}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), env!("CARGO_PKG_VERSION"), std::backtrace::Backtrace::force_capture());
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+            use std::io::Write;
+            let _ = f.write_all(entry.as_bytes());
+        }
+        default_hook(info);
+    }));
     let mut flags = gio::ApplicationFlags::HANDLES_OPEN;
     if cfg!(debug_assertions) && std::env::var_os("FINGRAPH_SHOT").is_some() {
         flags |= gio::ApplicationFlags::NON_UNIQUE;

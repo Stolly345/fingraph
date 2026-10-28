@@ -48,7 +48,7 @@ impl Token {
 }
 
 /// Every word of a PDF with its box, via poppler's `pdftotext -bbox` (font names aren't exposed there,
-/// so geometry does all the work). Image-only PDFs come back empty and are reported as such.
+/// so geometry does all the work). Image-only PDFs come back empty: see [`ocr_tokens`].
 pub fn tokens_from_pdf(path: &Path) -> Result<Vec<Token>> {
     let out = Command::new("pdftotext")
         .arg("-bbox")
@@ -59,11 +59,98 @@ pub fn tokens_from_pdf(path: &Path) -> Result<Vec<Token>> {
     if !out.status.success() {
         return Err(Error(format!("pdftotext failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
     }
-    let tokens = parse_bbox(&String::from_utf8_lossy(&out.stdout));
-    if tokens.is_empty() {
-        return Err(Error("this PDF has no text layer (a scan?) — FinGraph needs a text PDF".into()));
+    Ok(parse_bbox(&String::from_utf8_lossy(&out.stdout)))
+}
+
+const OCR_DPI: f64 = 300.0;
+static OCR_SPLIT_HEAD: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"^\d{1,3},$").unwrap());
+static OCR_COMMA_CENTS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"^(\d{1,3}(?:,\d{3})*),(\d{2})(\D*)$").unwrap());
+
+/// Words of an image-only PDF (a scan, or a redaction that flattened the pages) by OCR: each page is
+/// rendered in grey, anything lighter than the ink is blanked (so a pale "CUSTOMER COPY" watermark
+/// doesn't garble the amounts under it), and tesseract's word boxes are scaled back to points.
+pub fn ocr_tokens(path: &Path) -> Result<Vec<Token>> {
+    let dir = std::env::temp_dir().join(format!("fingraph-ocr-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())));
+    std::fs::create_dir_all(&dir)?;
+    let r = ocr_in(path, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+fn ocr_in(path: &Path, dir: &Path) -> Result<Vec<Token>> {
+    // ponytail: first 20 pages only (~3 s each), so a big scanned document in the watched folder can't
+    // tie the machine up for minutes; raise it if a real statement ever runs longer
+    let out = Command::new("pdftoppm").args(["-r", &OCR_DPI.to_string(), "-gray", "-l", "20"]).arg(path).arg(dir.join("p")).output()?;
+    if !out.status.success() {
+        return Err(Error(format!("pdftoppm failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
+    }
+    let mut pages: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|e| e == "pgm")).collect();
+    pages.sort(); // p-01.pgm, p-02.pgm… zero-padded, so this is page order
+    let scale = 72.0 / OCR_DPI;
+    let mut tokens: Vec<Token> = Vec::new();
+    for (i, img) in pages.iter().enumerate() {
+        threshold_pgm(img)?;
+        let out = Command::new("tesseract")
+            .arg(img)
+            .args(["stdout", "--psm", "6", "tsv"])
+            .output()
+            .map_err(|e| Error(format!("this PDF is only pictures of pages; reading it needs tesseract (sudo apt install tesseract-ocr): {e}")))?;
+        if !out.status.success() {
+            return Err(Error(format!("tesseract failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
+        }
+        // level page block par line word left top width height conf text
+        let mut line_of: Option<String> = None;
+        for line in String::from_utf8_lossy(&out.stdout).lines().skip(1) {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.len() < 12 || f[0] != "5" || f[11].trim().is_empty() {
+                continue;
+            }
+            let n = |k: usize| f[k].parse::<f64>().unwrap_or(0.0) * scale;
+            let (x, y) = (n(6), n(7));
+            let mut t = Token::new(i as u32 + 1, x, y, x + n(8), y + n(9), f[11].trim());
+            let id = format!("{}.{}.{}", f[2], f[3], f[4]);
+            // `3,` `748.78` → `3,748.78`: OCR split one amount in two
+            if let Some(prev) = tokens.last_mut().filter(|_| line_of.as_deref() == Some(id.as_str()))
+                && OCR_SPLIT_HEAD.is_match(&prev.text)
+                && t.text.starts_with(|c: char| c.is_ascii_digit())
+                && t.x0 - prev.x1 < prev.h()
+            {
+                prev.text.push_str(&t.text);
+                prev.x1 = t.x1;
+                prev.y1 = prev.y1.max(t.y1);
+                t = prev.clone();
+                tokens.pop();
+            }
+            // `49,48` is `49.48` with the point misread
+            t.text = OCR_COMMA_CENTS.replace(&t.text, "${1}.${2}${3}").into_owned();
+            tokens.push(t);
+            line_of = Some(id);
+        }
     }
     Ok(tokens)
+}
+
+/// Binary greyscale PGM in place: ink stays black, everything paler goes white.
+fn threshold_pgm(img: &Path) -> Result<()> {
+    let mut b = std::fs::read(img)?;
+    // header: "P5", width, height, maxval, each followed by whitespace
+    let mut fields = 0;
+    let mut i = 0;
+    while fields < 4 && i < b.len() {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        while i < b.len() && !b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        fields += 1;
+    }
+    for px in b.iter_mut().skip(i + 1) {
+        // 180 read a real CNB statement best (120 and 210 both misread more digits)
+        *px = if *px > 180 { 255 } else { 0 };
+    }
+    std::fs::write(img, b)?;
+    Ok(())
 }
 
 fn attr(line: &str, name: &str) -> f64 {
@@ -146,6 +233,9 @@ pub struct Pass1Report {
     pub currency: Option<Currency>,
     pub currency_columns: Vec<Currency>,
     pub summary_lines: Vec<String>,
+    /// Read by OCR from pictures of the pages: amounts are proven by the balances, names may have typos.
+    #[serde(default)]
+    pub ocr: bool,
     /// The first lines of page 1 (letterhead), for building a new profile.
     #[serde(default)]
     pub letterhead: Vec<String>,
@@ -198,6 +288,9 @@ pub struct SectionReport {
     pub summary: SummaryCheck,
     pub recovered: Vec<String>,
     pub skipped: Vec<SkippedLine>,
+    /// Printed balances that disagree with both neighbours (a misprint, or an OCR misread), left out of the checks.
+    #[serde(default)]
+    pub misread_balances: Vec<String>,
     pub rescans: u32,
 }
 
@@ -265,5 +358,20 @@ pub struct ScanResult {
 impl ScanResult {
     pub fn is_reconciled(&self) -> bool {
         !self.sections.is_empty() && self.sections.iter().all(|s| s.reconciliation == Reconciliation::Reconciled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ocr_misread_decimal_commas_are_fixed_and_real_thousands_kept() {
+        let fix = |t: &str| OCR_COMMA_CENTS.replace(t, "${1}.${2}${3}").into_owned();
+        assert_eq!(fix("49,48"), "49.48");
+        assert_eq!(fix("1,946,30"), "1,946.30");
+        assert_eq!(fix("1,946.30"), "1,946.30");
+        assert_eq!(fix("1,946"), "1,946");
+        assert!(OCR_SPLIT_HEAD.is_match("3,") && !OCR_SPLIT_HEAD.is_match("3,748.78"));
     }
 }

@@ -28,6 +28,7 @@ section = "utils"
 priority = "optional"
 # pdftotext -bbox gives the scanner every word with its position
 depends = "$auto, poppler-utils"
+recommends = "tesseract-ocr"
 assets = [
     ["target/release/fingraph", "usr/bin/", "755"],
     ["../../packaging/dev.fingraph.FinGraph.desktop", "usr/share/applications/", "644"],

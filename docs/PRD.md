@@ -1,6 +1,6 @@
 # FinGraph — PRD / System Reference
 
-**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.1 `.deb`
+**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.3 `.deb`
 **Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Status:** in daily personal use; not published
 
 > Single source of truth for what FinGraph is, how it's built, and why it behaves the way it does.
@@ -30,7 +30,8 @@ workspaces.
 **Non-goals / constraints**
 - 100% local and private: no cloud APIs, telemetry or LLMs. Data in `~/.local/share/fingraph/`.
 - No bank connections or live balances: balances shown are the last ones printed on a statement.
-- No OCR: image-only (scanned) PDFs are rejected with a clear message.
+- Image-only (scanned or flattened-by-redaction) PDFs are read by local OCR (`tesseract`, a
+  recommended package) and never fully trusted: confidence ≤ 90% and "(read by OCR)" on the name.
 - Not multi-user, not double-entry accounting. Budgeting is plan-based (Monarch-style budgets with
   rollovers, YNAB-style money moves and non-monthly bills), not strict envelope assigning of cash:
   statements arrive a month late, so the cash figure to assign from is always stale.
@@ -147,7 +148,9 @@ rate overrides `apr:<account>`, payoff amount `payoff_monthly:<scope>`, `forecas
 
 **Verified on real data:** all 12 of the owner's Scotiabank statements (16 sections: chequing ••5311,
 Amex Platinum Dual ••3575 KYD+USD, Mastercard ••2197) reconcile to the cent. The other four banks
-are verified against simulated layouts only (see §13).
+are verified against simulated layouts only (see §13), except **Cayman National**: a real
+(redacted, image-only) Feb 2026 savings statement reads 95 of 95 transactions and reconciles to
+the cent via OCR; its layout is pinned by `cnb_real_layout_multiline_rows_and_page_split`.
 
 Imported PDFs are kept (by SHA-256) in `~/.local/share/fingraph/statements/` so **Rescan** can
 re-read everything; a rescan keeps hand edits (categories, payees, tags, business flags,
@@ -411,9 +414,9 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 10. Packaging & operations
 
-- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.1-1_amd64.deb` (binary, desktop entry with
+- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.3-1_amd64.deb` (binary, desktop entry with
   PDF "Open With", icon; depends on poppler-utils, GTK 4, libadwaita).
-- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.1-1_amd64.deb`.
+- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.3-1_amd64.deb`.
 - Data: `~/.local/share/fingraph/ledger.db` (+ `statements/`, `backups/`). Hand backups made during
   development sit beside the ledger as `ledger-backup-2026-10-27-*.db`.
 - Terminal: `cargo run -p fingraph-core --example ledger -- reset|rescan|reapply|cards`.
@@ -473,20 +476,26 @@ Fixes found while testing the guide on the owner's real statements:
 | Best of YNAB, Monarch, Copilot, Simplifi, PocketGuard, Rocket Money — statements come monthly (0.2.0) | Monarch-style plan + rollovers, YNAB moves, non-monthly bills and Age of Money; Monthly Close; Outlook (forecast, safe to spend, bills checklist); Net Worth, goals, avalanche/snowball; learned guesses; watchlists; Sankey; manage links. No manual spending entry (statement-driven by choice); bill negotiation, credit scores, live sync, sharing, AI chat left out |
 | Monthly Close for last month showed "No budget yet" | A category's first budget covers earlier months; later changes apply from their month |
 | Dated goal "At risk" while finishing before its date | A dated goal is judged by finishing in time (and Ahead when it needs ≤ 80% of the plan); pace only without a date |
+| Kept freezing ("Not Responding") on every launch | Debt payoff compounded a 266% estimated rate for 50 years until Decimal overflowed; it now stops once a month leaves as much owed as the last ("interest grows faster than this pays"). Any panic now goes to `crash.log` in the data folder, and a page that fails shows a toast instead of closing the app |
+| CNB from a real statement (0.2.3) | The guessed CNB profile was wrong on every point. Real layout: `DD/MM` dates, one Amount column with a trailing minus, the date on a description's first line and the amount + balance on its last (Pass 3 now holds a dated amount-less line as a "head" that later lines join, across a page break too), summary amounts on an `as of` line under spaced-out labels, `ACCOUNT #: SV` = savings. Stored built-in CNB profiles are replaced once (`profile_rev:cnb_ky`). OCR fallback: 300 dpi grey, pale ink blanked at 180 (the CUSTOMER COPY watermark garbled digits), `--psm 6`, `49,48`→`49.48`; one printed balance that disagrees with both neighbours is ignored and noted ("Balance ignored") instead of failing the stretch |
+| Snappier (0.2.2) | Transactions 1.9 s → 0.1 s per refresh (cell buttons instead of a DropDown/EditableLabel per row; only changed rows are replaced); refreshes coalesce to one per frame (start-up did 5); rows read once per refresh; sidebar 75 → 30 ms; Subscriptions 109 → 7 ms; Combined Statement skips rebuilding when nothing changed; index on `transactions(document_id)` (schema v7); `synchronous=NORMAL` under WAL |
 
 ---
 
 ## 13. Outstanding / known limits
 
-- **Four of five banks unverified on real PDFs** (Butterfield, CNB, RBC, CICSA): first real
-  statement may need profile tuning (Bank Profiles → Test a PDF).
+- **Three of five banks unverified on real PDFs** (Butterfield, RBC, CICSA): first real
+  statement may need profile tuning (Bank Profiles → Test a PDF). CNB is checked only against an
+  OCR'd savings statement: a CNB text PDF, a chequing account or a CNB card may still differ.
+- OCR reads the first 20 pages only, misses the bold `ACCOUNT #: SV` line next to a redaction box
+  (the account shows as Checking), and can misspell names.
 - **Directory accuracy**: most entries came from research agents with little web access; generic
   keys were removed, but individual entries may be wrong or closed. Harmless if absent from your
   statements; fix by editing `data/merchants.tsv` (rebuild needed) or with a rule.
 - Year-over-year needs 12 months of history; annual renewals need the previous year's charge.
 - Receipts are files, not OCR'd; the P&L-with-receipts export is a folder, not one merged PDF.
 - A recorded repayment can't be undone from the UI yet (core has `undo_reimbursement`).
-- No OCR for scanned PDFs; no font metadata from the PDF.
+- No font metadata from the PDF.
 - The directory is read-only in the app (Business Directory page); additions are rules or edits to
   `merchants.tsv` plus a rebuild.
 - The Python prototype's ledger was never migrated (statements re-imported instead).

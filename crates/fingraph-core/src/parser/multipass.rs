@@ -24,7 +24,17 @@ impl<'a> MultiPassScanner<'a> {
     }
 
     pub fn scan_pdf(&self, path: &Path) -> Result<ScanResult> {
-        self.scan_tokens(super::tokens_from_pdf(path)?)
+        let tokens = super::tokens_from_pdf(path)?;
+        if !tokens.is_empty() {
+            return self.scan_tokens(tokens);
+        }
+        let mut r = self.scan_tokens(super::ocr_tokens(path)?)?;
+        r.diagnostics.pass1.ocr = true;
+        // never fully trusted: OCR can misread a name even when every balance checks out
+        for s in &mut r.sections {
+            s.confidence = s.confidence.min(0.9);
+        }
+        Ok(r)
     }
 
     pub fn scan_tokens(&self, tokens: Vec<Token>) -> Result<ScanResult> {
@@ -171,9 +181,11 @@ pub(crate) static OPENING: LazyLock<Regex> =
 pub(crate) static CLOSING: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(?:(?:closing|new|ending)\s+balance|balance\s+carried\s+forward|carried\s+forward)").unwrap());
 static DEBITS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(?:total\s+)?(?:withdrawals|debits|minus)\b|^purchases\b|^total\s+purchases").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)^(?:total\s+)?(?:withdrawals|debits|minus)\b|^purchases\b|^total\s+purchases|^cheques\s*(?:&|and)\s*other\s+deb").unwrap());
 static CREDITS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(?:total\s+)?(?:deposits|credits|plus)\b|^payments\s*(?:&|and)\s*credits").unwrap());
+/// Words that may precede a summary amount on the line under its label (CNB: `as of 01/03/26   1,000.00`).
+static AS_OF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(?:as|of|\d{1,2}/\d{1,2}/\d{2,4})$").unwrap());
 static GENERIC_NOISE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
         r"(?i)^\s*page\s+\d+\s*(?:of\s+\d+)?\s*$",
@@ -195,16 +207,18 @@ pub(crate) fn summary_value(rows: &[&Row], label: &Regex, cols: &[(Currency, f64
             }
             // the amount must open the next cell ("Purchases & Debits    US$ 15.99"), so a count like
             // "No. of Deposits   3" never lends its neighbour's amount
+            // a typewriter font spaces the label out ("Deposits  &  Other Cred"): skip its words, stop at the first number
             let starts = r.cell_starts();
-            let k = starts.iter().copied().find(|&c| c > s).unwrap_or(r.words.len());
+            let k = starts.iter().copied().find(|&c| c > s && r.words[c].text.chars().any(|ch| ch.is_ascii_digit() || ch == '$')).unwrap_or(r.words.len());
             let after: Vec<Token> = r.words[k..].to_vec();
-            let first_money = |ws: &[Token]| -> Option<Vec<MoneyItem>> {
+            // `as_of`: the line under the label may start `as of 01/02/26` (never the line above: that's another label's)
+            let first_money = |ws: &[Token], as_of: bool| -> Option<Vec<MoneyItem>> {
                 let items = money_items(ws);
-                let lead = ws.iter().take_while(|w| Currency::parse(&w.text).is_some() || w.text == "$").count();
+                let lead = ws.iter().take_while(|w| Currency::parse(&w.text).is_some() || w.text == "$" || (as_of && AS_OF.is_match(&w.text))).count();
                 (items.first()?.lo <= lead).then_some(items)
             };
-            let near = |o: Option<&&Row>| o.filter(|n| n.page == r.page && (n.yc() - r.yc()).abs() < 2.6 * r.h()).and_then(|n| first_money(&n.words));
-            let Some(items) = first_money(&after).or_else(|| near(rows.get(ri + 1))).or_else(|| near(ri.checked_sub(1).and_then(|i| rows.get(i)))) else {
+            let near = |o: Option<&&Row>, as_of: bool| o.filter(|n| n.page == r.page && (n.yc() - r.yc()).abs() < 2.6 * r.h()).and_then(|n| first_money(&n.words, as_of));
+            let Some(items) = first_money(&after, false).or_else(|| near(rows.get(ri + 1), true)).or_else(|| near(ri.checked_sub(1).and_then(|i| rows.get(i)), false)) else {
                 continue;
             };
             let pick = if cols.len() > 1 {
@@ -229,6 +243,9 @@ fn detect_currency(page1: &str) -> Currency {
     if usd > kyd { Currency::USD } else { Currency::KYD }
 }
 
+/// CNB prints the account kind as a code: `ACCOUNT #: SV - 1234567`.
+static SAVINGS_CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"account\s*#\s*:?\s*sv\b").unwrap());
+
 fn detect_type(page1: &str) -> AccountType {
     let t = page1.to_lowercase();
     if ["credit limit", "minimum payment", "credit card", "card number", "mastercard", "visa", "american express"].iter().any(|k| t.contains(k)) {
@@ -237,7 +254,7 @@ fn detect_type(page1: &str) -> AccountType {
         AccountType::Loan
     } else if t.contains("share savings") || t.contains("share account") {
         AccountType::ShareAccount
-    } else if t.contains("savings") {
+    } else if t.contains("savings") || SAVINGS_CODE.is_match(&t) {
         AccountType::Savings
     } else {
         AccountType::Checking
@@ -775,13 +792,35 @@ fn new_section(currency: Currency, account_type: AccountType, last4: Option<Stri
     }
 }
 
+/// A dated line with no amount yet (CNB): its description runs on below it, the amount comes on the last line.
+struct Head {
+    page: u32,
+    y: f64,
+    date: NaiveDate,
+    effective: Option<NaiveDate>,
+    lines: Vec<String>,
+    text: String,
+}
+
+fn orphan_head(b: &mut Building, h: Head) {
+    b.section.report.skipped.push(SkippedLine { page: h.page, y: h.y, text: h.text, date: Some(h.date), amount: None, reason: "dated line without an amount".into() });
+}
+
 fn pass3(meta: &Meta, rows: &[Row], layout: &Layout, diag: &mut Diagnostics) -> Vec<Section> {
     let mut built: Vec<(Building, usize)> = vec![(new_section(meta.currency, meta.account_type, meta.account_last4.clone(), None), 0)];
     let mut last_date: Option<(u32, NaiveDate, Option<NaiveDate>)> = None;
+    let mut pending: Option<Head> = None;
 
     for (ri, r) in rows.iter().enumerate() {
         let text = r.text();
-        if layout.kinds[ri] == RowKind::Noise || layout.kinds[ri] == RowKind::Header {
+        if layout.kinds[ri] == RowKind::Header {
+            // a transaction split by a page break carries on under the next page's header
+            if let Some(h) = pending.as_mut() {
+                (h.page, h.y) = (r.page, r.yc());
+            }
+            continue;
+        }
+        if layout.kinds[ri] == RowKind::Noise {
             continue;
         }
         if let Some(c) = SECTION_ROW.captures(&text)
@@ -841,11 +880,23 @@ fn pass3(meta: &Meta, rows: &[Row], layout: &Layout, diag: &mut Diagnostics) -> 
             continue;
         }
 
+        let near = |h: &Head| h.page == r.page && r.yc() - h.y < 2.6 * r.h();
+        let undated = date.is_none() && post.is_none() && p.date.trim().is_empty() && p.post.trim().is_empty();
+
         if !txn_money.is_empty() {
+            let head = if undated { pending.take_if(|h| near(h)) } else { None };
+            if let Some(h) = pending.take() {
+                orphan_head(b, h);
+            }
             // the posting date is the ledger date when both are printed
-            let (posted, effective) = match (post, date) {
-                (Some(po), d) => (Some(po), d.filter(|d| *d != po)),
-                (None, d) => (d, None),
+            let (posted, effective) = match (&head, post, date) {
+                (Some(h), _, _) => (Some(h.date), h.effective),
+                (None, Some(po), d) => (Some(po), d.filter(|d| *d != po)),
+                (None, None, d) => (d, None),
+            };
+            let desc = match head {
+                Some(h) => h.lines.into_iter().chain((!desc.is_empty()).then(|| desc.clone())).collect::<Vec<_>>().join(" "),
+                None => desc.clone(),
             };
             let posted = match posted {
                 Some(d) => Some(d),
@@ -900,16 +951,34 @@ fn pass3(meta: &Meta, rows: &[Row], layout: &Layout, diag: &mut Diagnostics) -> 
             }
             continue;
         }
-        if !desc.is_empty() && date.is_none() && post.is_none() && p.date.trim().is_empty() && p.post.trim().is_empty() && !p.outside {
+        if !desc.is_empty() && undated && !p.outside {
             let mut line = desc;
             if !p.reference.is_empty() {
                 line = format!("{line} {}", p.reference.trim());
+            }
+            if let Some(h) = pending.as_mut().filter(|h| near(h)) {
+                h.lines.push(line);
+                h.y = r.yc();
+                continue;
             }
             b.conts.push((r.page, r.yc(), r.h(), line));
             b.events.push(Event::Cont(b.conts.len() - 1));
             continue;
         }
+        if let Some(d) = post.or(date)
+            && !desc.is_empty()
+            && !p.outside
+        {
+            if let Some(h) = pending.take() {
+                orphan_head(b, h);
+            }
+            pending = Some(Head { page: r.page, y: r.yc(), date: d, effective: post.and(date).filter(|e| Some(*e) != post), lines: vec![desc], text: text.clone() });
+            continue;
+        }
         skip(b, "unrecognised line in the table");
+    }
+    if let Some(h) = pending.take() {
+        orphan_head(&mut built.last_mut().unwrap().0, h);
     }
 
     let mut out = Vec::new();

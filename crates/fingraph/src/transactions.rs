@@ -8,7 +8,6 @@ use fingraph_core::rules::{Rule, RuleKind, merchant_stem};
 use fingraph_core::ReviewStatus;
 use gtk::{gio, glib, pango};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::App;
@@ -38,6 +37,60 @@ pub fn focus_search(_app: &Rc<App>) {
 
 fn row_of(item: &gtk::ListItem) -> Option<TxRow> {
     item.item().and_downcast::<glib::BoxedAnyObject>().map(|o| o.borrow::<TxRow>().clone())
+}
+
+/// A flat button showing `text`, for a cell that opens a picker or editor when clicked. Cheap to
+/// build: a DropDown or EditableLabel per row cost ~4 ms each, and a refresh builds hundreds.
+fn cell_button() -> gtk::Button {
+    let l = gtk::Label::builder().xalign(0.0).ellipsize(pango::EllipsizeMode::End).build();
+    gtk::Button::builder().child(&l).css_classes(["flat", "cell"]).build()
+}
+
+fn set_cell_text(b: &gtk::Button, text: &str) {
+    if let Some(l) = b.child().and_downcast::<gtk::Label>() {
+        l.set_label(text);
+    }
+}
+
+/// A popover under `anchor`, built on demand and gone once closed.
+fn pop_under(anchor: &gtk::Button, child: &impl IsA<gtk::Widget>) -> gtk::Popover {
+    let pop = gtk::Popover::builder().child(child).build();
+    pop.set_parent(anchor);
+    pop.connect_closed(|p| {
+        let p = p.clone();
+        // after the close animation has used it
+        glib::idle_add_local_once(move || p.unparent());
+    });
+    pop.popup();
+    pop
+}
+
+/// Pick one of `names`; `on_pick` gets its index.
+fn pick_from(anchor: &gtk::Button, names: &[String], current: usize, on_pick: impl Fn(usize) + 'static) {
+    let list = gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build();
+    for n in names {
+        list.append(&gtk::Label::builder().label(n).xalign(0.0).build());
+    }
+    if let Some(r) = list.row_at_index(current as i32) {
+        list.select_row(Some(&r));
+    }
+    let sc = gtk::ScrolledWindow::builder().child(&list).min_content_height(320).propagate_natural_width(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+    let pop = pop_under(anchor, &sc);
+    list.connect_row_activated(move |_, r| {
+        pop.popdown();
+        on_pick(r.index() as usize);
+    });
+}
+
+/// Edit `text` in a small entry; `on_done` gets the new text on Enter.
+fn edit_text(anchor: &gtk::Button, text: &str, placeholder: &str, on_done: impl Fn(String) + 'static) {
+    let e = gtk::Entry::builder().text(text).placeholder_text(placeholder).width_chars(24).build();
+    let pop = pop_under(anchor, &e);
+    e.grab_focus();
+    e.connect_activate(move |e| {
+        pop.popdown();
+        on_done(e.text().trim().to_string());
+    });
 }
 
 /// `[Uncategorized, Income, ↳ Salary, …]` with ids alongside.
@@ -113,9 +166,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     bar.pack_end(&summary);
     bar.set_revealed(false);
 
-    let cats_model = gtk::StringList::new(&[]);
-    let cat_ids: Rc<RefCell<Vec<Option<i64>>>> = Rc::new(RefCell::new(Vec::new()));
-    let known: Rc<RefCell<HashMap<i64, Option<i64>>>> = Rc::new(RefCell::new(HashMap::new()));
+    let cat_names: Rc<RefCell<Vec<String>>> = Rc::default();
+    let cat_ids: Rc<RefCell<Vec<Option<i64>>>> = Rc::default();
 
     let selected_rows = {
         let (store, selection) = (store.clone(), selection.clone());
@@ -164,29 +216,30 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             "Payee",
             true,
             Box::new(move |item| {
-                let e = gtk::EditableLabel::new("");
+                let b = cell_button();
+                b.set_tooltip_text(Some("Click to rename"));
                 let w = w.clone();
-                e.connect_editing_notify(move |e| {
-                    let Some(a) = w.upgrade() else { return };
-                    if e.is_editing() {
-                        return;
-                    }
-                    let Ok(id) = e.widget_name().parse::<i64>() else { return };
+                b.connect_clicked(move |b| {
+                    let (Some(a), Ok(id)) = (w.upgrade(), b.widget_name().parse::<i64>()) else { return };
                     let Ok(t) = a.db.transaction(id) else { return };
-                    let text = e.text().trim().to_string();
-                    if text.is_empty() || text == t.clean_payee {
-                        return;
-                    }
-                    if a.db.set_payee(id, &text).is_ok() {
-                        offer_rule(&a, &t, None, Some(text.clone()), &format!("call it “{text}”"));
-                    }
+                    let w = Rc::downgrade(&a);
+                    edit_text(b, &t.clean_payee.clone(), "Payee", move |text| {
+                        let Some(a) = w.upgrade() else { return };
+                        if text.is_empty() || text == t.clean_payee {
+                            return;
+                        }
+                        if a.db.set_payee(id, &text).is_ok() {
+                            offer_rule(&a, &t, None, Some(text.clone()), &format!("call it “{text}”"));
+                            a.refresh();
+                        }
+                    });
                 });
-                item.set_child(Some(&e));
+                item.set_child(Some(&b));
             }),
             Box::new(|item, t| {
-                let e = item.child().and_downcast::<gtk::EditableLabel>().unwrap();
-                e.set_widget_name(&t.id.to_string());
-                e.set_text(&t.clean_payee);
+                let b = item.child().and_downcast::<gtk::Button>().unwrap();
+                b.set_widget_name(&t.id.to_string());
+                set_cell_text(&b, &t.clean_payee);
             }),
         );
     }
@@ -222,7 +275,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             l.set_label(&t.raw_description);
             m.set_label(&t.memo);
             m.set_visible(!t.memo.is_empty());
-            b.set_tooltip_text(Some(&format!("{}\n{}\nFITID {}", t.raw_description, t.memo, &t.fitid[..16])));
+            b.set_tooltip_text(Some(&format!("{}\n{}\nFITID {}", t.raw_description, t.memo, t.fitid.get(..16).unwrap_or(&t.fitid))));
         }),
     );
     col(
@@ -235,40 +288,39 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         }),
     );
     {
-        let (w, model, ids, kn) = (Rc::downgrade(app), cats_model.clone(), cat_ids.clone(), known.clone());
+        let (w, names, ids) = (Rc::downgrade(app), cat_names.clone(), cat_ids.clone());
         col(
             "Category",
             false,
             Box::new(move |item| {
-                let dd = gtk::DropDown::builder().model(&model).css_classes(["flat"]).build();
-                let (w, ids, known) = (w.clone(), ids.clone(), kn.clone());
-                dd.connect_selected_notify(move |dd| {
-                    let Some(a) = w.upgrade() else { return };
-                    let Ok(id) = dd.widget_name().parse::<i64>() else { return };
-                    let new = ids.borrow().get(dd.selected() as usize).copied().flatten();
-                    if known.borrow().get(&id) == Some(&new) {
-                        return;
-                    }
-                    known.borrow_mut().insert(id, new);
+                let b = cell_button();
+                b.set_width_request(150);
+                let (w, names, ids) = (w.clone(), names.clone(), ids.clone());
+                b.connect_clicked(move |b| {
+                    let (Some(a), Ok(id)) = (w.upgrade(), b.widget_name().parse::<i64>()) else { return };
                     let Ok(t) = a.db.transaction(id) else { return };
-                    if a.db.set_category(&[id], new).is_ok() {
-                        let name = a.categories().into_iter().find(|c| Some(c.id) == new).map_or("Uncategorized".to_string(), |c| c.name);
-                        offer_rule(&a, &t, new, None, &format!("categorize as {name}"));
-                        a.update_sidebar();
-                    }
+                    let current = ids.borrow().iter().position(|c| *c == t.category_id).unwrap_or(0);
+                    let (w, ids) = (Rc::downgrade(&a), ids.clone());
+                    pick_from(b, &names.borrow(), current, move |i| {
+                        let Some(a) = w.upgrade() else { return };
+                        let new = ids.borrow().get(i).copied().flatten();
+                        if new == t.category_id {
+                            return;
+                        }
+                        if a.db.set_category(&[id], new).is_ok() {
+                            let name = a.categories().into_iter().find(|c| Some(c.id) == new).map_or("Uncategorized".to_string(), |c| c.name);
+                            offer_rule(&a, &t, new, None, &format!("categorize as {name}"));
+                            a.refresh();
+                        }
+                    });
                 });
-                item.set_child(Some(&dd));
+                item.set_child(Some(&b));
             }),
-            {
-                let (ids, known) = (cat_ids.clone(), known.clone());
-                Box::new(move |item, t| {
-                    let dd = item.child().and_downcast::<gtk::DropDown>().unwrap();
-                    known.borrow_mut().insert(t.id, t.category_id);
-                    dd.set_widget_name(&t.id.to_string());
-                    let pos = ids.borrow().iter().position(|c| *c == t.category_id).unwrap_or(0);
-                    dd.set_selected(pos as u32);
-                })
-            },
+            Box::new(|item, t| {
+                let b = item.child().and_downcast::<gtk::Button>().unwrap();
+                b.set_widget_name(&t.id.to_string());
+                set_cell_text(&b, t.category_name.as_deref().unwrap_or("Uncategorized"));
+            }),
         );
     }
     {
@@ -334,24 +386,27 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             "Tag",
             false,
             Box::new(move |item| {
-                let e = gtk::EditableLabel::builder().width_chars(8).build();
+                let b = cell_button();
+                b.set_width_request(80);
+                b.set_tooltip_text(Some("Property, unit or project tag — click to change"));
                 let w = w.clone();
-                e.connect_editing_notify(move |e| {
-                    let Some(a) = w.upgrade() else { return };
-                    if e.is_editing() {
-                        return;
-                    }
-                    if let Ok(id) = e.widget_name().parse::<i64>() {
-                        let _ = a.db.set_tag(&[id], &e.text());
-                    }
+                b.connect_clicked(move |b| {
+                    let (Some(a), Ok(id)) = (w.upgrade(), b.widget_name().parse::<i64>()) else { return };
+                    let Ok(t) = a.db.transaction(id) else { return };
+                    let w = Rc::downgrade(&a);
+                    edit_text(b, &t.tag.clone(), "Property, unit or project", move |text| {
+                        let Some(a) = w.upgrade() else { return };
+                        if text != t.tag && a.db.set_tag(&[id], &text).is_ok() {
+                            a.refresh();
+                        }
+                    });
                 });
-                item.set_child(Some(&e));
+                item.set_child(Some(&b));
             }),
             Box::new(|item, t| {
-                let e = item.child().and_downcast::<gtk::EditableLabel>().unwrap();
-                e.set_widget_name(&t.id.to_string());
-                e.set_text(&t.tag);
-                e.set_tooltip_text(Some("Property, unit or project tag"));
+                let b = item.child().and_downcast::<gtk::Button>().unwrap();
+                b.set_widget_name(&t.id.to_string());
+                set_cell_text(&b, &t.tag);
             }),
         );
     }
@@ -414,8 +469,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
     let refresh: crate::Refresh = {
         let w = Rc::downgrade(app);
-        let (store, account_dd, category_dd, search, account_ids, filter_cats, summary, focus_bar, cats_model, cat_ids, cat_menu_box, cat_pop) =
-            (store.clone(), account_dd.clone(), category_dd.clone(), search.clone(), account_ids.clone(), filter_cats.clone(), summary.clone(), focus_bar.clone(), cats_model.clone(), cat_ids.clone(), cat_menu_box.clone(), cat_pop.clone());
+        let (store, account_dd, category_dd, search, account_ids, filter_cats, summary, focus_bar, cat_names, cat_ids, cat_menu_box, cat_pop) =
+            (store.clone(), account_dd.clone(), category_dd.clone(), search.clone(), account_ids.clone(), filter_cats.clone(), summary.clone(), focus_bar.clone(), cat_names.clone(), cat_ids.clone(), cat_menu_box.clone(), cat_pop.clone());
         let selected_rows = selected_rows.clone();
         let busy = Rc::new(std::cell::Cell::new(false));
         Rc::new(move || {
@@ -435,9 +490,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
             let cats = a.categories();
             let (cn, ci) = category_choices(&cats);
-            if cats_model.n_items() as usize != cn.len() {
-                cats_model.splice(0, cats_model.n_items(), &cn.iter().map(String::as_str).collect::<Vec<_>>());
-            }
+            *cat_names.borrow_mut() = cn.clone();
             *cat_ids.borrow_mut() = ci.clone();
             let prev_cat = filter_cats.borrow().get(category_dd.selected() as usize).copied().flatten();
             let mut fnames = vec!["All categories".to_string(), "Uncategorized".to_string()];
@@ -497,8 +550,12 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let fx = a.db.fx().unwrap_or_default();
             let total: fingraph_core::Decimal = rows.iter().map(|t| fingraph_core::insights::value(t, a.display(), &fx)).sum();
             summary.set_label(&format!("{} transactions · net {}", rows.len(), a.money(total)));
-            let objs: Vec<glib::BoxedAnyObject> = rows.into_iter().map(glib::BoxedAnyObject::new).collect();
-            store.splice(0, store.n_items(), &objs);
+            // replace only the rows that changed, so an edit doesn't rebuild every visible row
+            let old: Vec<TxRow> = (0..store.n_items()).filter_map(|i| store.item(i).and_downcast::<glib::BoxedAnyObject>().map(|o| o.borrow::<TxRow>().clone())).collect();
+            let head = old.iter().zip(&rows).take_while(|(a, b)| a == b).count();
+            let tail = old[head..].iter().rev().zip(rows[head..].iter().rev()).take_while(|(a, b)| a == b).count();
+            let objs: Vec<glib::BoxedAnyObject> = rows[head..rows.len() - tail].iter().cloned().map(glib::BoxedAnyObject::new).collect();
+            store.splice(head as u32, (old.len() - head - tail) as u32, &objs);
             busy.set(false);
         })
     };

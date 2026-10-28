@@ -146,16 +146,18 @@ fn cicsa_share_and_loan_sections() {
 }
 
 #[test]
-fn pass4_pinpoints_and_pass5_recovers_a_page_break_split_row() {
+fn a_page_break_split_row_is_joined_across_the_header() {
     let mut txs: Vec<DemoTx> = (1..=60).map(|i| DemoTx::new(d(2026, 8, 1 + (i % 28)), &format!("PURCHASE {i}"), Decimal::new(-(1000 + i as i64 * 37), 2))).collect();
     txs.sort_by_key(|t| t.date);
     let mut spec = StatementSpec::new(Bank::Butterfield, AccountType::Checking, Currency::KYD, "4821", dec("9000.00"), (d(2026, 8, 1), d(2026, 8, 31)), txs);
     spec.split_row = Some(41);
     let r = scan(std::slice::from_ref(&spec));
     let s = &r.sections[0];
-    assert_eq!(s.report.rescans, 1, "{:#?}", s.report);
-    assert_eq!(s.report.recovered.len(), 1);
-    assert!(s.transactions[41].recovered);
+    // the dated half at the foot of one page waits for its amount under the next page's header (the
+    // CNB rule), so Pass 3 joins it and Pass 5 has nothing left to recover
+    assert_eq!(s.report.rescans, 0, "{:#?}", s.report);
+    assert!(!s.transactions[41].recovered);
+    assert_eq!(s.transactions[41].description, spec.txs[41].description);
     assert_exact(&r, &[spec]);
 }
 
@@ -231,4 +233,117 @@ fn real_statements_reconcile() {
             assert!(r.is_reconciled(), "{}", e.path().display());
         }
     }
+}
+
+/// Cayman National's real layout (from a redacted Feb 2026 statement; names and amounts here are made up):
+/// a typewriter font, `DD/MM` dates, one Amount column with a trailing minus for money out, the date on a
+/// description's first line and the amount + balance on its last, a row split by the page break, and the
+/// summary amounts on an `as of` line under their labels.
+#[test]
+fn cnb_real_layout_multiline_rows_and_page_split() {
+    use fingraph_core::parser::Token;
+    const CW: f64 = 4.8; // Courier at 8pt
+    let mut toks = Vec::new();
+    let mut put = |page: u32, y: f64, x: f64, text: &str, gap: f64| {
+        let mut x = x;
+        for w in text.split_whitespace() {
+            let wd = w.chars().count() as f64 * CW;
+            toks.push(Token::new(page, x, y, x + wd, y + 8.0, w));
+            x += wd + gap * CW;
+        }
+    };
+    let (date, desc, amt, bal) = (60.0, 160.0, 425.0, 520.0);
+    let right = |text: &str, edge: f64| edge - text.chars().count() as f64 * CW;
+    put(1, 40.0, 60.0, "CAYMAN NATIONAL", 1.0);
+    put(1, 40.0, 390.0, "Account Statement", 1.0);
+    put(1, 60.0, 390.0, "Cayman National Bank Ltd.", 1.0);
+    put(1, 72.0, 390.0, "Tel +1 345 949 4655 | caymannational.com", 1.0);
+    put(1, 180.0, 300.0, "PERIODIC STATEMENT", 1.0);
+    put(1, 192.0, 300.0, "Date: 31/03/2026", 1.0);
+    put(1, 204.0, 300.0, "Period: 01/03/2026 to 31/03/2026", 1.0);
+    put(1, 214.0, 50.0, "CUSTOMER COPY", 1.0);
+    put(1, 400.0, 95.0, "ACCOUNT #: SV - 0001234", 1.0);
+    put(1, 420.0, 78.0, "Currency: KYD", 1.0);
+    put(1, 500.0, 64.0, "Beginning Balance", 1.0);
+    put(1, 514.0, 64.0, "as of 01/03/26", 1.0);
+    put(1, 514.0, right("1,000.00", 288.0), "1,000.00", 1.0);
+    put(1, 514.0, 335.0, "Interest Paid YTD", 1.0);
+    put(1, 514.0, right("0.00", 518.0), "0.00", 1.0);
+    // the typewriter spacing splits a label into several cells
+    put(1, 526.0, 76.0, "Deposits & Other Cred", 2.0);
+    put(1, 526.0, right("1,500.00", 288.0), "1,500.00", 1.0);
+    put(1, 526.0, 335.0, "Interest Earned", 1.0);
+    put(1, 526.0, right("0.01", 518.0), "0.01", 1.0);
+    put(1, 538.0, 76.0, "Cheques & Other Debit", 2.0);
+    put(1, 538.0, right("236.50", 288.0), "236.50", 1.0);
+    put(1, 538.0, 335.0, "Average Balance", 1.0);
+    put(1, 538.0, right("1,100.00", 518.0), "1,100.00", 1.0);
+    put(1, 556.0, 64.0, "Ending Balance", 1.0);
+    put(1, 570.0, 64.0, "as of 31/03/26", 1.0);
+    put(1, 570.0, right("2,263.50", 288.0), "2,263.50", 1.0);
+    put(1, 570.0, 325.0, "Annual Percentage", 1.0);
+    put(1, 600.0, 57.0, "Transaction Information", 1.0);
+    for (page, hy) in [(1, 620.0), (2, 232.0)] {
+        put(page, hy, date, "Date", 1.0);
+        put(page, hy, 95.0, "Cheque #", 1.0);
+        put(page, hy, desc, "Description", 1.0);
+        put(page, hy, 372.0, "Amount", 1.0);
+        put(page, hy, 472.0, "Balance", 1.0);
+    }
+    // (page, date, description, amount + balance): the amount sits on a description's last line, and
+    // the numbers line up with the minus hanging to their right
+    let lines = [
+        (1, "02/03", "Govt Stamp Duty Fees", Some(("10.75 -", "989.25"))),
+        (1, "03/03", "POS Purchase SAMPLE GROCERY", None),
+        (1, "", "GEORGE TOWN KY", Some(("45.50 -", "943.75"))),
+        (1, "03/03", "POS Transaction Fee", Some(("0.25 -", "943.50"))),
+        (1, "05/03", "EXAMPLE EMPLOYER LTD", None),
+        (1, "", "Dir Pay Mar", None),
+        (1, "", "26 Salary", Some(("1,500.00", "2,443.50"))),
+        (1, "06/03", "POS Purchase", None),
+        (2, "", "EXAMPLE STORE GRAND", Some(("180.00 -", "2,263.50"))),
+    ];
+    let (mut y, mut page) = (620.0, 1);
+    for (pg, dt, text, money) in lines {
+        if pg != page {
+            put(1, 760.0, 280.0, "Page 1", 1.0);
+            put(2, 40.0, 60.0, "CAYMAN NATIONAL", 1.0);
+            put(2, 196.0, 345.0, "31/03/2026", 1.0);
+            put(2, 214.0, 57.0, "Transaction Information", 1.0);
+            (y, page) = (232.0, pg);
+        }
+        y += 11.8;
+        if !dt.is_empty() {
+            put(pg, y, date, dt, 1.0);
+        }
+        put(pg, y, desc, text, 1.0);
+        if let Some((a, b)) = money {
+            let edge = if a.ends_with('-') { amt } else { amt - 2.0 * CW };
+            put(pg, y, right(a, edge), a, 1.0);
+            put(pg, y, right(b, bal), b, 1.0);
+        }
+    }
+    put(2, 760.0, 280.0, "Page 2", 1.0);
+
+    let p = profiles::builtins();
+    let r = MultiPassScanner::new(&p).scan_tokens(toks).unwrap();
+    assert_eq!(r.profile_slug.as_deref(), Some("cnb_ky"));
+    assert_eq!(r.period, Some((d(2026, 3, 1), d(2026, 3, 31))));
+    let s = &r.sections[0];
+    assert_eq!(s.reconciliation, Reconciliation::Reconciled, "{:#?}", s.report);
+    assert_eq!(s.account_type, AccountType::Savings);
+    assert_eq!((s.opening, s.closing), (Some(dec("1000.00")), Some(dec("2263.50"))));
+    assert_eq!((s.total_debits, s.total_credits), (Some(dec("236.50")), Some(dec("1500.00"))));
+    let got: Vec<(NaiveDate, Decimal, &str)> = s.transactions.iter().map(|t| (t.posted, t.amount, t.description.as_str())).collect();
+    assert_eq!(
+        got,
+        vec![
+            (d(2026, 3, 2), dec("-10.75"), "Govt Stamp Duty Fees"),
+            (d(2026, 3, 3), dec("-45.50"), "POS Purchase SAMPLE GROCERY GEORGE TOWN KY"),
+            (d(2026, 3, 3), dec("-0.25"), "POS Transaction Fee"),
+            (d(2026, 3, 5), dec("1500.00"), "EXAMPLE EMPLOYER LTD Dir Pay Mar 26 Salary"),
+            (d(2026, 3, 6), dec("-180.00"), "POS Purchase EXAMPLE STORE GRAND"),
+        ]
+    );
+    assert!(s.report.skipped.is_empty(), "{:#?}", s.report.skipped);
 }

@@ -406,7 +406,11 @@ fn payoff_section(app: &Rc<App>, s: &Snap, into: &gtk::Box, redraw: crate::Refre
             }
             None => {
                 c.append(&gtk::Label::builder().label("Not enough").xalign(0.0).css_classes(["value", "amount-out"]).build());
-                c.append(&dim(&format!("The minimums come to about {} a month.", money(mins))));
+                c.append(&dim(&if planned < mins {
+                    format!("The minimums come to about {} a month.", money(mins))
+                } else {
+                    "The interest grows faster than this pays it off — pay more, or check the rates above.".to_string()
+                }));
             }
         }
         cards.append(&c);

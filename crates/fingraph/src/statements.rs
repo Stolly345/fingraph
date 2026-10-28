@@ -456,6 +456,9 @@ pub fn report_dialog(app: &Rc<App>, doc_id: i64) {
     let p1 = &diag.pass1;
     let g1 = adw::PreferencesGroup::builder().title("Pass 1 · Spatial tokens &amp; institution fingerprint").build();
     kv(&g1, "Detected profile", p1.profile.as_deref().unwrap_or("none matched"));
+    if p1.ocr {
+        kv(&g1, "Read by OCR", "the PDF is only pictures of pages: amounts are checked against the balances, but check names for typos");
+    }
     kv(&g1, "Fingerprint scores", &p1.scores.iter().map(|(s, n)| format!("{s} {n}")).collect::<Vec<_>>().join(" · "));
     kv(&g1, "Statement period", &p1.period.map(|(a, b)| format!("{a} → {b} (locks years and DD/MM order)")).unwrap_or("not found".into()));
     kv(&g1, "Account", &format!("{:?} · ••{} · {}", p1.account_type.unwrap_or(fingraph_core::AccountType::Checking), p1.account_last4.as_deref().unwrap_or("????"), p1.currency.map_or("?", |c| c.code())));
@@ -509,6 +512,9 @@ pub fn report_dialog(app: &Rc<App>, doc_id: i64) {
     }
     for h in &report.sign_heals {
         kv(&g4, "Sign self-healed", h);
+    }
+    for b in &report.misread_balances {
+        kv(&g4, "Balance ignored", b);
     }
     page.add(&g4);
 

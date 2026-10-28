@@ -255,6 +255,9 @@ CREATE TABLE goal_entries (
     amount TEXT NOT NULL,
     PRIMARY KEY (goal_id, month)
 );
+"#, r#"
+-- the statements list counts each statement's transactions; without this it scans them all per statement
+CREATE INDEX IF NOT EXISTS tx_document ON transactions(document_id);
 "#];
 
 /// (name, kind, children). Missing ones are added to existing ledgers on open; lists are shown A–Z.
@@ -352,7 +355,7 @@ pub struct DocumentRow {
 }
 
 /// One ledger row with everything the views need joined in.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TxRow {
     pub id: i64,
     /// The workspace the row counts in: its account's, or the business it was flagged for.
@@ -541,6 +544,9 @@ impl Db {
 
     fn init(conn: Connection) -> Result<Db> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        // with WAL, NORMAL is still crash-safe (a power cut can lose only the last commit) and
+        // spares an fsync per write
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let db = Db { conn };
         db.migrate()?;
@@ -694,6 +700,14 @@ impl Db {
             if !exists {
                 self.save_profile(&p)?;
             }
+        }
+        // a built-in rewritten from a real statement replaces the stored guess, once (CNB: 0.2.3);
+        // the next bank checked against a real PDF gets its own key here
+        if self.setting("profile_rev:cnb_ky").is_none() {
+            if let Some(id) = self.conn.query_row("SELECT id FROM bank_profiles WHERE slug = 'cnb_ky' AND is_builtin = 1", [], |r| r.get::<_, i64>(0)).optional()? {
+                self.delete_or_reset_profile(id)?;
+            }
+            self.set_setting("profile_rev:cnb_ky", "1")?;
         }
         let fx = Fx::default();
         self.conn.execute("INSERT OR IGNORE INTO fx_rates VALUES ('KYD', 'USD', ?1)", [fx.kyd_to_usd.to_string()])?;
@@ -908,6 +922,9 @@ impl Db {
     /// learned rules applied, transfers matched.
     pub fn import_scan(&self, entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult) -> Result<ImportReport> {
         let mut rep = ImportReport::default();
+        // OCR'd statements say so wherever their name shows, so nobody takes the names as exact
+        let ocr_name = format!("{filename} (read by OCR)");
+        let filename = if scan.diagnostics.pass1.ocr { ocr_name.as_str() } else { filename };
         let known: i64 = self.conn.query_row("SELECT COUNT(*) FROM documents WHERE sha256_hash = ?1", [sha256], |r| r.get(0))?;
         if known > 0 {
             rep.already_imported = true;
@@ -1709,13 +1726,23 @@ impl Db {
         Ok(self.transactions(&TxFilter { entity_ids: entity_ids.to_vec(), uncategorized_only: true, ..Default::default() })?.len())
     }
 
-    pub fn triage(&self, entity_ids: &[i64]) -> Result<Vec<rules::TriageGroup>> {
+    fn triage_rows(&self, entity_ids: &[i64]) -> Result<(Vec<TxRow>, Vec<rules::TriageGroup>)> {
         let rows = self.transactions(&TxFilter { entity_ids: entity_ids.to_vec(), uncategorized_only: true, ..Default::default() })?;
         let items: Vec<rules::TriageInput> = rows
             .iter()
             .map(|t| rules::TriageInput { id: t.id, entity_id: t.entity_id, posted: t.posted, raw: t.raw_description.clone(), memo: t.memo.clone(), amount: t.amount, currency: t.currency, account: t.account_name.clone() })
             .collect();
-        let mut groups = rules::triage_groups(&items);
+        let groups = rules::triage_groups(&items);
+        Ok((rows, groups))
+    }
+
+    /// How many groups To Review shows, without working out the guesses.
+    pub fn triage_count(&self, entity_ids: &[i64]) -> Result<usize> {
+        Ok(self.triage_rows(entity_ids)?.1.len())
+    }
+
+    pub fn triage(&self, entity_ids: &[i64]) -> Result<Vec<rules::TriageGroup>> {
+        let (rows, mut groups) = self.triage_rows(entity_ids)?;
         // what your own categorising suggests, from the group's latest charge
         let known = self.transactions(&TxFilter { entity_ids: entity_ids.to_vec(), ..Default::default() })?;
         if let Some(model) = crate::learn::Model::train(&known) {
@@ -1822,6 +1849,27 @@ pub fn entity_amount(fx: &Fx, amount: Decimal, from: Currency, base: Currency, o
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_older_ledger_gets_the_corrected_cnb_profile_once() {
+        let db = Db::open_in_memory().unwrap();
+        let cnb = |db: &Db| db.profiles().unwrap().into_iter().find(|p| p.slug == "cnb_ky").unwrap();
+        // a ledger from 0.2.2: the guessed layout, and no record of the refresh
+        let mut old = cnb(&db);
+        old.default_date_format = "DD/MM/YYYY".into();
+        old.column_layout_kind = LayoutKind::DebitCreditWithBalance;
+        db.save_profile(&old).unwrap();
+        db.conn.execute("DELETE FROM settings WHERE key = 'profile_rev:cnb_ky'", []).unwrap();
+        db.seed().unwrap();
+        assert_eq!(cnb(&db).column_layout_kind, LayoutKind::SignedSingleAmount);
+        assert_eq!(cnb(&db).default_date_format, "DD/MM");
+        // later edits by the user stick
+        let mut mine = cnb(&db);
+        mine.default_date_format = "MM/DD".into();
+        db.save_profile(&mine).unwrap();
+        db.seed().unwrap();
+        assert_eq!(cnb(&db).default_date_format, "MM/DD");
+    }
 
     #[test]
     fn demo_imports_reconciled_and_matches_transfers() {

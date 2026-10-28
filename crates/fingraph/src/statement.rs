@@ -4,7 +4,7 @@
 
 use adw::prelude::*;
 use chrono::NaiveDate;
-use fingraph_core::Decimal;
+use fingraph_core::{Currency, Decimal};
 use fingraph_core::db::{TxFilter, TxRow};
 use fingraph_core::money::fmt_money;
 use gtk::glib;
@@ -18,6 +18,9 @@ thread_local! {
     /// Accounts left out (empty = all of them).
     static HIDDEN: RefCell<BTreeSet<i64>> = RefCell::default();
 }
+
+/// A statement line and the combined balance after it.
+type Line = (TxRow, Option<Decimal>);
 
 pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let outer = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
@@ -75,6 +78,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
     let refresh: crate::Refresh = {
         let (w, scroller) = (Rc::downgrade(app), refresh_scroller);
+        // what the page shows now: rebuilding ~1000 rows costs ~300 ms, so skip it when nothing changed
+        let shown: RefCell<Option<(Currency, Vec<Line>)>> = RefCell::default();
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
             let ids = a.entity_ids();
@@ -134,6 +139,13 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             }
 
             let keep = scroller.vadjustment().value();
+            if shown.borrow().as_ref().is_some_and(|(c, l)| *c == ccy && *l == lines) {
+                if let Some(i) = pending.get() {
+                    scroll_to(i);
+                }
+                return;
+            }
+            *shown.borrow_mut() = Some((ccy, lines.clone()));
             clear(&body);
             months.borrow_mut().clear();
             let mut labels: Vec<String> = Vec::new();

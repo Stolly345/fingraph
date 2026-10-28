@@ -376,6 +376,7 @@ pub fn payoff(debts: &[Debt], monthly: Decimal, strategy: Strategy) -> Option<Pa
     let mut order: Vec<(String, u32)> = Vec::new();
     let mut interest = Decimal::ZERO;
     let twelve_hundred = Decimal::from(1200);
+    let mut before: Decimal = bal.iter().sum();
     for month in 1..=600u32 {
         if bal.iter().all(|b| b.is_zero()) {
             return Some(Payoff { months: month - 1, interest: interest.round_dp(2), order });
@@ -401,6 +402,13 @@ pub fn payoff(debts: &[Debt], monthly: Decimal, strategy: Strategy) -> Option<Pa
             bal[i] -= p;
             left -= p;
         }
+        // owing as much as last month (interest outruns the payments) means it never ends, and
+        // compounding it for 50 years would overflow Decimal
+        let owed: Decimal = bal.iter().sum();
+        if owed >= before {
+            return None;
+        }
+        before = owed;
         for (i, d) in debts.iter().enumerate() {
             if bal[i].is_zero() && !order.iter().any(|o| o.0 == d.name) && d.balance > Decimal::ZERO {
                 order.push((d.name.clone(), month));
@@ -408,6 +416,12 @@ pub fn payoff(debts: &[Debt], monthly: Decimal, strategy: Strategy) -> Option<Pa
         }
     }
     None
+}
+
+#[test]
+fn payoff_gives_up_when_interest_outruns_payments() {
+    let d = [Debt { name: "Card".into(), balance: Decimal::from(5000), apr: Decimal::from(9000) }];
+    assert_eq!(payoff(&d, Decimal::from(200), Strategy::Avalanche), None);
 }
 
 /// A card or loan's interest rate from its statements: the interest charged over its last three

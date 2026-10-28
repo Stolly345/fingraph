@@ -69,7 +69,7 @@ wins for that transaction.
 ```sh
 sudo apt install poppler-utils libgtk-4-dev libadwaita-1-dev
 cargo deb -p fingraph
-sudo apt install ./target/debian/fingraph_0.2.1-1_amd64.deb
+sudo apt install ./target/debian/fingraph_0.2.3-1_amd64.deb
 ```
 
 Or run from source: `cargo run -p fingraph --release`. Main menu → **Load Demo Data** imports a

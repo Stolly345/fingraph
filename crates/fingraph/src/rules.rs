@@ -2,7 +2,6 @@
 //! FinGraph has learned from you (edit, re-apply or forget).
 
 use adw::prelude::*;
-use fingraph_core::db::TxFilter;
 use fingraph_core::insights;
 use fingraph_core::money::fmt_money;
 use fingraph_core::rules::{Rule, RuleKind};
@@ -69,159 +68,170 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
             for r in rule_rows.borrow_mut().drain(..) {
                 rules.remove(&r);
             }
-            let rows = a.db.transactions(&TxFilter { entity_ids: a.entity_ids(), split_lines: true, ..Default::default() }).unwrap_or_default();
-            let fx = a.db.fx().unwrap_or_default();
-            let list = insights::subscriptions(&rows, a.display(), &fx, today());
-            let total: fingraph_core::Decimal = list.iter().filter(|s| s.active).map(|s| s.annual).sum();
-            subs.set_description(Some(&format!("{} active · {} a year", list.iter().filter(|s| s.active).count(), a.money(total))));
-            if list.is_empty() {
-                let r = adw::ActionRow::builder().title("No subscriptions yet").subtitle("Smart Triage asks about merchants that charge on a schedule.").build();
-                subs.add(&r);
-                sub_rows.borrow_mut().push(r.upcast());
-            }
-            for s in list {
-                let every = match s.cadence_days {
-                    7 => "weekly".to_string(),
-                    14 => "fortnightly".into(),
-                    30 => "monthly".into(),
-                    91 => "quarterly".into(),
-                    365 => "yearly".into(),
-                    d => format!("every {d} days"),
-                };
-                let r = adw::ActionRow::builder()
-                    .title(glib::markup_escape_text(&s.payee))
-                    .subtitle(glib::markup_escape_text(&format!(
-                        "{} {every}{} · {} · last {} · {} charge{}{}{}",
-                        fmt_money(s.latest, s.currency),
-                        if s.cadence_guessed { " (a guess: set the cycle)" } else { "" },
-                        s.account,
-                        s.last_charged.format("%d %b %Y"),
-                        s.charges,
-                        if s.charges == 1 { "" } else { "s" },
-                        s.last_rise.map(|(o, n, _)| format!(" · ▲ price rose {o} → {n}")).unwrap_or_default(),
-                        if s.active { "" } else { " · lapsed" }
-                    )))
-                    .subtitle_lines(3)
-                    .build();
-                // the billing cycle: what you pick here beats any guess
-                const CYCLES: [(&str, i64); 5] = [("Weekly", 7), ("Fortnightly", 14), ("Monthly", 30), ("Quarterly", 91), ("Yearly", 365)];
-                let cycle = gtk::DropDown::builder()
-                    .model(&gtk::StringList::new(&CYCLES.map(|c| c.0)))
-                    .selected(CYCLES.iter().enumerate().min_by_key(|(_, c)| (c.1 - s.cadence_days).abs()).map_or(1, |(i, _)| i) as u32)
-                    .valign(gtk::Align::Center)
-                    .tooltip_text("How often it bills")
-                    .build();
-                if s.cadence_guessed {
-                    cycle.add_css_class("warning");
+            if part == Part::Subscriptions {
+                let rows = a.all_rows();
+                let fx = a.db.fx().unwrap_or_default();
+                let list = insights::subscriptions(&rows, a.display(), &fx, today());
+                let total: fingraph_core::Decimal = list.iter().filter(|s| s.active).map(|s| s.annual).sum();
+                subs.set_description(Some(&format!("{} active · {} a year", list.iter().filter(|s| s.active).count(), a.money(total))));
+                if list.is_empty() {
+                    let r = adw::ActionRow::builder().title("No subscriptions yet").subtitle("Smart Triage asks about merchants that charge on a schedule.").build();
+                    subs.add(&r);
+                    sub_rows.borrow_mut().push(r.upcast());
                 }
-                {
-                    let (w, stem) = (Rc::downgrade(&a), s.stem.clone());
-                    cycle.connect_selected_notify(move |dd| {
-                        let Some(a) = w.upgrade() else { return };
-                        let days = CYCLES[dd.selected() as usize].1;
-                        let mut p = a.db.prefs();
-                        p.subscription_cadence.insert(stem.clone(), days);
-                        if a.db.save_prefs(&p).is_ok() {
-                            a.refresh();
-                        }
-                    });
-                }
-                r.add_suffix(&cycle);
-                r.add_suffix(&gtk::Label::builder().label(format!("{}/yr", a.money(s.annual))).css_classes(["tnum", "heading"]).build());
-                if let Some(url) = fingraph_core::merchants::manage_url(&format!("{} {}", s.payee, s.stem)) {
-                    let manage = gtk::Button::builder().icon_name("adw-external-link-symbolic").tooltip_text(format!("Manage or cancel — opens {url}")).valign(gtk::Align::Center).css_classes(["flat", "circular"]).build();
-                    let w = Rc::downgrade(&a);
-                    manage.connect_clicked(move |_| {
-                        if let Some(a) = w.upgrade() {
-                            gtk::UriLauncher::new(url).launch(Some(&a.win), gtk::gio::Cancellable::NONE, |_| {});
-                        }
-                    });
-                    r.add_suffix(&manage);
-                }
-                let not = gtk::Button::builder().icon_name("window-close-symbolic").tooltip_text("Not a subscription").valign(gtk::Align::Center).css_classes(["flat", "circular"]).build();
-                let (w, ids) = (Rc::downgrade(&a), s.tx_ids.clone());
-                not.connect_clicked(move |_| {
-                    if let Some(a) = w.upgrade() {
-                        let _ = a.db.set_subscription(&ids, false);
-                        a.refresh();
+                for s in list {
+                    let every = match s.cadence_days {
+                        7 => "weekly".to_string(),
+                        14 => "fortnightly".into(),
+                        30 => "monthly".into(),
+                        91 => "quarterly".into(),
+                        365 => "yearly".into(),
+                        d => format!("every {d} days"),
+                    };
+                    let r = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&s.payee))
+                        .subtitle(glib::markup_escape_text(&format!(
+                            "{} {every}{} · {} · last {} · {} charge{}{}{}",
+                            fmt_money(s.latest, s.currency),
+                            if s.cadence_guessed { " (a guess: set the cycle)" } else { "" },
+                            s.account,
+                            s.last_charged.format("%d %b %Y"),
+                            s.charges,
+                            if s.charges == 1 { "" } else { "s" },
+                            s.last_rise.map(|(o, n, _)| format!(" · ▲ price rose {o} → {n}")).unwrap_or_default(),
+                            if s.active { "" } else { " · lapsed" }
+                        )))
+                        .subtitle_lines(3)
+                        .build();
+                    // the billing cycle: what you pick here beats any guess
+                    const CYCLES: [(&str, i64); 5] = [("Weekly", 7), ("Fortnightly", 14), ("Monthly", 30), ("Quarterly", 91), ("Yearly", 365)];
+                    // a menu built when opened: a DropDown per row cost ~4 ms each
+                    let now = CYCLES.iter().min_by_key(|c| (c.1 - s.cadence_days).abs()).map_or("Monthly", |c| c.0);
+                    let cycle = gtk::MenuButton::builder().label(now).valign(gtk::Align::Center).tooltip_text("How often it bills").build();
+                    if s.cadence_guessed {
+                        cycle.add_css_class("warning");
                     }
-                });
-                r.add_suffix(&not);
-                subs.add(&r);
-                sub_rows.borrow_mut().push(r.upcast());
-            }
+                    {
+                        let (w, stem) = (Rc::downgrade(&a), s.stem.clone());
+                        cycle.set_create_popup_func(move |mb| {
+                            let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+                            let pop = gtk::Popover::builder().child(&col).build();
+                            for (name, days) in CYCLES {
+                                let b = gtk::Button::builder().label(name).css_classes(["flat"]).build();
+                                let (w, stem, pop) = (w.clone(), stem.clone(), pop.clone());
+                                b.connect_clicked(move |_| {
+                                    pop.popdown();
+                                    let Some(a) = w.upgrade() else { return };
+                                    let mut p = a.db.prefs();
+                                    p.subscription_cadence.insert(stem.clone(), days);
+                                    if a.db.save_prefs(&p).is_ok() {
+                                        a.refresh();
+                                    }
+                                });
+                                col.append(&b);
+                            }
+                            mb.set_popover(Some(&pop));
+                        });
+                    }
+                    r.add_suffix(&cycle);
+                    r.add_suffix(&gtk::Label::builder().label(format!("{}/yr", a.money(s.annual))).css_classes(["tnum", "heading"]).build());
+                    if let Some(url) = fingraph_core::merchants::manage_url(&format!("{} {}", s.payee, s.stem)) {
+                        let manage = gtk::Button::builder().icon_name("adw-external-link-symbolic").tooltip_text(format!("Manage or cancel — opens {url}")).valign(gtk::Align::Center).css_classes(["flat", "circular"]).build();
+                        let w = Rc::downgrade(&a);
+                        manage.connect_clicked(move |_| {
+                            if let Some(a) = w.upgrade() {
+                                gtk::UriLauncher::new(url).launch(Some(&a.win), gtk::gio::Cancellable::NONE, |_| {});
+                            }
+                        });
+                        r.add_suffix(&manage);
+                    }
+                    let not = gtk::Button::builder().icon_name("window-close-symbolic").tooltip_text("Not a subscription").valign(gtk::Align::Center).css_classes(["flat", "circular"]).build();
+                    let (w, ids) = (Rc::downgrade(&a), s.tx_ids.clone());
+                    not.connect_clicked(move |_| {
+                        if let Some(a) = w.upgrade() {
+                            let _ = a.db.set_subscription(&ids, false);
+                            a.refresh();
+                        }
+                    });
+                    r.add_suffix(&not);
+                    subs.add(&r);
+                    sub_rows.borrow_mut().push(r.upcast());
+                }
 
-            let cats = a.categories();
-            let ents = a.entities.borrow().clone();
-            let learned = a.db.rules().unwrap_or_default();
-            if learned.is_empty() {
-                let r = adw::ActionRow::builder().title("Nothing learned yet").subtitle("Answer the Smart Triage cards, or edit a category in Transactions and choose “Remember”.").build();
-                rules.add(&r);
-                rule_rows.borrow_mut().push(r.upcast());
             }
-            for rule in learned.into_iter().rev() {
-                let cat = rule.category_id.and_then(|id| cats.iter().find(|c| c.id == id)).map_or("—".to_string(), |c| c.name.clone());
-                let scope = rule.entity_id.and_then(|id| ents.iter().find(|e| e.id == id)).map_or("All workspaces".to_string(), |e| e.name.clone());
-                let mut bits = vec![format!("→ {cat}")];
-                if let Some(p) = &rule.clean_payee {
-                    bits.push(format!("payee “{p}”"));
+            if part == Part::Rules {
+                let cats = a.categories();
+                let ents = a.entities.borrow().clone();
+                let learned = a.db.rules().unwrap_or_default();
+                if learned.is_empty() {
+                    let r = adw::ActionRow::builder().title("Nothing learned yet").subtitle("Answer the Smart Triage cards, or edit a category in Transactions and choose “Remember”.").build();
+                    rules.add(&r);
+                    rule_rows.borrow_mut().push(r.upcast());
                 }
-                if rule.is_subscription {
-                    bits.push("subscription".into());
+                for rule in learned.into_iter().rev() {
+                    let cat = rule.category_id.and_then(|id| cats.iter().find(|c| c.id == id)).map_or("—".to_string(), |c| c.name.clone());
+                    let scope = rule.entity_id.and_then(|id| ents.iter().find(|e| e.id == id)).map_or("All workspaces".to_string(), |e| e.name.clone());
+                    let mut bits = vec![format!("→ {cat}")];
+                    if let Some(p) = &rule.clean_payee {
+                        bits.push(format!("payee “{p}”"));
+                    }
+                    if rule.is_subscription {
+                        bits.push("subscription".into());
+                    }
+                    if rule.is_transfer {
+                        bits.push("internal transfer".into());
+                    }
+                    match (rule.amount_min, rule.amount_max) {
+                        (Some(a), Some(b)) if a == b => bits.push(format!("only {a}")),
+                        (Some(a), Some(b)) => bits.push(format!("{a}–{b} only")),
+                        (Some(a), None) => bits.push(format!("{a} or more")),
+                        (None, Some(b)) => bits.push(format!("up to {b}")),
+                        (None, None) => {}
+                    }
+                    if let Some(b) = rule.business_entity_id {
+                        bits.push(format!("business expense of {}", a.entity_name(b)));
+                    }
+                    bits.push(scope);
+                    let r = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&format!("{}  “{}”", rule.kind.as_str(), rule.pattern)))
+                        .subtitle(glib::markup_escape_text(&bits.join(" · ")))
+                        .activatable(true)
+                        .build();
+                    let apply = gtk::Button::builder().label("Apply Now").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Re-apply to every matching transaction, including ones you confirmed").build();
+                    let forget = gtk::Button::builder().icon_name("user-trash-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Forget this rule (categories already set stay)").build();
+                    r.add_suffix(&apply);
+                    r.add_suffix(&forget);
+                    {
+                        let (w, rule) = (Rc::downgrade(&a), rule.clone());
+                        apply.connect_clicked(move |_| {
+                            if let Some(a) = w.upgrade() {
+                                let n = a.db.apply_rule(&rule, true).unwrap_or(0);
+                                a.toast(&format!("Applied to {n} transactions"));
+                                a.refresh();
+                            }
+                        });
+                    }
+                    {
+                        let (w, id) = (Rc::downgrade(&a), rule.id);
+                        forget.connect_clicked(move |_| {
+                            if let Some(a) = w.upgrade() {
+                                let _ = a.db.delete_rule(id);
+                                a.toast("Rule forgotten");
+                                a.refresh();
+                            }
+                        });
+                    }
+                    {
+                        let (w, rule) = (Rc::downgrade(&a), rule.clone());
+                        r.connect_activated(move |_| {
+                            if let Some(a) = w.upgrade() {
+                                rule_dialog(&a, Some(rule.clone()));
+                            }
+                        });
+                    }
+                    rules.add(&r);
+                    rule_rows.borrow_mut().push(r.upcast());
                 }
-                if rule.is_transfer {
-                    bits.push("internal transfer".into());
-                }
-                match (rule.amount_min, rule.amount_max) {
-                    (Some(a), Some(b)) if a == b => bits.push(format!("only {a}")),
-                    (Some(a), Some(b)) => bits.push(format!("{a}–{b} only")),
-                    (Some(a), None) => bits.push(format!("{a} or more")),
-                    (None, Some(b)) => bits.push(format!("up to {b}")),
-                    (None, None) => {}
-                }
-                if let Some(b) = rule.business_entity_id {
-                    bits.push(format!("business expense of {}", a.entity_name(b)));
-                }
-                bits.push(scope);
-                let r = adw::ActionRow::builder()
-                    .title(glib::markup_escape_text(&format!("{}  “{}”", rule.kind.as_str(), rule.pattern)))
-                    .subtitle(glib::markup_escape_text(&bits.join(" · ")))
-                    .activatable(true)
-                    .build();
-                let apply = gtk::Button::builder().label("Apply Now").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Re-apply to every matching transaction, including ones you confirmed").build();
-                let forget = gtk::Button::builder().icon_name("user-trash-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Forget this rule (categories already set stay)").build();
-                r.add_suffix(&apply);
-                r.add_suffix(&forget);
-                {
-                    let (w, rule) = (Rc::downgrade(&a), rule.clone());
-                    apply.connect_clicked(move |_| {
-                        if let Some(a) = w.upgrade() {
-                            let n = a.db.apply_rule(&rule, true).unwrap_or(0);
-                            a.toast(&format!("Applied to {n} transactions"));
-                            a.refresh();
-                        }
-                    });
-                }
-                {
-                    let (w, id) = (Rc::downgrade(&a), rule.id);
-                    forget.connect_clicked(move |_| {
-                        if let Some(a) = w.upgrade() {
-                            let _ = a.db.delete_rule(id);
-                            a.toast("Rule forgotten");
-                            a.refresh();
-                        }
-                    });
-                }
-                {
-                    let (w, rule) = (Rc::downgrade(&a), rule.clone());
-                    r.connect_activated(move |_| {
-                        if let Some(a) = w.upgrade() {
-                            rule_dialog(&a, Some(rule.clone()));
-                        }
-                    });
-                }
-                rules.add(&r);
-                rule_rows.borrow_mut().push(r.upcast());
             }
         })
     };

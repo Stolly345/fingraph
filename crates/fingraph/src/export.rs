@@ -244,7 +244,7 @@ fn fill_projects(a: &Rc<App>, group: &adw::PreferencesGroup, rows_kept: &Rc<RefC
     for r in rows_kept.borrow_mut().drain(..) {
         group.remove(&r);
     }
-    let rows = a.db.transactions(&TxFilter { entity_ids: a.entity_ids(), split_lines: true, ..Default::default() }).unwrap_or_default();
+    let rows = a.all_rows();
     let fx = a.db.fx().unwrap_or_default();
     let list = insights::projects(&rows, a.display(), &fx);
     if list.is_empty() {
