@@ -12,6 +12,11 @@ Nothing leaves the computer. Everything lives in `~/.local/share/fingraph/`: the
 of your statements and backups. The full product and system reference is
 [`docs/PRD.md`](docs/PRD.md).
 
+![Overview: five headline numbers, six charts, and the Review banner](docs/screenshots/overview.png)
+
+*Every screenshot here uses the built-in demo data (simulated statements for made-up accounts),
+never a real ledger.*
+
 ## Install
 
 ```sh
@@ -44,6 +49,8 @@ The first time it opens, **Getting Started** walks you through setup. After a we
 The guide stays in the main menu and remembers where you stopped. To explore without your own
 data, the empty Overview and the guide both offer **Load Demo Data**: a simulated year for a
 personal and a property-business workspace, across all five banks, in KYD and USD.
+
+![Getting Started guide, step 1 of 8](docs/screenshots/guide.png)
 
 ### Once a month
 
@@ -117,6 +124,8 @@ searches transactions and Ctrl+O imports.
 - **Re-reading.** **Rescan All** (Preferences, or Rules & Categories) re-reads every kept
   statement. Your edits are kept, and it backs up first.
 
+![Statements: coverage by month, reconciliation per statement, and one waiting for approval](docs/screenshots/statements.png)
+
 ### Sorts transactions
 
 The steps are tried in this order:
@@ -129,6 +138,8 @@ The steps are tried in this order:
 5. Whatever's left goes to **To Review**. There's one card per merchant with every charge listed;
    answer it once and the answer is applied to past and future statements. Suggestions come from
    how you filed similar charges.
+
+![To Review: one card per merchant, with every charge listed](docs/screenshots/review.png)
 
 ### Keeps money apart
 
@@ -155,6 +166,9 @@ The steps are tried in this order:
   - **Money moves** cover an overspend.
   - **Set-asides** for yearly and quarterly bills.
   - **Watchlists** cap a merchant (Amazon CI$ 150).
+
+![Budget: this month against the plan, and fixed vs variable expenses](docs/screenshots/budget.png)
+
 - **Monthly Close** takes you through the month once its statements are in. It checks they're all
   there, sorts what's new, settles the budget, ticks off the regular bills (paid, missed, or not on
   a statement yet), updates goals, and ends with a summary.
@@ -172,6 +186,16 @@ The steps are tried in this order:
   - **goals** (save up, or pay a card down) with on-track status
   - **debt payoff:** highest rate first vs smallest balance first, with rates read from your
     interest charges
+
+![Outlook: estimated balances until the next statement](docs/screenshots/outlook.png)
+
+![Net Worth over time, with what you own and owe](docs/screenshots/networth.png)
+
+### Transactions and the Combined Statement
+
+![Transactions: search, filters, inline categories, and bulk actions](docs/screenshots/transactions.png)
+
+![Combined Statement: chosen accounts month by month with one running balance](docs/screenshots/statement.png)
 
 ### Reports and receipts
 
@@ -260,3 +284,7 @@ FINGRAPH_DB=/tmp/x.db FINGRAPH_DEMO=1 FINGRAPH_VIEW=budget FINGRAPH_SHOT=out.png
 ```
 
 That uses a scratch ledger. Never point `FINGRAPH_DB` at your real one.
+
+The README screenshots in `docs/screenshots/` were taken this way from a fresh demo ledger, with
+**Fill From My Spending** pressed on Budget (`FINGRAPH_CLICK="Fill From My Spending"`) so the budget
+has something in it.
