@@ -1,7 +1,7 @@
 # FinGraph — PRD / System Reference
 
-**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.5 `.deb`
-**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Status:** in daily personal use; not published
+**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.6 `.deb`
+**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Updated:** 2026-10-28 for 0.2.6 · **Status:** in daily personal use; not published
 
 > Single source of truth for what FinGraph is, how it's built, and why it behaves the way it does.
 > It replaces the Python/Flet prototype in `~/Projects/FinGraph` (left untouched; its
@@ -71,10 +71,10 @@ property. Three ways of using the app shaped the layout:
 
 | Crate / file | Responsibility |
 |---|---|
-| `fingraph-core/src/parser/` | 5-pass scanner: `multipass.rs` (passes 1–3), `reconcile.rs` (4–5), `profiles.rs` (bank profiles, fingerprinting), `dates.rs` |
-| `fingraph-core/src/db.rs` | SQLite ledger (WAL), migrations, import, transfers, card payments, rules, backups |
+| `fingraph-core/src/parser/` | 5-pass scanner: `multipass.rs` (passes 1–3, layout notes), `reconcile.rs` (4–5), `profiles.rs` (bank profiles, fingerprinting, declared layouts), `dates.rs`; `mod.rs` holds the OCR fallback and anonymised layout samples |
+| `fingraph-core/src/db.rs` | SQLite ledger (WAL), migrations, import planning and review holds (§6.2), transfers, card payments, rules, backups |
 | `fingraph-core/src/rules.rs` | Merchant stems, learned rules, truncation-tolerant matching, Smart Triage grouping |
-| `fingraph-core/src/merchants.rs` + `data/merchants.tsv` | Merchant directory (571 entries) and keyword rules |
+| `fingraph-core/src/merchants.rs` + `data/merchants.tsv` | Merchant directory (582 entries) and keyword rules |
 | `fingraph-core/src/insights.rs` | KPIs, chart series, subscriptions, "What changed?" cards, balances |
 | `fingraph-core/src/budget.rs` | Budgets (with history), rollovers, moves, envelopes, non-monthly bills, watchlists, the pay plan, month closes |
 | `fingraph-core/src/outlook.rs` | Age of Money, regular payments and the bills checklist, balance forecasts and their checks |
@@ -83,7 +83,7 @@ property. Three ways of using the app shaped the layout:
 | `fingraph-core/src/export/` | CSV, QIF, OFX 1.0.2 SGML, QBO, P&L CSV |
 | `fingraph-core/src/prefs.rs` | Preferences (stored in the ledger, so they travel with backups) |
 | `fingraph-core/src/demo.rs` | Simulated statements for all five banks (tests + Load Demo Data) |
-| `fingraph/src/*.rs` | One file per page/dialog; `charts.rs` is the Cairo chart widget |
+| `fingraph/src/*.rs` | One file per page/dialog; `charts.rs` is the Cairo chart widget; `main.rs` the shell — sidebar order, `OFF_SIDEBAR` pages reached from the menu, actions, CSS, and the ⓘ helpers (`with_info`, `info_heading`, `info_caption`) |
 | `fingraph/src/guide.rs` | Getting Started: the eight-step guided setup (first run and main menu) |
 
 Text and positions come from poppler's `pdftotext -bbox` (no font metadata; geometry does the work).
@@ -243,7 +243,7 @@ Applied on import, in this order; earlier steps win.
 3. **Credit card payments**: a bank payment naming one of your cards (last four, or a full number
    ending in them) or saying it pays a card, and payments received on a card account → Transfers ›
    Credit Card Payments, payee "Payment to <card>". Works without the card's statement.
-4. **Merchant directory** (`data/merchants.tsv`, 571 entries: Cayman supermarkets, liquor, pharmacies,
+4. **Merchant directory** (`data/merchants.tsv`, 582 entries: Cayman supermarkets, liquor, pharmacies,
    hardware, ~150 restaurants, insurers, utilities incl. Home Gas / Clean Gas propane and Logic /
    Flow / C3 / Digicel, fuel, government fees, auto, health, schools, hotels, airlines; online
    retailers, VPNs, email, every Google service, Apple, Microsoft, streaming, AI, software, games).
@@ -406,14 +406,14 @@ Thresholds, chart months, hidden cards and categories left out of spending are p
 
 ## 9. Interface
 
-**Sidebar** (`AdwNavigationSplitView`; 0.2.0 adds **Outlook** and **Net Worth** after Budget — no
-Ctrl shortcut, Ctrl+1–9 are taken): each page has a white symbolic icon on a coloured rounded
+**Sidebar** (`AdwNavigationSplitView`; order since 0.2.5 at the owner's request: Overview, Net Worth,
+Budget, Outlook, Transactions, Combined Statement, Statements, What Changed, Subscriptions — Ctrl+1–9
+in that order): each page has a white symbolic icon on a coloured rounded
 tile (Setup pages slate); icons are all from Adwaita so none fall back to full-colour images; workspace switcher (one workspace or Consolidated across a
-chosen set) at the top; Overview, What Changed *(count)*, Transactions,
-Combined Statement, Budget, Subscriptions *(monthly cost)*, Statements *(⚠ when one doesn't balance)*
-(Ctrl+1–7, Reports & Export Ctrl+7; Combined Statement Ctrl+8, Budget Ctrl+9); **Accounts** — each with its last verified balance (owed in red), opening its overview;
+chosen set) at the top; badges on What Changed *(count)*, Subscriptions *(monthly cost)*,
+Statements *(⚠ when one doesn't balance)* and Budget; **Accounts** — each with its last verified balance (owed in red), opening its overview;
 listed last. Since 0.2.5 the **main menu** holds Import Statements, Reports & Export and the setup pages — Rules & Categories, Business
-Directory, Bank Profiles, Preferences (Ctrl+,) — and **To Review** (Ctrl+2) is reached from a banner
+Directory, Bank Profiles, Preferences (Ctrl+,) — and **To Review** is reached from a banner
 across the top of Overview ("N merchants to review" · Review), shown only while something waits.
 The header shows only the controls a page uses (date range, KYD | USD). Reopens on the last page.
 
@@ -492,9 +492,9 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 10. Packaging & operations
 
-- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.5-1_amd64.deb` (binary, desktop entry with
+- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.6-1_amd64.deb` (binary, desktop entry with
   PDF "Open With", icon; depends on poppler-utils, GTK 4, libadwaita).
-- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.5-1_amd64.deb`.
+- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.6-1_amd64.deb`.
 - Data: `~/.local/share/fingraph/ledger.db` (+ `statements/`, `backups/`). Hand backups made during
   development sit beside the ledger as `ledger-backup-2026-10-27-*.db`.
 - Terminal: `cargo run -p fingraph-core --example ledger -- reset|rescan|reapply|cards`.
@@ -506,16 +506,19 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 11. Quality
 
-- `cargo test --workspace`: 61 tests (the guide release added whole-month suggestions and salary-with-a-bonus; 0.2.0 added rollovers/moves/history, non-monthly bills,
+- `cargo test --workspace`: 69 tests (0.2.3–0.2.4 added the real CNB layout and OCR, multi-line
+  rows, a layout mismatch that still reconciles, anonymised layout samples, import plans and holds,
+  FITID re-keying and the one-time profile refresh; the guide release added whole-month suggestions and salary-with-a-bonus; 0.2.0 added rollovers/moves/history, non-monthly bills,
   watchlists and closes, Age of Money incl. a hand-checked FIFO case, the bills checklist incl.
   missed vs not-yet-seen, forecasts and their checks, net worth, goal status, avalanche vs snowball,
   rate estimates, the guesser's held-out accuracy, manage links) — earlier: — five bank layouts, rollover, date inheritance, sign healing,
   both Pass-5 recoveries, a whole demo year, ledger (dedup, transfers, card payments, business
   expenses, backups/restore/erase, rescan keeping edits), rules and truncation matching, amount and reference rules, splits,
   attachments, coverage, directory and keywords, insights, subscriptions, exports. Plus `-- --ignored real` re-scanning the owner's
-  statements.
+  statements, and `-- --ignored private` for layout samples in `tests/fixtures/private/`.
 - `cargo clippy --workspace --all-targets` clean; `cargo build --release` clean.
 - UI checked page by page with the screenshot hooks against the demo and a copy of the real ledger.
+  The hooks can't hover or open popovers, so the ⓘ text and menu items are checked by hand.
 
 ---
 
@@ -559,6 +562,7 @@ Fixes found while testing the guide on the owner's real statements:
 | CNB from a real statement (0.2.3) | The guessed CNB profile was wrong on every point. Real layout: `DD/MM` dates, one Amount column with a trailing minus, the date on a description's first line and the amount + balance on its last (Pass 3 now holds a dated amount-less line as a "head" that later lines join, across a page break too), summary amounts on an `as of` line under spaced-out labels, `ACCOUNT #: SV` = savings. Stored built-in CNB profiles are replaced once (`profile_rev:cnb_ky`). OCR fallback: 300 dpi grey, pale ink blanked at 180 (the CUSTOMER COPY watermark garbled digits), `--psm 6`, `49,48`→`49.48`; one printed balance that disagrees with both neighbours is ignored and noted ("Balance ignored") instead of failing the stretch |
 | Snappier (0.2.2) | Transactions 1.9 s → 0.1 s per refresh (cell buttons instead of a DropDown/EditableLabel per row; only changed rows are replaced); refreshes coalesce to one per frame (start-up did 5); rows read once per refresh; sidebar 75 → 30 ms; Subscriptions 109 → 7 ms; Combined Statement skips rebuilding when nothing changed; index on `transactions(document_id)` (schema v7); `synchronous=NORMAL` under WAL |
 | Sidebar and ⓘ (0.2.5) | Owner asked for To Review to disappear when empty — it became a banner on Overview instead; Setup pages moved to the main menu; an ⓘ explaining how to read each card on Overview, Budget, Outlook and Net Worth. "Top Merchants · Pareto" renamed "Where Most of Your Money Goes". Long card titles now wrap: the ⓘ had pushed Overview wider than the window |
+| Sidebar order (0.2.6) | Owner's order: Overview, Net Worth, Budget, Outlook, Transactions, Combined Statement, Statements, What Changed, then Subscriptions (not named, put last); Ctrl+1–9 follow it. Also in this round: Reports & Export moved from the sidebar to the main menu, and Load Demo Data left the menu (it stays on the empty Overview and in the guide). Versions now bump on every `.deb`: a same-version rebuild was once installed over without `--reinstall` and the change looked missing |
 
 ---
 

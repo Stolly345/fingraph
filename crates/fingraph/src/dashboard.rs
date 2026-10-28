@@ -53,7 +53,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let ribbon = gtk::Box::builder().spacing(12).homogeneous(true).build();
     // what needs an answer from you, shown only while something does
     let review = adw::Banner::builder().button_label("Review").revealed(false).build();
-    review.set_action_name(Some("win.page-2"));
+    review.set_action_name(Some("win.show-review"));
 
     let (c1, k_net) = kpi_card(
         "Net Cash Flow",

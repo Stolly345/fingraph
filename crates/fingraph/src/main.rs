@@ -40,7 +40,7 @@ const APP_ID: &str = "dev.fingraph.FinGraph";
 /// Ctrl+1 to Ctrl+9 for the first nine; all of them can be the page FinGraph reopens on.
 /// Pages reached from Overview (To Review) or the main menu, not listed in the sidebar.
 const OFF_SIDEBAR: [&str; 5] = ["review", "export", "rules", "directory", "profiles"];
-const MAIN_PAGES: [&str; 11] = ["overview", "review", "changes", "transactions", "subscriptions", "statements", "export", "statement", "budget", "outlook", "networth"];
+const MAIN_PAGES: [&str; 11] = ["overview", "networth", "budget", "outlook", "transactions", "statement", "statements", "changes", "subscriptions", "review", "export"];
 
 /// Which workspaces the window shows.
 #[derive(Clone, PartialEq)]
@@ -228,15 +228,15 @@ impl App {
         app.views.borrow_mut().push(("account", acr));
         let pages: Vec<(&'static str, &str, &str, gtk::Widget, Refresh)> = vec![
             ("overview", "Overview", "view-grid-symbolic", o, or),
-            ("review", "To Review", "mail-unread-symbolic", rv, rvr),
-            ("changes", "What Changed", "preferences-system-notifications-symbolic", c, cr),
-            ("transactions", "Transactions", "view-list-bullet-symbolic", t, tr),
-            ("statement", "Combined Statement", "view-paged-symbolic", cs, csr),
+            ("networth", "Net Worth", "starred-symbolic", nw, nwr),
             ("budget", "Budget", "accessories-calculator-symbolic", bu, bur),
             ("outlook", "Outlook", "x-office-calendar-symbolic", ol, olr),
-            ("networth", "Net Worth", "starred-symbolic", nw, nwr),
-            ("subscriptions", "Subscriptions", "media-playlist-repeat-symbolic", sb, sbr),
+            ("transactions", "Transactions", "view-list-bullet-symbolic", t, tr),
+            ("statement", "Combined Statement", "view-paged-symbolic", cs, csr),
             ("statements", "Statements", "x-office-document-symbolic", st, str_),
+            ("changes", "What Changed", "preferences-system-notifications-symbolic", c, cr),
+            ("subscriptions", "Subscriptions", "media-playlist-repeat-symbolic", sb, sbr),
+            ("review", "To Review", "mail-unread-symbolic", rv, rvr),
             ("export", "Reports & Export", "document-save-symbolic", e, er),
             ("rules", "Rules & Categories", "edit-find-replace-symbolic", r, rr),
             ("directory", "Business Directory", "folder-saved-search-symbolic", dir, dirr),

@@ -1,107 +1,235 @@
 # FinGraph
 
-A local-first ledger for Cayman bank statements, in Rust with GTK 4 and libadwaita. Drop PDF
-statements in; a 5-pass scanner reads them and proves each one against its own balances; a Cayman
-business directory and Smart Triage categorise them; the dashboard shows where the money goes, in
-KYD or USD, across personal and business workspaces.
+A local-first ledger and budget for Cayman bank statements, in Rust with GTK 4 and libadwaita.
 
-Nothing leaves the computer. Everything lives in `~/.local/share/fingraph/` (ledger, kept statement
-PDFs, backups). Full product and system reference: [`docs/PRD.md`](docs/PRD.md).
+Cayman banks don't offer live feeds to budgeting apps, so FinGraph works from the PDF statements you
+download once a month. A 5-pass scanner reads each statement and proves it against its own
+balances. Your rules, a directory of Cayman businesses and Smart Triage then sort the
+transactions. On top of that sit a budget, a forecast for the weeks between statements, and your
+net worth, in KYD or USD, across personal and business workspaces.
 
-## What it does
-
-- **Reads statements** from Butterfield, Scotiabank, Cayman National, RBC and the CICSA Credit
-  Union, and reconciles them to the cent (running balances and opening + transactions = closing).
-  What it can't read is shown in the Statement Inspector with a one-click fix.
-- **Categorises** with your own rules first, then internal transfers and credit card payments,
-  then a directory of 571 Cayman businesses and online services, then keyword guesses
-  (MARKET → groceries, DIGITAL → subscriptions). Whatever's left goes to **To Review**: one card per
-  merchant, every charge listed, answered once and applied to past and future statements.
-- **Keeps money apart**: workspaces (Personal, Business, Rental), a consolidated view, a
-  business-expense flag, split charges (the rental's share of one receipt), and "Business owes you"
-  cards that track personal money spent on the business until it's paid back.
-- **Budget**: a monthly amount per category, filled from what you usually spend (median of the last
-  six months), with this month against it, what's over, and where the month is heading. A setup
-  wizard takes your pay cycle, gross pay and deductions (pension 5%, health insurance), other income,
-  loan payments and a savings goal, does the arithmetic (and solves how much flexible spending must
-  shrink to reach the goal), and projects savings 12 months ahead on budget and on trend. Alerts when
-  a category is over or 85% used early in the month (sidebar count + Overview card). Leftovers can
-  **roll over**, money can be **moved** to cover an overspend, yearly and quarterly bills get a
-  monthly **set-aside**, **watchlists** cap a merchant (Amazon CI$ 150), and a **flow diagram**
-  shows where the month's money went.
-- **Monthly Close**: when a month's statements are in — check they're all there, sort what's new,
-  settle the budget, tick off the regular bills (paid, missed, or statement not in yet), update
-  goals, and close the month with a summary.
-- **Outlook** (statements come a month late): each bank account's estimated balance until the next
-  statement, what's safe to spend, the month's bills, and **Age of Money** (how long money sits
-  before it's spent).
-- **Net Worth**: statement balances plus assets and debts you value by hand, over time; **goals**
-  (save up, or pay a card down) with on-track status; **debt payoff** — highest rate first vs
-  smallest balance first, with rates read from your interest charges.
-- **Learns** your categorising: To Review suggests categories from how you filed similar charges.
-- **Rules** can be limited to an amount (*only when CI$ 125.00*) or match a reference number.
-- **Receipts**: drop a PDF or photo on a transaction; export the P&L with every receipt for your
-  accountant.
-- **Statement coverage**: an account × month grid shows verified, missing and broken months.
-- **Shows** an overview with six interactive charts, What Changed (price rises, bill spikes,
-  possible double charges, bank fees, category drift, P&L, annual renewals; bills compared with the
-  same month last year), subscriptions with their real yearly cost, an overview per account, a
-  **Combined Statement** (all or chosen accounts, month by month with a combined running balance;
-  click a line to edit it), and
-  projects (tags) with total landed cost including freight and customs duty.
-- **Exports** CSV, QIF, OFX 1.0.2, QuickBooks QBO, a P&L, and a P&L with receipts.
-
-Money is `rust_decimal::Decimal` end to end, stored as the exact string plus integer cents next to
-its currency. The KYD/USD peg (1 KYD = 1.20 USD) is the default rate; a rate printed on the statement
-wins for that transaction.
-
-## Layout
-
-| Path | What |
-|---|---|
-| `crates/fingraph-core` | No GUI: scanner (`parser/`), ledger (`db.rs`), rules & triage (`rules.rs`), directory (`merchants.rs`, `data/merchants.tsv`), splits/reimbursements/attachments/coverage (`workflows.rs`), insights, exports, preferences, demo statements |
-| `crates/fingraph` | The app: one file per page (`dashboard`, `review`, `changes`, `transactions`, `account`, `statements`, `rules`, `profiles`, `export`, `preferences`, `wizard`, `split`, `owed`, `statement`, `txedit`, `directory`, `budget`), Cairo charts in `charts.rs` |
-| `packaging/` | Desktop entry (PDF "Open With") and icon |
-| `docs/PRD.md` | Product and system reference |
+Nothing leaves the computer. Everything lives in `~/.local/share/fingraph/`: the ledger, kept copies
+of your statements and backups. The full product and system reference is
+[`docs/PRD.md`](docs/PRD.md).
 
 ## Install
 
 ```sh
-sudo apt install poppler-utils libgtk-4-dev libadwaita-1-dev
+sudo apt install poppler-utils tesseract-ocr libgtk-4-dev libadwaita-1-dev
 cargo deb -p fingraph
-sudo apt install ./target/debian/fingraph_0.2.5-1_amd64.deb
+sudo apt install ./target/debian/fingraph_0.2.6-1_amd64.deb
 ```
 
-Or run from source: `cargo run -p fingraph --release`. Main menu → **Load Demo Data** imports a
-simulated year (Personal + a property business, all five banks, KYD and USD) to explore everything.
+Or run it from source with `cargo run -p fingraph --release`.
 
-## Using it
+- `poppler-utils` is required: `pdftotext` gives the scanner every word with its position.
+- `tesseract-ocr` is recommended. It reads statements that are only pictures, such as redacted or
+  scanned ones.
 
-The first time, **Getting Started** walks you through it (it's in the main menu any time after):
-download your PDF statements, put them in one folder, let FinGraph read them, sort what it didn't
-recognise, and set up a budget. After that, once a month:
+Same-version `.deb`s need `sudo apt install --reinstall …`, so every release gets a new version
+number.
 
-1. Save last month's statements into the folder (FinGraph reads them when it opens), or drop them on
-   **Statements**.
-2. Run **Monthly Close** on the Budget page.
-3. Between statements, **Outlook** shows where balances are heading and what's safe to spend.
+## Getting started
 
-Shortcuts: Ctrl+1 … Ctrl+9 for the main pages, Ctrl+F search, Ctrl+O import, Ctrl+, preferences.
+The first time it opens, **Getting Started** walks you through setup. After a welcome page, its steps are:
+
+1. Choose your workspaces.
+2. Download your statements from each bank's online banking.
+3. Put them in one folder, which FinGraph watches.
+4. Let FinGraph read them.
+5. Sort what it didn't recognise.
+6. Set up a budget.
+7. Learn the monthly routine.
+
+The guide stays in the main menu and remembers where you stopped. To explore without your own
+data, the empty Overview and the guide both offer **Load Demo Data**: a simulated year for a
+personal and a property-business workspace, across all five banks, in KYD and USD.
+
+### Once a month
+
+1. Save last month's statements into the watched folder; FinGraph reads them when it opens. Or use
+   **Import Statements…** in the main menu, or drop them on the **Statements** page.
+2. Answer anything it asks (see [Importing statements](#importing-statements)), and anything waiting
+   in **To Review**.
+3. Run **Monthly Close** on the Budget page.
+4. Between statements, **Outlook** shows where balances are heading and what's safe to spend.
+
+## Finding your way around
+
+**Sidebar**, in order:
+
+| Page | Ctrl+ | What it shows |
+|---|---|---|
+| Overview | 1 | Five headline numbers and six charts; a **Review** banner while merchants wait for an answer |
+| Net Worth | 2 | What you own and owe over time, goals, and debt payoff |
+| Budget | 3 | This month against your plan, rollovers, non-monthly bills, watchlists, and where the money went |
+| Outlook | 4 | Balances until the next statement, safe to spend, the month's bills, and Age of Money |
+| Transactions | 5 | Every transaction: search, filter, edit, split, attach receipts |
+| Combined Statement | 6 | Chosen accounts month by month with one running balance |
+| Statements | 7 | Every statement read, its reconciliation, coverage by month, and anything waiting for approval |
+| What Changed | 8 | Price rises, bill spikes, possible double charges, fees, and category drift |
+| Subscriptions | 9 | Recurring charges and what they really cost a year |
+
+Below the pages, **Accounts** lists each account with its last balance a statement confirmed (red
+when it's money owed). Click one to open that account's overview.
+
+The **main menu (☰)** has Import Statements…, Reports & Export, Rules & Categories, Business
+Directory, Bank Profiles, Preferences (Ctrl+,), Getting Started and About.
+
+**ⓘ buttons.** Every card on Overview, Budget, Outlook and Net Worth has an ⓘ next to its title.
+Hover over it to see how to read the card, or click to keep the explanation open.
+
+The header shows only the controls the page uses: the date range, and **KYD | USD**. Ctrl+F
+searches transactions and Ctrl+O imports.
+
+## What it does
+
+### Reads statements and proves them
+
+- **Banks:** Butterfield, Scotiabank, Cayman National (CNB), RBC and the CICSA Credit Union.
+- **Five passes:**
+  1. Find the bank.
+  2. Find the columns.
+  3. Read the rows.
+  4. Check every running balance.
+  5. Check that opening balance + transactions = closing balance.
+
+  Statements that are only pictures are read with OCR.
+- **Declared layouts.** Each bank profile writes down its layout: whether the amount comes before
+  or after the description, the bank's own summary labels, and which account types have been
+  checked against a real statement. A statement that breaks the layout gets a note naming the
+  rule. This catches statements that add up but are still wrong.
+- **Unreadable lines.** Anything the scanner can't read is shown in the Scan Pass Report, with a
+  one-click **Convert** to turn a skipped line into a transaction.
+
+### Importing statements
+
+- **New accounts** are asked about ("Is this your account?"), never added silently. Accounts are
+  matched on bank + last four digits + currency.
+- **Repeat periods.** A second file for an account and period you already have asks before
+  replacing it, so the same statement can't count twice.
+- **Statements held for review.** These stay on the Statements page as **Waiting for review**, and
+  their transactions count nowhere until you **Approve** them:
+  - statements that don't reconcile
+  - statements read by OCR
+  - the first statement of each account type from a bank
+  - statements that break the bank's layout
+- **Re-reading.** **Rescan All** (Preferences, or Rules & Categories) re-reads every kept
+  statement. Your edits are kept, and it backs up first.
+
+### Sorts transactions
+
+The steps are tried in this order:
+
+1. Your rules. A rule can be limited to an amount (*only when CI$ 125.00*) or match a reference
+   number.
+2. Transfers between your accounts and credit card payments.
+3. A directory of 582 Cayman businesses and online services.
+4. Keyword guesses (MARKET → groceries, DIGITAL → subscriptions).
+5. Whatever's left goes to **To Review**. There's one card per merchant with every charge listed;
+   answer it once and the answer is applied to past and future statements. Suggestions come from
+   how you filed similar charges.
+
+### Keeps money apart
+
+- **Workspaces:** Personal, Business, Rental and so on, or a consolidated view across any set.
+- **Business expenses:** a business-expense flag on transactions.
+- **Splits:** for example, the rental's share of one receipt.
+- **Business owes you:** cards track personal money spent on the business until it's paid back.
+- **Projects (tags):** total landed cost, including freight and customs duty.
+
+### Budget
+
+- **Setting it up:**
+  - **Monthly amounts** per category, filled from what you usually spend (the median of the last
+    six months).
+  - **Setup wizard:** pay cycle, gross pay and deductions, other income, loan payments and a savings
+    goal. It does the arithmetic, including how much flexible spending must shrink to reach the
+    goal.
+- **During the month:**
+  - **Alerts** when a category is over budget, or 85% used early in the month.
+  - **Fixed vs variable expenses**, and a **12-month savings projection**, both on budget and on
+    trend.
+- **Changing it:**
+  - **Rollovers:** leftovers carry over to the next month.
+  - **Money moves** cover an overspend.
+  - **Set-asides** for yearly and quarterly bills.
+  - **Watchlists** cap a merchant (Amazon CI$ 150).
+- **Monthly Close** takes you through the month once its statements are in. It checks they're all
+  there, sorts what's new, settles the budget, ticks off the regular bills (paid, missed, or not on
+  a statement yet), updates goals, and ends with a summary.
+
+### Outlook and Net Worth
+
+- **Outlook** covers the weeks before the next statement arrives:
+  - each bank account's estimated balance until then
+  - the lowest point ahead
+  - safe to spend per day
+  - the month's bills
+  - **Age of Money:** how long money sits before it's spent
+- **Net Worth:**
+  - statement balances plus assets and debts you value by hand, over time
+  - **goals** (save up, or pay a card down) with on-track status
+  - **debt payoff:** highest rate first vs smallest balance first, with rates read from your
+    interest charges
+
+### Reports and receipts
+
+- **Receipts:** drop a PDF or photo on a transaction.
+- **Exports:** CSV, QIF, OFX 1.0.2, QuickBooks QBO per account, a P&L, and a P&L with every receipt
+  for your accountant.
+
+Money is `rust_decimal::Decimal` end to end, stored as the exact string plus integer cents next to
+its currency. The KYD/USD peg (1 KYD = 1.20 USD) is the default rate; a rate printed on a statement
+wins for that transaction.
+
+## How accurate is each bank?
+
+| Bank | Checked against | Status |
+|---|---|---|
+| Scotiabank | 34 real statements: chequing, Amex, Mastercard; KYD and USD | Reconciles to the cent, layout verified |
+| Cayman National | 1 real (redacted, third-party) savings statement, read by OCR | 95 of 95 transactions, reconciles |
+| Butterfield, RBC, CICSA | Simulated layouts only | Untested on a real statement |
+
+For the three untested banks, the first statement of each account type is held for review. To
+bring one up to accuracy:
+
+1. Use **Bank Profiles → Test PDF**. To pass, the statement must be recognised as the right bank,
+   reconcile to the cent, and have no layout notes.
+2. Use **Save Layout Sample…**. It keeps every word's position, the dates, amounts and headings,
+   and turns names, merchants and account numbers into `xxx` and `000`. Samples go in
+   `crates/fingraph-core/tests/fixtures/private/`, which git ignores, and become tests.
+3. Approve the first import after comparing it with the PDF.
+
+The details are in the PRD, §6.3.
+
+## Code layout
+
+| Path | What |
+|---|---|
+| `crates/fingraph-core` | No GUI. Scanner (`parser/`: profiles, multipass, dates, reconcile, OCR), ledger and import rules (`db.rs`), rules and triage (`rules.rs`), learning (`learn.rs`), directory (`merchants.rs`, `data/merchants.tsv`), splits, reimbursements, attachments and coverage (`workflows.rs`), `insights.rs`, `budget.rs`, `outlook.rs`, `wealth.rs`, exports, preferences, demo statements |
+| `crates/fingraph` | The app, one file per page or dialog: `dashboard`, `wealth`, `budget`, `close`, `outlook`, `transactions`, `statement`, `statements`, `changes`, `rules`, `review`, `account`, `export`, `directory`, `profiles`, `preferences`, `guide`, `wizard`, `split`, `owed`, `txedit`. Cairo charts are in `charts.rs`; the shell, sidebar, menu and shared helpers are in `main.rs` |
+| `packaging/` | Desktop entry (PDF "Open With") and icon |
+| `docs/PRD.md` | Product and system reference, decisions log, known limits |
 
 ## Adding businesses
 
-`crates/fingraph-core/data/merchants.tsv`, one line each:
+Add one line per business to `crates/fingraph-core/data/merchants.tsv`:
 
 ```
 KEYWORDS<TAB>Name<TAB>Category[<TAB>fallback]
 HOME GAS|HOMEGAS	Home Gas	Gas
 ```
 
-Keywords match whole words (punctuation and apostrophes ignored, a trailing S allowed); the earliest
-match in the statement text wins, then the longest. Never add a generic word on its own. `fallback`
-marks a payment platform (Google, Apple) that gives way to the service it billed. Rebuild after
-editing. Browse it in the app under **Setup → Business Directory** (search, how often each
-business appears in your statements, keyword guesses, and **Override…** to make your own rule). For a one-off, answering in To Review (or a rule) is quicker and always wins.
+- **Matching:** keywords match whole words. Punctuation and apostrophes are ignored, and a trailing
+  S is allowed. The earliest match in the statement text wins, then the longest.
+- **Generic words:** never add a generic word on its own.
+- **`fallback`:** marks a payment platform (Google, Apple) that gives way to the service it billed.
+
+Rebuild after editing. To browse the directory in the app, use main menu → **Business Directory**.
+It shows search, how often each business appears in your statements, keyword guesses, and
+**Override…** to make your own rule. For a one-off, answering in To Review or adding a rule is
+quicker and always wins.
 
 ## Terminal tools
 
@@ -113,13 +241,22 @@ cargo run -p fingraph-core --example ledger -- cards                # recognise 
 cargo run -p fingraph-core --example ledger -- reset                # forget learned rules and categories
 ```
 
-Close the app first; back up from Preferences → Data (or it backs up automatically before Reset and
-Rescan when run from the app).
+Close the app first, and back up from Preferences → Data. Run from the app instead, Rescan and Reset
+back up on their own.
 
 ## Tests
 
 ```sh
-cargo test --workspace                            # 47 tests: bank layouts, healing, ledger, rules, directory, insights, exports
-cargo test -p fingraph-core -- --ignored real     # also scans your statements in ~/.local/share/fingraph/documents
+cargo test --workspace                                # 69 tests: banks and layouts, OCR, import rules, ledger, rules, directory, budget, insights, exports
+cargo test -p fingraph-core -- --ignored real         # also scans your own statements in ~/.local/share/fingraph/documents
+cargo test -p fingraph-core -- --ignored private      # layout samples in tests/fixtures/private/
 cargo clippy --workspace --all-targets
 ```
+
+Debug builds can screenshot any page without a person at the keyboard. For example:
+
+```sh
+FINGRAPH_DB=/tmp/x.db FINGRAPH_DEMO=1 FINGRAPH_VIEW=budget FINGRAPH_SHOT=out.png cargo run -p fingraph
+```
+
+That uses a scratch ledger. Never point `FINGRAPH_DB` at your real one.
