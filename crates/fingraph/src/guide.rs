@@ -133,9 +133,9 @@ fn done(app: &App, s: Step) -> bool {
     match s {
         Step::Welcome => app.db.setting("guide_step").is_some_and(|v| v != "0"),
         Step::Workspaces => !app.entities.borrow().is_empty(),
-        Step::Download | Step::Read => app.db.documents(&ids).is_ok_and(|d| !d.is_empty()),
+        Step::Download | Step::Read => app.db.documents_all(&ids).is_ok_and(|d| !d.is_empty()),
         Step::Folder => folder(app).is_some(),
-        Step::Sort => app.db.documents(&ids).is_ok_and(|d| !d.is_empty()) && app.db.uncategorized_count(&ids).unwrap_or(1) == 0,
+        Step::Sort => app.db.documents_all(&ids).is_ok_and(|d| !d.is_empty()) && app.db.uncategorized_count(&ids).unwrap_or(1) == 0,
         Step::Budget => !app.db.budgets(&fingraph_core::budget::scope(&ids)).unwrap_or_default().is_empty(),
         Step::Monthly => app.db.setting("onboarded").is_some(),
     }
@@ -560,7 +560,7 @@ fn choose_folder(g: &G, app: &Rc<App>) {
             };
             status.set_subtitle(&text);
             status.set_css_classes(&[class]);
-            let have_docs = a.db.documents(&a.entity_ids()).is_ok_and(|d| !d.is_empty());
+            let have_docs = a.db.documents_all(&a.entity_ids()).is_ok_and(|d| !d.is_empty());
             g.next.set_sensitive(!all.is_empty() || have_docs);
             g.note.set_label(if all.is_empty() && !have_docs { "Move your statements into the folder to continue" } else { "" });
             if !all.is_empty() {
@@ -656,7 +656,7 @@ fn read(g: &G, app: &Rc<App>) {
             g.reading.set(false);
             progress.set_visible(false);
             read_summary(&g, &a, &summary);
-            g.next.set_sensitive(a.db.documents(&a.entity_ids()).is_ok_and(|d| !d.is_empty()));
+            g.next.set_sensitive(a.db.documents_all(&a.entity_ids()).is_ok_and(|d| !d.is_empty()));
             g.note.set_label("");
             mark(&g, &a);
         })
@@ -725,7 +725,7 @@ fn read_summary(g: &G, app: &Rc<App>, into: &gtk::Box) {
     clear(into);
     let ids = app.entity_ids();
     let rows = app.db.transactions(&TxFilter { entity_ids: ids.clone(), ..Default::default() }).unwrap_or_default();
-    let docs = app.db.documents(&ids).unwrap_or_default();
+    let docs = app.db.documents_all(&ids).unwrap_or_default();
     if docs.is_empty() {
         into.append(&dim("No statements read yet. If the folder's files were all marked “Couldn't read”, they may be scans or from a bank FinGraph doesn't know — see step 3."));
         return;

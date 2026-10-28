@@ -3,7 +3,7 @@
 
 use adw::prelude::*;
 use chrono::NaiveDate;
-use fingraph_core::db::{self, DocumentRow};
+use fingraph_core::db::{self, DocumentRow, ImportPlan, Review, Target};
 use fingraph_core::money::{fmt_money, parse_user};
 use fingraph_core::parser::{MultiPassScanner, ScanResult};
 use fingraph_core::{Currency, Decimal, Reconciliation};
@@ -76,7 +76,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 None => "Imports create a “Personal” workspace.".into(),
             });
             list.remove_all();
-            let docs = a.db.documents(&a.entity_ids()).unwrap_or_default();
+            let docs = a.db.documents_all(&a.entity_ids()).unwrap_or_default();
             fill_coverage(&a, &cov_grid, &cov_breaks);
             cov_card.set_visible(!docs.is_empty());
             drop_hint.set_visible(docs.is_empty());
@@ -97,6 +97,17 @@ fn doc_row(app: &Rc<App>, d: &DocumentRow) -> adw::ActionRow {
         .build();
     row.add_prefix(&pill(if d.bank_short.is_empty() { "Unknown bank" } else { &d.bank_short }, "bank"));
     row.add_suffix(&reconciliation_pill(&d.reconciliation, d.currency));
+    if !d.review.is_empty() {
+        row.set_subtitle(&glib::markup_escape_text(&format!("{} · waiting for review: {}", row.subtitle().unwrap_or_default(), d.review.iter().map(|r| r.text()).collect::<Vec<_>>().join("; "))));
+        let approve = gtk::Button::builder().label("Approve…").valign(gtk::Align::Center).css_classes(["suggested-action"]).build();
+        row.add_suffix(&approve);
+        let (w, id, name, why, n) = (Rc::downgrade(app), d.id, d.filename.clone(), d.review.clone(), d.tx_count);
+        approve.connect_clicked(move |_| {
+            if let Some(a) = w.upgrade() {
+                approve_dialog(&a, id, &name, &why, n);
+            }
+        });
+    }
     let report = gtk::Button::builder().label("Scan Pass Report").valign(gtk::Align::Center).css_classes(["flat"]).build();
     let del = gtk::Button::builder().icon_name("user-trash-symbolic").tooltip_text("Remove this statement and its transactions").valign(gtk::Align::Center).css_classes(["flat"]).build();
     row.add_suffix(&report);
@@ -130,6 +141,88 @@ fn doc_row(app: &Rc<App>, d: &DocumentRow) -> adw::ActionRow {
         });
     }
     row
+}
+
+/// Approving a held statement lets its transactions count; the dialog says what was wrong first.
+fn approve_dialog(app: &Rc<App>, id: i64, name: &str, why: &[Review], n: i64) {
+    let reasons = why.iter().map(|r| format!("• {}", r.text())).collect::<Vec<_>>().join("\n");
+    let dlg = adw::AlertDialog::new(
+        Some("Approve this statement?"),
+        Some(&format!(
+            "“{name}” is waiting because:\n{reasons}\n\nOpen its Scan Pass Report to compare it with the PDF. Once approved, its {n} transactions count in your budgets and reports."
+        )),
+    );
+    dlg.add_responses(&[("cancel", "Cancel"), ("report", "Scan Pass Report"), ("ok", "Approve")]);
+    dlg.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+    let w = Rc::downgrade(app);
+    dlg.connect_response(None, move |_, r| {
+        let Some(a) = w.upgrade() else { return };
+        match r {
+            "report" => report_dialog(&a, id),
+            "ok" => {
+                match a.db.approve_document(id) {
+                    Ok(()) => a.toast("Approved: its transactions now count"),
+                    Err(e) => a.toast(&e.to_string()),
+                }
+                a.reload_entities();
+            }
+            _ => {}
+        }
+    });
+    dlg.present(Some(&app.win));
+}
+
+/// Ask about what an import can't decide alone. `None` skips the file.
+async fn decide(app: &Rc<App>, name: &str, plan: &ImportPlan) -> Option<Vec<Target>> {
+    if !plan.same_period.is_empty() {
+        let old = plan.same_period.iter().map(|d| format!("“{}”", d.1)).collect::<Vec<_>>().join(", ");
+        let d = adw::AlertDialog::new(
+            Some("This period is already imported"),
+            Some(&format!("“{name}” covers the same account and period as {old}, already in FinGraph: probably another copy of the same statement.\n\nReplace the earlier one with this file, or skip this one?")),
+        );
+        d.add_responses(&[("skip", "Skip"), ("replace", "Replace")]);
+        d.set_close_response("skip");
+        if d.choose_future(Some(&app.win)).await != "replace" {
+            return None;
+        }
+        for (id, _) in &plan.same_period {
+            let _ = app.db.delete_document(*id);
+        }
+    }
+    let mut targets = Vec::new();
+    for s in &plan.sections {
+        if let Some(id) = s.matched {
+            targets.push(Target::Existing(id));
+            continue;
+        }
+        let d = if s.number_read {
+            let d = adw::AlertDialog::new(
+                Some("New account found"),
+                Some(&format!("“{name}” is from {}, which isn't in FinGraph yet.\n\nIs this your account? A statement from someone else's account shouldn't be imported.", s.new_name)),
+            );
+            d.add_responses(&[("skip", "Not Mine"), ("new", "Add Account")]);
+            d.set_response_appearance("new", adw::ResponseAppearance::Suggested);
+            d
+        } else {
+            let d = adw::AlertDialog::new(
+                Some("Which account is this?"),
+                Some(&format!("No account number could be read from “{name}” (by its layout: {}). Pick the account it belongs to.", s.new_name.trim_end())),
+            );
+            for (id, n) in s.candidates.iter().take(4) {
+                d.add_response(&format!("a{id}"), n);
+            }
+            d.add_responses(&[("new", "New Account"), ("skip", "Skip")]);
+            d
+        };
+        d.set_close_response("skip");
+        let r = d.choose_future(Some(&app.win)).await;
+        targets.push(match r.as_str() {
+            "new" => Target::New,
+            "skip" => Target::Skip,
+            a => a.strip_prefix('a').and_then(|i| i.parse().ok()).map_or(Target::Skip, Target::Existing),
+        });
+    }
+    targets.iter().any(|t| *t != Target::Skip).then_some(targets)
 }
 
 /// Account × month dots for the last twelve months, then any break in the chain of balances.
@@ -213,7 +306,7 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
     let profiles = app.db.profiles().unwrap_or_default();
     let w = Rc::downgrade(app);
     glib::spawn_future_local(async move {
-        let (mut inserted, mut files, mut reconciled) = (0, 0, 0);
+        let (mut inserted, mut files, mut reconciled, mut held) = (0, 0, 0, 0);
         for p in paths {
             let profiles = profiles.clone();
             let p2 = p.clone();
@@ -226,8 +319,32 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
             .unwrap_or_else(|_| Err("the scanner crashed".into()));
             let Some(a) = w.upgrade() else { return };
             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            remember_seen(&a, std::slice::from_ref(&p));
+            let scanned = scanned.and_then(|(scan, sha)| {
+                let plan = a.db.plan_import(&sha, &scan).map_err(|e| e.to_string())?;
+                if plan.no_transactions {
+                    return Err("no transactions or balances were found in it".into());
+                }
+                Ok((scan, sha, plan))
+            });
+            let scanned = match scanned {
+                Ok((scan, sha, plan)) => {
+                    let targets = if plan.already_imported { Some(Vec::new()) } else { plan.automatic() };
+                    match targets {
+                        Some(t) => Ok((scan, sha, t)),
+                        None => match decide(&a, &name, &plan).await {
+                            Some(t) => Ok((scan, sha, t)),
+                            None => {
+                                a.toast(&format!("{name}: skipped"));
+                                continue;
+                            }
+                        },
+                    }
+                }
+                Err(e) => Err(e),
+            };
             match scanned {
-                Ok((scan, sha)) => match a.db.import_scan(entity, &name, &sha, &scan) {
+                Ok((scan, sha, targets)) => match a.db.import_scan(entity, &name, &sha, &scan, &targets) {
                     Ok(rep) => {
                         // kept so the statement can be rescanned after a scanner or profile change
                         if let Err(e) = a.db.keep_pdf(&p, &sha) {
@@ -235,6 +352,7 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
                         }
                         files += 1;
                         inserted += rep.inserted;
+                        held += rep.held;
                         reconciled += scan.is_reconciled() as usize;
                         if rep.already_imported {
                             a.toast(&format!("{name} was already imported"));
@@ -262,6 +380,13 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
         a.reload_entities();
         if let Some(f) = on_done {
             return f();
+        }
+        if held > 0 {
+            a.toast_action(
+                &format!("{held} statement section{} waiting for review: they don't count until you approve them", if held == 1 { " is" } else { "s are" }),
+                "Review",
+                Rc::new(|a: &Rc<App>| a.show_view("statements")),
+            );
         }
         if files > 0 {
             let msg = format!("Imported {inserted} transactions from {files} statement{} · {reconciled} reconciled", if files == 1 { "" } else { "s" });
@@ -356,18 +481,38 @@ fn check(app: &Rc<App>, paths: Vec<PathBuf>) {
             .ok()
             .flatten();
             let Some(a) = w.upgrade() else { return };
-            let mut seen: std::collections::HashSet<String> = a.db.setting("watch_seen").and_then(|j| serde_json_lite(&j)).unwrap_or_default();
-            seen.insert(k);
-            let _ = a.db.set_setting("watch_seen", &seen.iter().map(|s| format!("{s}\n")).collect::<String>());
-            let Some((scan, sha)) = r.filter(|(s, _)| s.profile_slug.is_some() && !s.sections.is_empty()) else { continue };
+            let seen_now = |a: &Rc<App>| {
+                let mut seen: std::collections::HashSet<String> = a.db.setting("watch_seen").and_then(|j| serde_json_lite(&j)).unwrap_or_default();
+                seen.insert(k.clone());
+                let _ = a.db.set_setting("watch_seen", &seen.iter().map(|s| format!("{s}\n")).collect::<String>());
+            };
+            let Some((scan, sha)) = r.filter(|(s, _)| s.profile_slug.is_some() && !s.sections.is_empty()) else {
+                seen_now(&a);
+                continue;
+            };
             let Some(entity) = a.import_entity() else { continue };
             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            if let Ok(rep) = a.db.import_scan(entity, &name, &sha, &scan)
-                && !rep.already_imported
-            {
+            let Ok(plan) = a.db.plan_import(&sha, &scan) else { continue };
+            if plan.already_imported || plan.no_transactions {
+                seen_now(&a);
+                continue;
+            }
+            // a new account, an unreadable account number or a period already imported needs a person:
+            // nothing is imported, and until it's decided the file is offered again each time
+            let Some(targets) = plan.automatic() else {
+                let p2 = p.clone();
+                a.toast_action(&format!("{name} in your watched folder needs a decision before it's imported"), "Review", Rc::new(move |a: &Rc<App>| import_paths(a, vec![p2.clone()])));
+                continue;
+            };
+            seen_now(&a);
+            if let Ok(rep) = a.db.import_scan(entity, &name, &sha, &scan, &targets) {
                 let _ = a.db.keep_pdf(&p, &sha);
                 a.reload_entities();
-                a.toast_action(&format!("Imported {name} from your watched folder · {} transactions", rep.inserted), "Triage", Rc::new(crate::wizard::triage));
+                if rep.held > 0 {
+                    a.toast_action(&format!("{name} from your watched folder is waiting for review"), "Review", Rc::new(|a: &Rc<App>| a.show_view("statements")));
+                } else {
+                    a.toast_action(&format!("Imported {name} from your watched folder · {} transactions", rep.inserted), "Triage", Rc::new(crate::wizard::triage));
+                }
             }
         }
     });
@@ -428,7 +573,7 @@ pub fn rescan_all(app: &Rc<App>) {
 
 #[cfg(debug_assertions)]
 pub fn open_first_report(app: &Rc<App>) {
-    let docs = app.db.documents(&app.entity_ids()).unwrap_or_default();
+    let docs = app.db.documents_all(&app.entity_ids()).unwrap_or_default();
     if let Some(d) = docs.iter().find(|d| d.reconciliation != Reconciliation::Reconciled).or(docs.first()) {
         report_dialog(app, d.id);
     }
@@ -442,7 +587,7 @@ fn kv(group: &adw::PreferencesGroup, k: &str, v: &str) {
 /// Pass 1–5 diagnostics for one statement section.
 pub fn report_dialog(app: &Rc<App>, doc_id: i64) {
     let Ok((diag, report)) = app.db.document_report(doc_id) else { return app.toast("No scan report stored for this statement") };
-    let docs = app.db.documents(&[]).unwrap_or_default();
+    let docs = app.db.documents_all(&[]).unwrap_or_default();
     let Some(d) = docs.iter().find(|d| d.id == doc_id).cloned() else { return };
     let m = |x: Option<Decimal>| x.map_or("—".to_string(), |v| fmt_money(v, d.currency));
     let page = adw::PreferencesPage::new();
@@ -455,6 +600,9 @@ pub fn report_dialog(app: &Rc<App>, doc_id: i64) {
 
     let p1 = &diag.pass1;
     let g1 = adw::PreferencesGroup::builder().title("Pass 1 · Spatial tokens &amp; institution fingerprint").build();
+    if !d.review.is_empty() {
+        kv(&g1, "Waiting for review", &d.review.iter().map(|r| r.text()).collect::<Vec<_>>().join("\n"));
+    }
     kv(&g1, "Detected profile", p1.profile.as_deref().unwrap_or("none matched"));
     if p1.ocr {
         kv(&g1, "Read by OCR", "the PDF is only pictures of pages: amounts are checked against the balances, but check names for typos");
@@ -486,6 +634,10 @@ pub fn report_dialog(app: &Rc<App>, doc_id: i64) {
     kv(&g3, "Transaction rows", &p3.anchors.to_string());
     kv(&g3, "Description lines stitched into memos", &p3.stitched_lines.to_string());
     kv(&g3, "Dates inherited from the row above (RBC-style)", &p3.inherited_dates.to_string());
+    kv(&g3, "Rows whose amount came on a later line (CNB-style)", &p3.joined_rows.to_string());
+    for n in &p3.layout_notes {
+        kv(&g3, "⚠ Doesn't match the bank's declared layout", n);
+    }
     kv(&g3, "Account sections in this PDF", &p3.sections.to_string());
     page.add(&g3);
 

@@ -94,7 +94,7 @@ fn scotiabank_card_two_line_fx_memo() {
 }
 
 #[test]
-fn cnb_dr_cr_balances_kyd_and_usd() {
+fn cnb_overdrawn_balances_kyd_and_usd() {
     let txs = vec![
         DemoTx::new(d(2026, 8, 1), "RENT RECEIVED UNIT A", dec("2400.00")),
         DemoTx::new(d(2026, 8, 6), "A.L. THOMPSON'S", dec("-2600.00")),
@@ -181,21 +181,8 @@ fn unsigned_single_column_signs_are_healed_from_the_balance() {
     // a deposit statement whose one amount column prints no signs: Pass 4 decides from Bal[i] - Bal[i-1]
     let txs = vec![DemoTx::new(d(2026, 8, 3), "SALARY", dec("1000.00")), DemoTx::new(d(2026, 8, 5), "RENT", dec("-400.00"))];
     let spec = StatementSpec::new(Bank::Cnb, AccountType::Checking, Currency::KYD, "6120", dec("100.00"), (d(2026, 8, 1), d(2026, 8, 31)), txs);
-    let mut tokens = demo::render(std::slice::from_ref(&spec));
-    // collapse Debits/Credits into one unsigned "Amount" column
-    for t in &mut tokens {
-        if t.text == "Debits" {
-            t.text = "Amount".into();
-        }
-        if t.text == "Credits" {
-            t.text = "Ref.".into();
-        }
-        if t.page == 1 && t.y0 > 140.0 && (t.x1 - 485.0).abs() < 1.0 && t.text.contains('.') {
-            let w = t.x1 - t.x0;
-            t.x1 = 405.0;
-            t.x0 = 405.0 - w;
-        }
-    }
+    // CNB's one Amount column, with its trailing minus signs taken away
+    let tokens: Vec<_> = demo::render(std::slice::from_ref(&spec)).into_iter().filter(|t| t.text != "-").collect();
     let p = profiles::builtins();
     let r = MultiPassScanner::new(&p).scan_tokens(tokens).unwrap();
     let s = &r.sections[0];
@@ -241,6 +228,31 @@ fn real_statements_reconcile() {
 /// summary amounts on an `as of` line under their labels.
 #[test]
 fn cnb_real_layout_multiline_rows_and_page_split() {
+    let p = profiles::builtins();
+    let r = MultiPassScanner::new(&p).scan_tokens(cnb_sample()).unwrap();
+    assert!(r.diagnostics.pass3.layout_notes.is_empty(), "{:?}", r.diagnostics.pass3.layout_notes);
+    assert_eq!(r.diagnostics.pass3.joined_rows, 3);
+    cnb_sample_checks(&r);
+}
+
+/// A statement that breaks its bank's declared layout says which rule it broke. Here the amounts still
+/// add up (each amount lands on the line before it), so the balance check alone would pass: the
+/// descriptions are wrong, and only the layout note says so.
+#[test]
+fn a_layout_mismatch_names_the_rule() {
+    let mut p = profiles::builtins();
+    let cnb = p.iter_mut().find(|p| p.slug == "cnb_ky").unwrap();
+    cnb.layout.row_shape = profiles::RowShape::AmountFirst;
+    cnb.layout.opening = vec!["opening balance".into()];
+    let r = MultiPassScanner::new(&p).scan_tokens(cnb_sample()).unwrap();
+    let notes = r.diagnostics.pass3.layout_notes.join("\n");
+    assert!(notes.contains("dated line(s) had no amount"), "{notes}");
+    assert!(notes.contains("opening balance wasn't under any of this bank's own labels"), "{notes}");
+    assert_eq!(r.sections[0].reconciliation, Reconciliation::Reconciled);
+    assert_ne!(r.sections[0].transactions[1].description, "POS Purchase SAMPLE GROCERY GEORGE TOWN KY");
+}
+
+fn cnb_sample() -> Vec<fingraph_core::parser::Token> {
     use fingraph_core::parser::Token;
     const CW: f64 = 4.8; // Courier at 8pt
     let mut toks = Vec::new();
@@ -325,8 +337,10 @@ fn cnb_real_layout_multiline_rows_and_page_split() {
     }
     put(2, 760.0, 280.0, "Page 2", 1.0);
 
-    let p = profiles::builtins();
-    let r = MultiPassScanner::new(&p).scan_tokens(toks).unwrap();
+    toks
+}
+
+fn cnb_sample_checks(r: &ScanResult) {
     assert_eq!(r.profile_slug.as_deref(), Some("cnb_ky"));
     assert_eq!(r.period, Some((d(2026, 3, 1), d(2026, 3, 31))));
     let s = &r.sections[0];
@@ -346,4 +360,28 @@ fn cnb_real_layout_multiline_rows_and_page_split() {
         ]
     );
     assert!(s.report.skipped.is_empty(), "{:#?}", s.report.skipped);
+}
+
+/// Anonymised layout samples of real statements (Bank Profiles → Test PDF → Save Layout Sample), kept in
+/// `tests/fixtures/private/` and never committed. Each must be recognised as its bank, reconcile to the
+/// cent and match its bank's declared layout. `cargo test -p fingraph-core -- --ignored layout_samples`
+#[test]
+#[ignore]
+fn private_layout_samples() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/private");
+    let mut files: Vec<_> = std::fs::read_dir(&dir).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|e| e == "json")).collect()).unwrap_or_default();
+    files.sort();
+    let p = profiles::builtins();
+    let mut failed = Vec::new();
+    for f in &files {
+        let s: fingraph_core::parser::LayoutSample = serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
+        let r = MultiPassScanner::new(&p).scan_tokens(s.tokens).unwrap();
+        let ok = r.profile_slug == s.bank && r.is_reconciled() && r.diagnostics.pass3.layout_notes.is_empty();
+        let n: usize = r.sections.iter().map(|s| s.transactions.len()).sum();
+        println!("{} {:?}: {n} transactions, {:?}, notes {:?}", f.file_name().unwrap().to_string_lossy(), r.profile_slug, r.sections.iter().map(|s| &s.reconciliation).collect::<Vec<_>>(), r.diagnostics.pass3.layout_notes);
+        if !ok {
+            failed.push(f.file_name().unwrap().to_string_lossy().into_owned());
+        }
+    }
+    assert!(failed.is_empty(), "{failed:?}");
 }

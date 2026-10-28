@@ -85,7 +85,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let back = gtk::Button::builder().label("All categories").icon_name("go-previous-symbolic").css_classes(["flat"]).halign(gtk::Align::Start).visible(false).build();
     cat_card.append(&back);
     let (b_card, _) = chart_card("Cumulative Daily Spend Pace (this month vs its usual pace)", burn.widget.upcast_ref());
-    let (p_card, _) = chart_card("Top Merchants · Pareto", pareto.widget.upcast_ref());
+    let (p_card, _) = chart_card("Where Most of Your Money Goes", pareto.widget.upcast_ref());
     let (bal_card, _) = chart_card("Account Balance History (verified running balances)", balances.widget.upcast_ref());
     let (pnl_card, _) = chart_card("Workspace / Property P&L", pnl.widget.upcast_ref());
     grid.attach(&m_card, 0, 0, 1, 1);

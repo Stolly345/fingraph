@@ -50,6 +50,34 @@ pub struct HeaderAnchors {
     pub balance: Vec<String>,
 }
 
+/// Where a transaction's amount sits when its description runs over several lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RowShape {
+    /// Not checked against a real statement yet: either is accepted.
+    #[default]
+    Auto,
+    /// Date, description and amount on the first line, detail lines under it (Scotiabank).
+    AmountFirst,
+    /// Date on the first line, amount and balance on the last (Cayman National).
+    AmountLast,
+}
+
+/// The parts of a bank's layout that are written down rather than guessed at every scan. A scan that
+/// doesn't match them says which one (Scan Pass Report → layout notes).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayoutRules {
+    pub row_shape: RowShape,
+    /// Summary-box labels, matched at the start of a line before the generic ones.
+    pub opening: Vec<String>,
+    pub closing: Vec<String>,
+    pub debits: Vec<String>,
+    pub credits: Vec<String>,
+    /// Account types read correctly from a real statement (`AccountType::as_str`). A statement of any
+    /// other type from this bank waits for review, and approving it adds its type here.
+    pub verified: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BankProfile {
     pub id: i64,
@@ -65,6 +93,8 @@ pub struct BankProfile {
     /// Needs named groups `amt` and `ccy`; `rate` is optional.
     pub fx_note_regex: String,
     pub is_builtin: bool,
+    #[serde(default)]
+    pub layout: LayoutRules,
 }
 
 impl BankProfile {
@@ -93,6 +123,7 @@ pub fn builtins() -> Vec<BankProfile> {
             noise_patterns: s(&[r"(?i)butterfield is licensed", r"(?i)member of the butterfield group", r"(?i)deposit insurance"]),
             fx_note_regex: GENERIC_FX.into(),
             is_builtin: true,
+            layout: LayoutRules::default(),
         },
         BankProfile {
             id: 0,
@@ -102,15 +133,30 @@ pub fn builtins() -> Vec<BankProfile> {
             routing_identifiers: s(&["Scotiabank", "Scotiabank & Trust (Cayman)", "NOSCKYKY", "ky.scotiabank.com", "scotiabank.com/ky", "Bank of Nova Scotia"]),
             default_date_format: "DDMMM".into(),
             column_layout_kind: LayoutKind::DebitCreditWithBalance,
+            // the real headings: chequing `Transaction Date | Description | DEBIT | CREDIT | Balance`, cards
+            // `TRANSACTION DATE | POSTING DATE | REFERENCE NO. | TRANSACTION / DESCRIPTION | DEBIT/CREDIT AMOUNT`
             header_anchors: HeaderAnchors {
-                debit: s(&["withdrawals (-)", "total minus"]),
-                credit: s(&["deposits (+)", "total plus"]),
+                date: s(&["transaction date"]),
+                posting_date: s(&["posting date"]),
+                description: s(&["description", "transaction / description"]),
+                reference: s(&["reference no."]),
+                debit: s(&["debit"]),
+                credit: s(&["credit"]),
                 amount: s(&["debit/credit amount"]),
-                ..Default::default()
+                balance: s(&["balance"]),
             },
             noise_patterns: s(&[r"(?i)trademark of the bank of nova scotia", r"(?i)help us protect you", r"(?i)the branch walk with your valid photo"]),
             fx_note_regex: r"\((?P<amt>\d[\d,]*\.\d{2})\s*(?P<ccy>KYD|USD)\)".into(),
             is_builtin: true,
+            // checked against 12 months of real chequing and card statements (2026)
+            layout: LayoutRules {
+                row_shape: RowShape::AmountFirst,
+                opening: s(&["opening balance", "previous balance"]),
+                closing: s(&["closing balance", "new balance"]),
+                debits: s(&["withdrawals", "purchases, cash advances"]),
+                credits: s(&["deposits", "payments & credits"]),
+                verified: s(&["Checking", "CreditCard"]),
+            },
         },
         BankProfile {
             id: 0,
@@ -131,6 +177,14 @@ pub fn builtins() -> Vec<BankProfile> {
             ]),
             fx_note_regex: GENERIC_FX.into(),
             is_builtin: true,
+            layout: LayoutRules {
+                row_shape: RowShape::AmountLast,
+                opening: s(&["beginning balance"]),
+                closing: s(&["ending balance"]),
+                debits: s(&["cheques & other debit"]),
+                credits: s(&["deposits & other cred"]),
+                verified: s(&["Savings"]),
+            },
         },
         BankProfile {
             id: 0,
@@ -144,6 +198,7 @@ pub fn builtins() -> Vec<BankProfile> {
             noise_patterns: s(&[r"(?i)registered trade-?marks? of royal bank of canada", r"(?i)^\s*rbc royal bank\s*$"]),
             fx_note_regex: GENERIC_FX.into(),
             is_builtin: true,
+            layout: LayoutRules::default(),
         },
         BankProfile {
             id: 0,
@@ -162,6 +217,7 @@ pub fn builtins() -> Vec<BankProfile> {
             noise_patterns: s(&[r"(?i)owned by its members", r"(?i)co-operative societies law"]),
             fx_note_regex: GENERIC_FX.into(),
             is_builtin: true,
+            layout: LayoutRules::default(),
         },
     ]
 }

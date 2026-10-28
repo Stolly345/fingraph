@@ -1,6 +1,6 @@
 # FinGraph — PRD / System Reference
 
-**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.3 `.deb`
+**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.4 `.deb`
 **Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Status:** in daily personal use; not published
 
 > Single source of truth for what FinGraph is, how it's built, and why it behaves the way it does.
@@ -92,7 +92,7 @@ from a terminal.
 
 ---
 
-## 5. Data model (schema v6)
+## 5. Data model (schema v8)
 
 `entities` (workspaces: Personal / Business / RentalProperty, base currency) · `bank_profiles` ·
 `accounts` (bank, masked number, type, currency, OFX ids, `hidden`) · `fx_rates` (peg 1 KYD = 1.20 USD)
@@ -154,7 +154,79 @@ the cent via OCR; its layout is pinned by `cnb_real_layout_multiline_rows_and_pa
 
 Imported PDFs are kept (by SHA-256) in `~/.local/share/fingraph/statements/` so **Rescan** can
 re-read everything; a rescan keeps hand edits (categories, payees, tags, business flags,
-inspector-converted lines) matched by FITID.
+inspector-converted lines) matched by FITID, keeps each statement in its account, and never replaces
+a statement with a read that found nothing.
+
+### 6.1 Declared layouts (0.2.4)
+
+Each bank profile writes its layout down instead of the scanner guessing it at every read
+(`LayoutRules`, stored as JSON in `bank_profiles.layout`, editable in Bank Profiles → Declared layout):
+
+| Rule | Scotiabank | Cayman National | Butterfield / RBC / CICSA |
+|---|---|---|---|
+| Row shape | amount on a transaction's first line, detail lines below | date on the first line, amount + balance on the last | not checked yet (either accepted) |
+| Column headings | chequing `Transaction Date · Description · DEBIT · CREDIT · Balance`; cards `TRANSACTION DATE · POSTING DATE · REFERENCE NO. · TRANSACTION / DESCRIPTION · DEBIT/CREDIT AMOUNT` | `Date · Cheque # · Description · Amount · Balance` | guessed |
+| Summary labels | Opening/Previous Balance, Closing/New Balance, Withdrawals / Purchases…, Deposits / Payments & Credits | Beginning Balance, Ending Balance (on an `as of` line), Cheques & Other Debit, Deposits & Other Cred | generic |
+| Checked on real statements | Checking, CreditCard | Savings (one OCR'd statement) | none |
+
+A read that departs from its bank's declaration gets **layout notes** in the Scan Pass Report (a dated
+line with no amount under an amount-first bank; none of the bank's headings found; a balance found
+only under a generic label). That matters because a statement can reconcile and still be wrong: with
+the wrong row shape every amount still adds up but lands on the line above, so names and dates shift
+(`a_layout_mismatch_names_the_rule`).
+
+### 6.2 Import rules (0.2.4)
+
+1. **Plan first** (`Db::plan_import`): which known account each section matches, anything overlapping.
+2. **Accounts match on bank + last 4 digits + currency.** The detected account type only breaks ties
+   (OCR read a CNB savings statement as Checking). No readable account number → no match; the person
+   picks from that bank's accounts in that currency.
+3. **Ask before anything new.** A new account ("Is this your account?"), an unreadable account number,
+   or an account + period already imported (another copy: replace or skip) is asked in the import flow.
+   The watched folder imports only what needs no answer; anything else waits, offered again until decided.
+4. **Hold what isn't proven** (`documents.review_hold`, reasons in `review_note`): doesn't reconcile, no
+   balances, read by OCR, the first statement of its account type from its bank, or off its declared
+   layout. Held statements and their transactions count nowhere (every query filters them; `documents()`
+   leaves them out, `documents_all()` keeps them for the Statements page and coverage) until **Approve**.
+   Approving a first-of-its-kind statement adds that type to the bank's verified list and releases the
+   others held only for that; fixing a mismatch in the inspector releases it by itself.
+5. **Fingerprints without descriptions:** FITID = account + date + amount + which of that day's
+   same-amount rows it is. Existing ledgers are re-keyed once (`fitid_v2`), repayments and receipts carried
+   across. A statement with neither transactions nor balances is refused.
+
+### 6.3 Bringing Butterfield, RBC and the Credit Union up to accuracy
+
+Nothing about these three is known from a real statement yet, so accuracy comes from real samples,
+in four gated steps per account type:
+
+1. **Collect** one statement per account type, downloaded as a PDF from online banking (not printed and
+   scanned, not redacted — redaction flattens pages to pictures; the layout sample below removes the
+   private parts instead). Two consecutive months of one account, a statement of 2+ pages and one with a
+   foreign-currency purchase where possible.
+   - Butterfield: chequing, savings, Visa. RBC: chequing, savings, card. CICSA: the combined statement
+     (shares, loans, chequing in one PDF).
+2. **Test without importing:** Bank Profiles → Test PDF. Gate: recognised as the bank, reconciled to the
+   cent, no layout notes.
+3. **Save Layout Sample…** from that result: every word keeps its position; dates, amounts, headings,
+   summary labels and the bank's own identifiers stay; names, merchants, account and reference numbers
+   become `x`/`0` (checked: all 35 real Scotiabank files and the OCR'd CNB statement read identically from
+   their samples, with no merchant or person names left). With the sample the profile is set — date order,
+   amount style, row shape, headings, summary labels — and the sample goes in
+   `crates/fingraph-core/tests/fixtures/private/` (git-ignored), where `private_layout_samples` must keep
+   passing.
+4. **Confirm in the app:** the first import of each account type is held (new layout); compare its dates,
+   amounts and a few descriptions with the PDF and Approve. That type is then verified, and later
+   statements import by themselves while they reconcile and stay on layout. A bank that changes its
+   layout later gets layout notes, so the change is held rather than imported.
+
+What to look for, from what's known so far:
+- **Butterfield** — online banking shows separate *Value Date* and *Transaction Date* columns, Credit
+  and Debit columns, and text-month dates (`14 Feb 2023`): which date is the ledger date, and whether the
+  PDF matches the screen. Visa: FX lines, `CR` on credits.
+- **RBC** — expected to print the date only on a day's first row and the balance only on its last, so
+  fewer balance checks per statement; a "balance forward" opening row; cards on a different layout.
+- **CICSA** — several accounts in one PDF: each section needs its own opening and closing; loans are
+  liabilities (a payment lowers the balance); member number vs account numbers decides account matching.
 
 ---
 
@@ -211,7 +283,7 @@ only).
 
 - **Overview**: Net cash flow (vs prior period), savings/operating margin, active subscription burn,
   reconciliation & triage status; charts: monthly income/expenses + net line, spending by category
-  (donut → merchant drill-down), cumulative daily spend vs the usual band, top-merchant Pareto,
+  (donut → merchant drill-down), cumulative daily spend vs the usual band, "Where Most of Your Money Goes" (top-merchant Pareto),
   balance history, workspace/tag P&L. Every chart has tooltips and click-through to transactions.
   "vs prior period" is only shown when statements cover ≥ 80% of the prior period's account-months.
 - **What Changed**: one card per kind with an expandable list — price creep (last rise within 90
@@ -414,9 +486,9 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 10. Packaging & operations
 
-- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.3-1_amd64.deb` (binary, desktop entry with
+- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.4-1_amd64.deb` (binary, desktop entry with
   PDF "Open With", icon; depends on poppler-utils, GTK 4, libadwaita).
-- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.3-1_amd64.deb`.
+- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.4-1_amd64.deb`.
 - Data: `~/.local/share/fingraph/ledger.db` (+ `statements/`, `backups/`). Hand backups made during
   development sit beside the ledger as `ledger-backup-2026-10-27-*.db`.
 - Terminal: `cargo run -p fingraph-core --example ledger -- reset|rescan|reapply|cards`.
@@ -477,6 +549,7 @@ Fixes found while testing the guide on the owner's real statements:
 | Monthly Close for last month showed "No budget yet" | A category's first budget covers earlier months; later changes apply from their month |
 | Dated goal "At risk" while finishing before its date | A dated goal is judged by finishing in time (and Ahead when it needs ≤ 80% of the plan); pace only without a date |
 | Kept freezing ("Not Responding") on every launch | Debt payoff compounded a 266% estimated rate for 50 years until Decimal overflowed; it now stops once a month leaves as much owed as the last ("interest grows faster than this pays"). Any panic now goes to `crash.log` in the data folder, and a page that fails shows a toast instead of closing the app |
+| Import rules (0.2.4) | Accounts match on number not detected type; new accounts, unreadable numbers and re-imported periods are asked; statements that don't reconcile, were OCR'd, are first of their kind or off-layout are held until approved; FITID no longer includes the description (re-keyed once). Found on the owner's ledger: one Amex USD statement imported from two files counted 7 rows twice (US$919.61) because the copies wrapped descriptions differently; a rescan under 0.2.4 drops them. Scotiabank's headings in the profile were guesses (`Withdrawals (-)`, `Total Minus`) — replaced with the real ones; declared layouts per bank (§6.1); anonymised layout samples (§6.3) |
 | CNB from a real statement (0.2.3) | The guessed CNB profile was wrong on every point. Real layout: `DD/MM` dates, one Amount column with a trailing minus, the date on a description's first line and the amount + balance on its last (Pass 3 now holds a dated amount-less line as a "head" that later lines join, across a page break too), summary amounts on an `as of` line under spaced-out labels, `ACCOUNT #: SV` = savings. Stored built-in CNB profiles are replaced once (`profile_rev:cnb_ky`). OCR fallback: 300 dpi grey, pale ink blanked at 180 (the CUSTOMER COPY watermark garbled digits), `--psm 6`, `49,48`→`49.48`; one printed balance that disagrees with both neighbours is ignored and noted ("Balance ignored") instead of failing the stretch |
 | Snappier (0.2.2) | Transactions 1.9 s → 0.1 s per refresh (cell buttons instead of a DropDown/EditableLabel per row; only changed rows are replaced); refreshes coalesce to one per frame (start-up did 5); rows read once per refresh; sidebar 75 → 30 ms; Subscriptions 109 → 7 ms; Combined Statement skips rebuilding when nothing changed; index on `transactions(document_id)` (schema v7); `synchronous=NORMAL` under WAL |
 
@@ -484,8 +557,12 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 13. Outstanding / known limits
 
-- **Three of five banks unverified on real PDFs** (Butterfield, RBC, CICSA): first real
-  statement may need profile tuning (Bank Profiles → Test a PDF). CNB is checked only against an
+- **Three of five banks unverified on real PDFs** (Butterfield, RBC, CICSA): follow §6.3. Until then
+  every statement from them is held for review on import.
+- Ledgers from before 0.2.4 may hold rows counted twice where one statement was imported from two
+  files (the owner's: 7 Amex USD rows, US$919.61); Rescan All removes them. Nothing is deleted on upgrade.
+- The import questions (new account, which account, same period) are tested in the core, not by
+  screenshot. CNB is checked only against an
   OCR'd savings statement: a CNB text PDF, a chequing account or a CNB card may still differ.
 - OCR reads the first 20 pages only, misses the bold `ACCOUNT #: SV` line next to a redaction box
   (the account shows as Checking), and can misspell names.

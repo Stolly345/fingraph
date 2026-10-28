@@ -2,7 +2,7 @@
 //! and laid out, test any PDF against them, or start a new profile from a sample statement.
 
 use adw::prelude::*;
-use fingraph_core::parser::profiles::{BankProfile, HeaderAnchors, LayoutKind};
+use fingraph_core::parser::profiles::{BankProfile, HeaderAnchors, LayoutKind, LayoutRules, RowShape};
 use fingraph_core::parser::{ColumnRole, MultiPassScanner, ScanResult};
 use gtk::{gio, glib};
 use std::path::PathBuf;
@@ -28,7 +28,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         let w = Rc::downgrade(app);
         test.connect_clicked(move |_| {
             if let Some(a) = w.upgrade() {
-                pick_pdf(&a, |a, path| run_scan(a, path, None, |a, r| test_result(a, &r, None)));
+                pick_pdf(&a, |a, path| {
+                    let p2 = path.clone();
+                    run_scan(a, path, None, move |a, r| test_result(a, &r, None, p2.clone()))
+                });
             }
         });
     }
@@ -104,7 +107,7 @@ fn run_scan(app: &Rc<App>, path: PathBuf, only: Option<BankProfile>, then: impl 
     });
 }
 
-fn test_result(app: &Rc<App>, r: &ScanResult, against: Option<&BankProfile>) {
+fn test_result(app: &Rc<App>, r: &ScanResult, against: Option<&BankProfile>, path: PathBuf) {
     let mut lines = vec![match (&r.profile_slug, against) {
         (Some(s), Some(p)) if *s == p.slug => format!("✓ Recognised as {}", p.display_name),
         (None, Some(p)) => format!("✗ None of {}'s identifiers were found", p.display_name),
@@ -130,9 +133,46 @@ fn test_result(app: &Rc<App>, r: &ScanResult, against: Option<&BankProfile>) {
     if let Some(pg) = r.diagnostics.pages.iter().find(|p| !p.header_words.is_empty()) {
         lines.push(format!("Columns: {}", pg.header_words.iter().map(|(r, w)| format!("{r:?} “{w}”")).collect::<Vec<_>>().join(" · ")));
     }
+    for n in &r.diagnostics.pass3.layout_notes {
+        lines.push(format!("⚠ {n}"));
+    }
+    if r.diagnostics.pass1.ocr {
+        lines.push("Read by OCR (the PDF is only pictures of pages)".into());
+    }
     let d = adw::AlertDialog::new(Some("Profile Test"), Some(&lines.join("\n")));
-    d.add_response("ok", "Close");
+    d.add_responses(&[("sample", "Save Layout Sample…"), ("ok", "Close")]);
+    let w = Rc::downgrade(app);
+    d.connect_response(Some("sample"), move |_, _| {
+        if let Some(a) = w.upgrade() {
+            save_layout_sample(&a, path.clone());
+        }
+    });
     d.present(Some(&app.win));
+}
+
+/// Write the statement as an anonymised layout sample: names, merchants and account numbers become x and
+/// 0; positions, dates, amounts and headings stay. Safe to share for tuning a bank, and kept as a test.
+fn save_layout_sample(app: &Rc<App>, path: PathBuf) {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "statement".into());
+    let fd = gtk::FileDialog::builder().title("Save Layout Sample").initial_name(format!("{stem}-layout.json")).build();
+    let w = Rc::downgrade(app);
+    fd.save(Some(&app.win), gio::Cancellable::NONE, move |res| {
+        let (Some(a), Ok(f)) = (w.upgrade(), res) else { return };
+        let Some(out) = f.path() else { return };
+        let profiles = a.db.profiles().unwrap_or_default();
+        let w = Rc::downgrade(&a);
+        glib::spawn_future_local(async move {
+            let r = gio::spawn_blocking(move || fingraph_core::parser::layout_sample_json(&path, &profiles).map_err(|e| e.to_string()).and_then(|j| std::fs::write(&out, j).map_err(|e| e.to_string())))
+                .await
+                .unwrap_or_else(|_| Err("crashed".into()));
+            if let Some(a) = w.upgrade() {
+                a.toast(&match r {
+                    Ok(()) => "Layout sample saved: dates and amounts kept, names and account numbers removed".to_string(),
+                    Err(e) => format!("Couldn't save the sample: {e}"),
+                });
+            }
+        });
+    });
 }
 
 /// The column-mapping helper: a new profile pre-filled from what the scanner saw in the sample.
@@ -176,6 +216,7 @@ fn profile_from_sample(r: &ScanResult) -> BankProfile {
         noise_patterns: Vec::new(),
         fx_note_regex: r"(?i)(?P<ccy>USD|KYD|US\$|CI\$)\s*(?P<amt>\d[\d,]*\.\d{2})\s*(?:@|at)\s*(?P<rate>\d+\.\d+)".into(),
         is_builtin: false,
+        layout: Default::default(),
     }
 }
 
@@ -214,6 +255,28 @@ fn editor(app: &Rc<App>, p: BankProfile) {
         ga.add(r);
     }
     page.add(&ga);
+    let l = &p.layout;
+    let gl = adw::PreferencesGroup::builder()
+        .title("Declared layout")
+        .description("How this bank lays out its statements, written down instead of guessed. A statement that doesn't match says which rule failed in its Scan Pass Report.")
+        .build();
+    let shapes = ["Not checked yet (accept either)", "Amount on a transaction's first line", "Amount on a transaction's last line"];
+    let shape_of = [RowShape::Auto, RowShape::AmountFirst, RowShape::AmountLast];
+    let shape = adw::ComboRow::builder().title("Multi-line transactions").model(&gtk::StringList::new(&shapes)).selected(shape_of.iter().position(|s| *s == l.row_shape).unwrap_or(0) as u32).build();
+    let l_open = list_row("Opening balance label", &l.opening);
+    let l_close = list_row("Closing balance label", &l.closing);
+    let l_debits = list_row("Total debits label", &l.debits);
+    let l_credits = list_row("Total credits label", &l.credits);
+    let verified = adw::ActionRow::builder()
+        .title("Checked on real statements")
+        .subtitle(if l.verified.is_empty() { "none yet: every statement from this bank waits for review until one is approved".to_string() } else { l.verified.join(", ") })
+        .build();
+    gl.add(&shape);
+    for r in [&l_open, &l_close, &l_debits, &l_credits] {
+        gl.add(r);
+    }
+    gl.add(&verified);
+    page.add(&gl);
     let gn = adw::PreferencesGroup::builder().title("Noise &amp; FX").build();
     let noise = adw::EntryRow::builder().title("Noise patterns (regexes separated by “ ;; ”)").text(p.noise_patterns.join(" ;; ")).build();
     let fx = adw::EntryRow::builder().title("FX line regex (groups amt, ccy, optional rate)").text(&p.fx_note_regex).build();
@@ -254,6 +317,14 @@ fn editor(app: &Rc<App>, p: BankProfile) {
                 },
                 noise_patterns: noise.text().split(";;").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
                 fx_note_regex: fx.text().trim().to_string(),
+                layout: LayoutRules {
+                    row_shape: shape_of[shape.selected() as usize],
+                    opening: split_list(&l_open.text()),
+                    closing: split_list(&l_close.text()),
+                    debits: split_list(&l_debits.text()),
+                    credits: split_list(&l_credits.text()),
+                    verified: p.layout.verified.clone(),
+                },
                 ..p.clone()
             }
         }
@@ -287,7 +358,8 @@ fn editor(app: &Rc<App>, p: BankProfile) {
             let p = collect();
             pick_pdf(&a, move |a, path| {
                 let p2 = p.clone();
-                run_scan(a, path, Some(p.clone()), move |a, r| test_result(a, &r, Some(&p2)));
+                let path2 = path.clone();
+                run_scan(a, path, Some(p.clone()), move |a, r| test_result(a, &r, Some(&p2), path2.clone()));
             });
         });
     }

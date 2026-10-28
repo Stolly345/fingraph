@@ -122,6 +122,8 @@ struct Style {
     grouped: bool,
     summary: [&'static str; 4],
     repeat_header: bool,
+    /// CNB: the date on a description's first line, the amount and balance on its last.
+    amount_last: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -148,6 +150,7 @@ fn style(spec: &StatementSpec) -> Style {
             grouped: false,
             summary: ["Previous Balance", "Purchases & Debits", "Payments & Credits", "New Balance"],
             repeat_header: true,
+            amount_last: false,
         },
         Bank::Butterfield => Style {
             letterhead: vec!["Bank of Butterfield (Cayman) Limited".into(), "butterfieldgroup.com  SWIFT BNTBKYKY".into()],
@@ -160,6 +163,7 @@ fn style(spec: &StatementSpec) -> Style {
             grouped: false,
             summary: ["Opening Balance", "Total Debits", "Total Credits", "Closing Balance"],
             repeat_header: true,
+            amount_last: false,
         },
         Bank::Scotiabank if card => Style {
             letterhead: vec!["Scotiabank & Trust (Cayman) Ltd.".into(), "ky.scotiabank.com".into(), format!("Scotiabank Visa {ccy} Credit Card")],
@@ -167,35 +171,39 @@ fn style(spec: &StatementSpec) -> Style {
             date_hdr: "Transaction Date",
             post_hdr: Some("Posting Date"),
             desc_hdr: "Transaction / Description",
-            money: vec![("Debit/Credit Amount", Col::Amount)],
+            money: vec![("DEBIT/CREDIT AMOUNT", Col::Amount)],
             date_fmt: |d| format!("{}-{}-{}", d.format("%d"), mon(d), d.year()),
             grouped: false,
             summary: ["Previous Balance", "Purchases, Cash Advances, Other Debits", "Payments & Credits", "New Balance"],
             repeat_header: true,
+            amount_last: false,
         },
         Bank::Scotiabank => Style {
             letterhead: vec!["Scotiabank & Trust (Cayman) Ltd.".into(), "ky.scotiabank.com".into()],
             period: format!("Statement Period: {}{}{} to {}{}{}", s.format("%d"), mon(s).to_uppercase(), s.format("%y"), e.format("%d"), mon(e).to_uppercase(), e.format("%y")),
+            date_hdr: "Transaction Date",
+            post_hdr: None,
+            desc_hdr: "Description",
+            money: vec![("DEBIT", Col::Debit), ("CREDIT", Col::Credit), ("Balance", Col::Balance)],
+            date_fmt: |d| format!("{} {}", mon(d).to_uppercase(), d.format("%d")),
+            grouped: false,
+            summary: ["Opening Balance", "Withdrawals", "Deposits", "Closing Balance"],
+            repeat_header: true,
+            amount_last: false,
+        },
+        // the real layout (a Feb 2026 statement): one Amount column with a trailing minus, `DD/MM`
+        Bank::Cnb => Style {
+            letterhead: vec!["Cayman National Bank Ltd.".into(), "caymannational.com  SWIFT CNBCKYKY".into(), if card { format!("CNB Visa {ccy}") } else { format!("Business Current Account {ccy}") }],
+            period: format!("Period: {} to {}", s.format("%d/%m/%Y"), e.format("%d/%m/%Y")),
             date_hdr: "Date",
             post_hdr: None,
             desc_hdr: "Description",
-            money: vec![("Withdrawals (-)", Col::Debit), ("Deposits (+)", Col::Credit), ("Balance", Col::Balance)],
-            date_fmt: |d| format!("{} {}", mon(d).to_uppercase(), d.format("%d")),
+            money: vec![("Amount", Col::Amount), ("Balance", Col::Balance)],
+            date_fmt: |d| d.format("%d/%m").to_string(),
             grouped: false,
-            summary: ["Opening Balance", "Total Minus", "Total Plus", "Closing Balance"],
+            summary: ["Beginning Balance", "Cheques & Other Debit", "Deposits & Other Cred", "Ending Balance"],
             repeat_header: true,
-        },
-        Bank::Cnb => Style {
-            letterhead: vec!["Cayman National Bank Ltd.".into(), "caymannational.com  SWIFT CNBCKYKY".into(), if card { format!("CNB Visa {ccy}") } else { format!("Business Current Account {ccy}") }],
-            period: format!("Statement Period: {} {} {} - {} {} {}", s.format("%d"), mon(s), s.year(), e.format("%d"), mon(e), e.year()),
-            date_hdr: "Date",
-            post_hdr: None,
-            desc_hdr: "Description/Particulars",
-            money: vec![("Debits", Col::Debit), ("Credits", Col::Credit), ("Balance", Col::Balance)],
-            date_fmt: |d| d.format("%d/%m/%Y").to_string(),
-            grouped: false,
-            summary: ["Opening Balance", "Total Debits", "Total Credits", "Closing Balance"],
-            repeat_header: true,
+            amount_last: true,
         },
         Bank::Rbc => Style {
             letterhead: vec!["RBC Royal Bank (Cayman) Limited".into(), "Royal Bank of Canada  rbcroyalbank.com  ROYCKYKY".into()],
@@ -208,6 +216,7 @@ fn style(spec: &StatementSpec) -> Style {
             grouped: true,
             summary: ["Opening Balance", "Total Withdrawals", "Total Deposits", "Closing Balance"],
             repeat_header: false,
+            amount_last: false,
         },
         Bank::Cicsa => Style {
             letterhead: vec!["CICSA Co-operative Credit Union Ltd.".into(), "Cayman Islands Civil Service Association  cicsacu.com.ky".into()],
@@ -220,15 +229,16 @@ fn style(spec: &StatementSpec) -> Style {
             grouped: false,
             summary: ["Opening Balance", "Total Withdrawals", "Total Deposits", "Closing Balance"],
             repeat_header: true,
+            amount_last: false,
         },
     }
 }
 
-fn money_text(bank: Bank, v: Decimal, col: Col, liability: bool) -> String {
+fn money_text(bank: Bank, v: Decimal, col: Col) -> String {
     let neg = v.is_sign_negative() && !v.is_zero();
     let p = fmt_plain(v.abs());
     match (bank, col) {
-        (Bank::Cnb, Col::Balance) => format!("{p} {}", if neg != liability { "DR" } else { "CR" }),
+        (Bank::Cnb, _) if neg => format!("{p} -"),
         (Bank::Butterfield, Col::Amount) if neg => format!("{p} CR"),
         (Bank::Scotiabank, Col::Amount) => format!("${}{p}", if neg { "-" } else { "" }),
         (_, _) if neg => format!("-{p}"),
@@ -288,7 +298,8 @@ pub fn render(specs: &[StatementSpec]) -> Vec<Token> {
 
         let date_x = 40.0;
         let post_x = 128.0;
-        let desc_x = if st.post_hdr.is_some() { 206.0 } else { 112.0 };
+        // the description starts clear of the date heading ("Transaction Date" is wider than the dates)
+        let desc_x = if st.post_hdr.is_some() { 206.0 } else { (date_x + st.date_hdr.len() as f64 * CW + 16.0).max(112.0) };
         let rights: Vec<f64> = match st.money.len() {
             1 => vec![565.0],
             _ => vec![405.0, 485.0, 565.0],
@@ -322,9 +333,9 @@ pub fn render(specs: &[StatementSpec]) -> Vec<Token> {
                 if let Some((v, b, col)) = pending_split.take() {
                     // the split row's amount and balance, alone at the top of the page
                     let k = st.money.iter().position(|m| m.1 == col).unwrap_or(0);
-                    sh.right(rights[k], &money_text(spec.bank, v, col, liability));
+                    sh.right(rights[k], &money_text(spec.bank, v, col));
                     if let Some(bk) = st.money.iter().position(|m| m.1 == Col::Balance) {
-                        sh.right(rights[bk], &money_text(spec.bank, b, Col::Balance, liability));
+                        sh.right(rights[bk], &money_text(spec.bank, b, Col::Balance));
                     }
                     sh.nl(LINE);
                 }
@@ -339,8 +350,15 @@ pub fn render(specs: &[StatementSpec]) -> Vec<Token> {
                 sh.put(post_x, &(st.date_fmt)(posted));
             }
             sh.put(desc_x, &t.description);
+            if st.amount_last {
+                for m in &t.memo {
+                    sh.nl(LINE);
+                    sh.put(desc_x, m);
+                }
+            }
             let col = match st.money.len() {
                 1 => Col::Amount,
+                _ if st.money[0].1 == Col::Amount => Col::Amount,
                 _ if s.is_sign_negative() != liability => Col::Debit,
                 _ => Col::Credit,
             };
@@ -352,28 +370,29 @@ pub fn render(specs: &[StatementSpec]) -> Vec<Token> {
             }
             let k = st.money.iter().position(|m| m.1 == col).unwrap_or(0);
             if Some(i) == spec.garble_row {
-                sh.right(rights[k], &money_text(spec.bank, shown, col, liability).replacen('.', ",", 1));
+                sh.right(rights[k], &money_text(spec.bank, shown, col).replacen('.', ",", 1));
             } else if Some(i) == spec.drift_row {
                 // amount printed ~30pt left of its column: not in any locked column band
-                sh.right(rights[k] - 34.0, &money_text(spec.bank, shown, col, liability));
+                sh.right(rights[k] - 34.0, &money_text(spec.bank, shown, col));
             } else {
-                sh.right(rights[k], &money_text(spec.bank, shown, col, liability));
+                sh.right(rights[k], &money_text(spec.bank, shown, col));
             }
             if let Some(bk) = st.money.iter().position(|m| m.1 == Col::Balance)
                 && !(st.grouped && same_day_after)
             {
-                sh.right(rights[bk], &money_text(spec.bank, bal, Col::Balance, liability));
+                sh.right(rights[bk], &money_text(spec.bank, bal, Col::Balance));
             }
             sh.nl(LINE);
-            for m in &t.memo {
+            for m in t.memo.iter().filter(|_| !st.amount_last) {
                 sh.y -= 2.0;
                 sh.put(desc_x, m);
                 sh.nl(LINE);
             }
         }
-        if st.money.iter().any(|m| m.1 == Col::Balance) {
+        // CNB prints no closing row in the table (the summary box has it)
+        if let Some(bk) = st.money.iter().position(|m| m.1 == Col::Balance).filter(|_| !st.amount_last) {
             sh.put(desc_x, "Closing Balance");
-            sh.right(rights[2], &money_text(spec.bank, spec.closing(), Col::Balance, liability));
+            sh.right(rights[bk], &money_text(spec.bank, spec.closing(), Col::Balance));
             sh.nl(LINE);
         }
         sh.nl(LINE);

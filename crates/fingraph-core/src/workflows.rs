@@ -315,7 +315,7 @@ impl Db {
     /// For each visible account: which of the `n` months up to `today` have a statement, and whether
     /// its statements chain (closing of one = opening of the next).
     pub fn coverage(&self, entity_ids: &[i64], n: i32, today: NaiveDate) -> Result<Vec<Coverage>> {
-        let docs = self.documents(entity_ids)?;
+        let docs = self.documents_all(entity_ids)?;
         let accounts = self.accounts()?;
         let first = add_months(month_start(today), -(n - 1));
         let mut out = Vec::new();

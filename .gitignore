@@ -1,1 +1,2 @@
 target/
+crates/fingraph-core/tests/fixtures/private/

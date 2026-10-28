@@ -960,7 +960,8 @@ mod tests {
         let fees_card = dup.iter().find(|i| i.kind == InsightKind::BankFees).unwrap();
         assert!(fees_card.parts.len() > 1 && fees_card.parts.iter().map(|p| p.2.len()).sum::<usize>() == fees_card.tx_ids.len());
         let k = kpis(&rows, &db.documents(&[]).unwrap(), all.0, all.1, Currency::KYD, &fx, today);
-        assert_eq!(k.statements, k.reconciled + 1, "all but the deliberately garbled demo statement");
+        // the deliberately garbled demo statement waits for review, so it isn't counted at all
+        assert_eq!((k.statements, k.reconciled), (83, 83));
         assert!(k.subs_monthly > Decimal::ZERO);
         // transfers never count: card payments don't show up as spending
         assert!(by_category(&rows, all.0, all.1, Currency::KYD, &fx, &parents).iter().all(|(k, _)| k != "Transfers"));

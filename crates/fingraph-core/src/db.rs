@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use crate::money::{to_minor, Fx};
 use crate::prefs::Prefs;
-use crate::parser::profiles::{self, BankProfile, HeaderAnchors, LayoutKind};
+use crate::parser::profiles::{self, BankProfile, HeaderAnchors, LayoutKind, LayoutRules};
 use crate::parser::{Diagnostics, ScanResult, Section, SectionReport};
 use crate::rules::{self, Rule, RuleKind};
 use crate::{AccountType, Currency, EntityKind, Error, Reconciliation, Result, ReviewStatus};
@@ -258,6 +258,13 @@ CREATE TABLE goal_entries (
 "#, r#"
 -- the statements list counts each statement's transactions; without this it scans them all per statement
 CREATE INDEX IF NOT EXISTS tx_document ON transactions(document_id);
+"#, r#"
+-- a statement that doesn't reconcile, was read by OCR, or comes from a layout not yet checked on a real
+-- statement waits for review: its transactions stay out of every view until it's approved
+ALTER TABLE documents ADD COLUMN review_hold INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE documents ADD COLUMN review_note TEXT NOT NULL DEFAULT '';
+-- a bank's declared layout (row shape, summary labels, verified account types), JSON
+ALTER TABLE bank_profiles ADD COLUMN layout TEXT NOT NULL DEFAULT '{}';
 "#];
 
 /// (name, kind, children). Missing ones are added to existing ledgers on open; lists are shown A–Z.
@@ -352,6 +359,8 @@ pub struct DocumentRow {
     pub confidence: f64,
     pub tx_count: i64,
     pub imported_at: String,
+    /// Waiting for review: why (empty once approved).
+    pub review: Vec<Review>,
 }
 
 /// One ledger row with everything the views need joined in.
@@ -422,6 +431,102 @@ pub struct ImportReport {
     pub duplicates: usize,
     pub already_imported: bool,
     pub auto_categorized: usize,
+    /// Sections waiting for review (see [`Review`]).
+    pub held: usize,
+}
+
+/// Where one section of a scanned statement goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Existing(i64),
+    New,
+    Skip,
+}
+
+/// One section of a statement, before it's imported.
+#[derive(Debug, Clone)]
+pub struct SectionPlan {
+    /// The known account with the same bank, last 4 digits and currency.
+    pub matched: Option<i64>,
+    /// What a new account would be called (`CNB Savings KYD ••1234`).
+    pub new_name: String,
+    /// The statement printed an account number (last 4 digits) the scanner could read.
+    pub number_read: bool,
+    /// No account number could be read: the same bank's accounts in this currency, to pick from.
+    pub candidates: Vec<(i64, String)>,
+}
+
+/// What importing a scanned statement would do, so anything needing a person can be asked first.
+#[derive(Debug, Clone, Default)]
+pub struct ImportPlan {
+    pub sections: Vec<SectionPlan>,
+    pub already_imported: bool,
+    /// Statements already in the ledger for the same account and period (another copy or another read).
+    pub same_period: Vec<(i64, String)>,
+    /// Neither a transaction nor a balance could be read (a stray summary page, say).
+    pub no_transactions: bool,
+}
+
+/// A quiet month (no transactions, balances printed) is still a statement; this is neither.
+fn nothing_read(scan: &ScanResult) -> bool {
+    scan.sections.iter().all(|s| s.transactions.is_empty() && s.opening.is_none() && s.closing.is_none())
+}
+
+impl ImportPlan {
+    /// Every section belongs to a known account and nothing overlaps: import without asking.
+    pub fn automatic(&self) -> Option<Vec<Target>> {
+        if self.no_transactions || self.already_imported || !self.same_period.is_empty() {
+            return None;
+        }
+        self.sections.iter().map(|s| s.matched.map(Target::Existing)).collect()
+    }
+    /// Known accounts where they match, new ones otherwise (demo data, tests, the terminal).
+    pub fn default_targets(&self) -> Vec<Target> {
+        self.sections.iter().map(|s| s.matched.map_or(Target::New, Target::Existing)).collect()
+    }
+}
+
+/// Why a statement waits for review before its transactions count anywhere. Stored as codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Review {
+    /// The rows don't add up to the printed balances.
+    Mismatch,
+    /// No balances printed to check against.
+    NoBalances,
+    /// Read by OCR: names may have typos.
+    Ocr,
+    /// The first statement of this kind from this bank: the layout hasn't been confirmed on a real one.
+    NewLayout,
+    /// It departs from the bank's declared layout: it can add up and still have wrong names or dates.
+    OffLayout,
+}
+
+impl Review {
+    pub const ALL: [Review; 5] = [Review::Mismatch, Review::NoBalances, Review::Ocr, Review::NewLayout, Review::OffLayout];
+    pub fn code(self) -> &'static str {
+        match self {
+            Review::Mismatch => "mismatch",
+            Review::NoBalances => "nobalances",
+            Review::Ocr => "ocr",
+            Review::NewLayout => "newlayout",
+            Review::OffLayout => "offlayout",
+        }
+    }
+    pub fn text(self) -> &'static str {
+        match self {
+            Review::Mismatch => "the rows don't add up to the statement's balances",
+            Review::NoBalances => "there are no balances to check the rows against",
+            Review::Ocr => "it was read by OCR, so names may have typos",
+            Review::NewLayout => "it's the first statement of this kind from this bank: check the dates, amounts and descriptions once",
+            Review::OffLayout => "it doesn't match this bank's declared layout (see the notes in its Scan Pass Report), so names or dates may be off",
+        }
+    }
+    pub fn parse_list(s: &str) -> Vec<Review> {
+        Review::ALL.into_iter().filter(|r| s.split(',').any(|c| c == r.code())).collect()
+    }
+    pub fn join(v: &[Review]) -> String {
+        v.iter().map(|r| r.code()).collect::<Vec<_>>().join(",")
+    }
 }
 
 pub struct Db {
@@ -453,10 +558,12 @@ pub(crate) fn now() -> String {
 
 /// Deterministic SHA-256 FITID over account, date, amount, normalised description and the row's
 /// position among identical rows that day (two identical coffees are two transactions).
-pub fn fitid(account_id: i64, posted: NaiveDate, amount: Decimal, raw: &str, seq: usize) -> String {
-    let norm: String = raw.to_uppercase().split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+/// A transaction's fingerprint: account, date, amount and which of that day's same-amount rows it is.
+/// Not the description, so the same statement read twice (a re-download, an OCR copy, a rescan that
+/// fixed a misread name) can't add its rows a second time.
+pub fn fitid(account_id: i64, posted: NaiveDate, amount: Decimal, seq: usize) -> String {
     let mut h = Sha256::new();
-    h.update(format!("{account_id}|{posted}|{}|{norm}|{seq}", crate::money::round2(amount)).as_bytes());
+    h.update(format!("v2|{account_id}|{posted}|{}|{seq}", crate::money::round2(amount)).as_bytes());
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -523,6 +630,15 @@ fn profile_row(r: &Row) -> rusqlite::Result<BankProfile> {
         noise_patterns: serde_json::from_str(&j(8)?).unwrap_or_default(),
         fx_note_regex: r.get(9)?,
         is_builtin: r.get(10)?,
+        layout: {
+            let stored: LayoutRules = serde_json::from_str(&j(11)?).unwrap_or_default();
+            // a built-in nobody has declared a layout for yet takes the shipped one
+            if stored == LayoutRules::default() && r.get::<_, bool>(10)? {
+                profiles::builtins().into_iter().find(|p| p.slug == r.get::<_, String>(1).unwrap_or_default()).map(|p| p.layout).unwrap_or_default()
+            } else {
+                stored
+            }
+        },
     })
 }
 
@@ -701,13 +817,20 @@ impl Db {
                 self.save_profile(&p)?;
             }
         }
-        // a built-in rewritten from a real statement replaces the stored guess, once (CNB: 0.2.3);
-        // the next bank checked against a real PDF gets its own key here
-        if self.setting("profile_rev:cnb_ky").is_none() {
-            if let Some(id) = self.conn.query_row("SELECT id FROM bank_profiles WHERE slug = 'cnb_ky' AND is_builtin = 1", [], |r| r.get::<_, i64>(0)).optional()? {
-                self.delete_or_reset_profile(id)?;
+        // a built-in rewritten from a real statement replaces the stored guess, once (CNB 0.2.3,
+        // Scotiabank's real headings 0.2.4); the next bank checked against a real PDF is added here
+        if self.setting("fitid_v2").is_none() {
+            self.rekey_fitids()?;
+            self.set_setting("fitid_v2", "1")?;
+        }
+        for (slug, rev) in [("cnb_ky", "1"), ("scotiabank_ky", "2")] {
+            let key = format!("profile_rev:{slug}");
+            if self.setting(&key).as_deref() != Some(rev) {
+                if let Some(id) = self.conn.query_row("SELECT id FROM bank_profiles WHERE slug = ?1 AND is_builtin = 1", [slug], |r| r.get::<_, i64>(0)).optional()? {
+                    self.delete_or_reset_profile(id)?;
+                }
+                self.set_setting(&key, rev)?;
             }
-            self.set_setting("profile_rev:cnb_ky", "1")?;
         }
         let fx = Fx::default();
         self.conn.execute("INSERT OR IGNORE INTO fx_rates VALUES ('KYD', 'USD', ?1)", [fx.kyd_to_usd.to_string()])?;
@@ -775,8 +898,37 @@ impl Db {
 
     // ---------------------------------------------------------------- bank profiles
 
+    /// 0.2.4 changed the transaction fingerprint (no description in it); give every stored transaction
+    /// its new one, and carry repayments and receipts that point at the old one across.
+    fn rekey_fitids(&self) -> Result<()> {
+        type Old = (i64, i64, Option<i64>, String, String, String, String);
+        let rows: Vec<Old> = {
+            let mut st = self.conn.prepare("SELECT id, account_id, document_id, posted_date, amount, fitid, memo FROM transactions ORDER BY COALESCE(document_id, 0), id")?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        // numbered within each statement, the way an import numbers them
+        let mut seq: std::collections::HashMap<(i64, Option<i64>, String, Decimal, bool), usize> = Default::default();
+        for (id, account, doc, posted, amount, old, memo) in rows {
+            let amount = dec(&amount);
+            // lines converted by hand keep their own numbering, clear of the scanned rows'
+            let manual = memo.starts_with("Converted from skipped line");
+            let n = seq.entry((account, doc, posted.clone(), crate::money::round2(amount), manual)).or_insert(0);
+            let new = fitid(account, date(&posted), amount, *n + if manual { 1000 } else { 0 });
+            *n += 1;
+            // a clash means the ledger already held this row twice (read two ways); leave that one alone
+            if tx.execute("UPDATE OR IGNORE transactions SET fitid = ?2 WHERE id = ?1", params![id, new])? == 1 {
+                tx.execute("UPDATE reimbursements SET fitid = ?3 WHERE account_id = ?1 AND fitid = ?2", params![account, old, new])?;
+                tx.execute("UPDATE reimbursements SET paid_fitid = ?3 WHERE paid_account_id = ?1 AND paid_fitid = ?2", params![account, old, new])?;
+                tx.execute("UPDATE attachments SET fitid = ?3 WHERE account_id = ?1 AND fitid = ?2", params![account, old, new])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn profiles(&self) -> Result<Vec<BankProfile>> {
-        let mut st = self.conn.prepare("SELECT id, slug, display_name, short_name, routing_identifiers, default_date_format, column_layout_kind, header_anchors, noise_patterns, fx_note_regex, is_builtin FROM bank_profiles ORDER BY is_builtin DESC, display_name")?;
+        let mut st = self.conn.prepare("SELECT id, slug, display_name, short_name, routing_identifiers, default_date_format, column_layout_kind, header_anchors, noise_patterns, fx_note_regex, is_builtin, layout FROM bank_profiles ORDER BY is_builtin DESC, display_name")?;
         let rows = st.query_map([], profile_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -786,16 +938,17 @@ impl Db {
         let ids = serde_json::to_string(&p.routing_identifiers)?;
         let anchors = serde_json::to_string(&p.header_anchors)?;
         let noise = serde_json::to_string(&p.noise_patterns)?;
+        let layout = serde_json::to_string(&p.layout)?;
         if p.id == 0 {
             self.conn.execute(
-                "INSERT INTO bank_profiles (slug, display_name, short_name, routing_identifiers, default_date_format, column_layout_kind, header_anchors, noise_patterns, fx_note_regex, is_builtin) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                params![p.slug, p.display_name, p.short_name, ids, p.default_date_format, p.column_layout_kind.as_str(), anchors, noise, p.fx_note_regex, p.is_builtin],
+                "INSERT INTO bank_profiles (slug, display_name, short_name, routing_identifiers, default_date_format, column_layout_kind, header_anchors, noise_patterns, fx_note_regex, is_builtin, layout) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                params![p.slug, p.display_name, p.short_name, ids, p.default_date_format, p.column_layout_kind.as_str(), anchors, noise, p.fx_note_regex, p.is_builtin, layout],
             )?;
             Ok(self.conn.last_insert_rowid())
         } else {
             self.conn.execute(
-                "UPDATE bank_profiles SET display_name=?2, short_name=?3, routing_identifiers=?4, default_date_format=?5, column_layout_kind=?6, header_anchors=?7, noise_patterns=?8, fx_note_regex=?9 WHERE id=?1",
-                params![p.id, p.display_name, p.short_name, ids, p.default_date_format, p.column_layout_kind.as_str(), anchors, noise, p.fx_note_regex],
+                "UPDATE bank_profiles SET display_name=?2, short_name=?3, routing_identifiers=?4, default_date_format=?5, column_layout_kind=?6, header_anchors=?7, noise_patterns=?8, fx_note_regex=?9, layout=?10 WHERE id=?1",
+                params![p.id, p.display_name, p.short_name, ids, p.default_date_format, p.column_layout_kind.as_str(), anchors, noise, p.fx_note_regex, layout],
             )?;
             Ok(p.id)
         }
@@ -893,22 +1046,30 @@ impl Db {
     }
 
     /// The account a statement section belongs to: same bank, last four digits, currency and type.
-    fn account_for(&self, entity_id: i64, profile: Option<&BankProfile>, s: &Section) -> Result<i64> {
-        let masked = s.account_last4.as_ref().map(|l| format!("••{l}")).unwrap_or_default();
-        let pid = profile.map(|p| p.id);
-        let found: Option<i64> = self
+    /// The known account a section belongs to: same bank, same last 4 digits, same currency. The account
+    /// type is a tie-breaker only (it's detected, and an OCR read can get it wrong); with no account
+    /// number there's no match, and the person picks.
+    fn find_account(&self, profile: Option<&BankProfile>, s: &Section) -> Result<Option<i64>> {
+        let Some(last4) = &s.account_last4 else { return Ok(None) };
+        Ok(self
             .conn
             .query_row(
-                "SELECT id FROM accounts WHERE bank_profile_id IS ?1 AND account_number_masked = ?2 AND currency = ?3 AND account_type = ?4",
-                params![pid, masked, s.currency.code(), s.account_type.as_str()],
+                "SELECT id FROM accounts WHERE bank_profile_id IS ?1 AND account_number_masked = ?2 AND currency = ?3 ORDER BY account_type = ?4 DESC, id LIMIT 1",
+                params![profile.map(|p| p.id), format!("••{last4}"), s.currency.code(), s.account_type.as_str()],
                 |r| r.get(0),
             )
-            .optional()?;
-        if let Some(id) = found {
-            return Ok(id);
-        }
+            .optional()?)
+    }
+
+    fn new_account_name(profile: Option<&BankProfile>, s: &Section) -> String {
         let bank = profile.map_or("Bank", |p| p.short_name.as_str());
-        let name = format!("{bank} {} {}{}", s.account_type.label(), s.currency.code(), s.account_last4.as_ref().map(|l| format!(" ••{l}")).unwrap_or_default());
+        format!("{bank} {} {}{}", s.account_type.label(), s.currency.code(), s.account_last4.as_ref().map(|l| format!(" ••{l}")).unwrap_or_default())
+    }
+
+    fn create_account(&self, entity_id: i64, profile: Option<&BankProfile>, s: &Section) -> Result<i64> {
+        let masked = s.account_last4.as_ref().map(|l| format!("••{l}")).unwrap_or_default();
+        let pid = profile.map(|p| p.id);
+        let name = Self::new_account_name(profile, s);
         self.conn.execute(
             "INSERT INTO accounts (entity_id, bank_profile_id, name, account_number_masked, account_type, currency, opening_balance, opening_balance_minor, opening_date) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,NULL)",
             params![entity_id, pid, name, masked, s.account_type.as_str(), s.currency.code(), s.opening.unwrap_or_default().to_string(), to_minor(s.opening.unwrap_or_default())],
@@ -920,7 +1081,70 @@ impl Db {
 
     /// Store a scanned statement: one document per section, transactions deduplicated by FITID,
     /// learned rules applied, transfers matched.
-    pub fn import_scan(&self, entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult) -> Result<ImportReport> {
+    /// What importing this scan would do: which accounts it matches, and anything that needs asking.
+    pub fn plan_import(&self, sha256: &str, scan: &ScanResult) -> Result<ImportPlan> {
+        let profiles = self.profiles()?;
+        let profile = scan.profile_slug.as_ref().and_then(|s| profiles.iter().find(|p| &p.slug == s));
+        let mut plan = ImportPlan {
+            already_imported: self.conn.query_row("SELECT COUNT(*) FROM documents WHERE sha256_hash = ?1", [sha256], |r| r.get::<_, i64>(0))? > 0,
+            no_transactions: nothing_read(scan),
+            ..Default::default()
+        };
+        for s in &scan.sections {
+            let matched = self.find_account(profile, s)?;
+            let candidates = if s.account_last4.is_none() {
+                let mut st = self.conn.prepare("SELECT id, name FROM accounts WHERE bank_profile_id IS ?1 AND currency = ?2 ORDER BY name")?;
+                st.query_map(params![profile.map(|p| p.id), s.currency.code()], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+            } else {
+                Vec::new()
+            };
+            if let (Some(a), Some((from, to))) = (matched, scan.period) {
+                let mut st = self.conn.prepare("SELECT id, filename FROM documents WHERE account_id = ?1 AND period_start = ?2 AND period_end = ?3 AND sha256_hash != ?4")?;
+                let dups: Vec<(i64, String)> = st.query_map(params![a, from.to_string(), to.to_string(), sha256], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+                plan.same_period.extend(dups);
+            }
+            plan.sections.push(SectionPlan { matched, new_name: Self::new_account_name(profile, s), number_read: s.account_last4.is_some(), candidates });
+        }
+        Ok(plan)
+    }
+
+    /// Import into known accounts where they match and new ones otherwise, without asking.
+    pub fn import_auto(&self, entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult) -> Result<ImportReport> {
+        let targets = self.plan_import(sha256, scan)?.default_targets();
+        self.import_scan(entity_id, filename, sha256, scan, &targets)
+    }
+
+    /// Why a freshly read section should wait for review.
+    fn review_reasons(profile: Option<&BankProfile>, scan: &ScanResult, s: &Section) -> Vec<Review> {
+        let mut v = Vec::new();
+        match s.reconciliation {
+            Reconciliation::Reconciled => {}
+            Reconciliation::Discrepancy(_) => v.push(Review::Mismatch),
+            Reconciliation::Unverified => v.push(Review::NoBalances),
+        }
+        if scan.diagnostics.pass1.ocr {
+            v.push(Review::Ocr);
+        }
+        if !profile.is_some_and(|p| p.layout.verified.iter().any(|t| t == s.account_type.as_str())) {
+            v.push(Review::NewLayout);
+        }
+        if !scan.diagnostics.pass3.layout_notes.is_empty() {
+            v.push(Review::OffLayout);
+        }
+        v
+    }
+
+    /// Store a scanned statement, each section into the account `targets` names. A section that doesn't
+    /// reconcile, was read by OCR, or is the first of its kind from its bank is held for review.
+    pub fn import_scan(&self, entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult, targets: &[Target]) -> Result<ImportReport> {
+        self.import_scan_reviewed(entity_id, filename, sha256, scan, targets, &[])
+    }
+
+    /// `approved`: sections (by index) already approved before a rescan, which only a new mismatch holds again.
+    fn import_scan_reviewed(&self, entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult, targets: &[Target], approved: &[usize]) -> Result<ImportReport> {
+        if nothing_read(scan) {
+            return Err(Error("no transactions or balances were found in this statement".into()));
+        }
         let mut rep = ImportReport::default();
         // OCR'd statements say so wherever their name shows, so nobody takes the names as exact
         let ocr_name = format!("{filename} (read by OCR)");
@@ -937,7 +1161,17 @@ impl Db {
         let rules = self.rules()?;
         let tx = self.conn.unchecked_transaction()?;
         for (si, s) in scan.sections.iter().enumerate() {
-            let account_id = self.account_for(entity_id, profile, s)?;
+            let account_id = match targets.get(si).copied().unwrap_or(Target::New) {
+                Target::Skip => continue,
+                Target::Existing(id) => id,
+                Target::New => self.create_account(entity_id, profile, s)?,
+            };
+            let mut why = Self::review_reasons(profile, scan, s);
+            if approved.contains(&si) {
+                // approved before: only what this read found wrong holds it again
+                why.retain(|r| matches!(r, Review::Mismatch | Review::NoBalances | Review::OffLayout));
+            }
+            rep.held += !why.is_empty() as usize;
             #[derive(serde::Serialize)]
             struct Stored<'a> {
                 diagnostics: &'a Diagnostics,
@@ -947,8 +1181,9 @@ impl Db {
             let sum = s.extracted_sum();
             tx.execute(
                 "INSERT INTO documents (account_id, bank_profile_id, filename, sha256_hash, section_index, period_start, period_end, statement_opening_balance, statement_closing_balance,
-                 statement_total_debits, statement_total_credits, extracted_tx_sum, extracted_tx_sum_minor, currency, reconciliation_status, scan_confidence_score, scan_diagnostics_json, imported_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                 statement_total_debits, statement_total_credits, extracted_tx_sum, extracted_tx_sum_minor, currency, reconciliation_status, scan_confidence_score, scan_diagnostics_json, imported_at,
+                 review_hold, review_note)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
                 params![
                     account_id,
                     profile.map(|p| p.id),
@@ -967,16 +1202,17 @@ impl Db {
                     s.reconciliation.to_db(),
                     s.confidence,
                     diag,
-                    now()
+                    now(),
+                    !why.is_empty(),
+                    Review::join(&why)
                 ],
             )?;
             let doc_id = tx.last_insert_rowid();
             rep.document_ids.push(doc_id);
-            let mut seq: std::collections::HashMap<(NaiveDate, String, String), usize> = Default::default();
+            let mut seq: std::collections::HashMap<(NaiveDate, Decimal), usize> = Default::default();
             for t in &s.transactions {
-                let k = (t.posted, t.amount.to_string(), t.description.to_uppercase());
-                let n = seq.entry(k).or_insert(0);
-                let fid = fitid(account_id, t.posted, t.amount, &t.description, *n);
+                let n = seq.entry((t.posted, crate::money::round2(t.amount))).or_insert(0);
+                let fid = fitid(account_id, t.posted, t.amount, *n);
                 *n += 1;
                 let stem = rules::merchant_stem(&t.description, &t.memo);
                 let (payee, _) = rules::known_merchant(&stem, &t.description);
@@ -1038,11 +1274,17 @@ impl Db {
 
     // ---------------------------------------------------------------- documents
 
+    /// Statements that count: those waiting for review are left out, like their transactions.
     pub fn documents(&self, entity_ids: &[i64]) -> Result<Vec<DocumentRow>> {
+        Ok(self.documents_all(entity_ids)?.into_iter().filter(|d| d.review.is_empty()).collect())
+    }
+
+    /// Every statement, including those waiting for review (the Statements page, coverage).
+    pub fn documents_all(&self, entity_ids: &[i64]) -> Result<Vec<DocumentRow>> {
         let mut st = self.conn.prepare(
             "SELECT d.id, d.account_id, a.name, a.entity_id, COALESCE(bp.short_name, ''), d.filename, d.period_start, d.period_end, d.statement_opening_balance, d.statement_closing_balance,
              d.statement_total_debits, d.statement_total_credits, d.extracted_tx_sum, d.currency, d.reconciliation_status, d.scan_confidence_score, d.imported_at,
-             (SELECT COUNT(*) FROM transactions t WHERE t.document_id = d.id)
+             (SELECT COUNT(*) FROM transactions t WHERE t.document_id = d.id), CASE WHEN d.review_hold = 1 THEN d.review_note ELSE '' END
              FROM documents d JOIN accounts a ON a.id = d.account_id LEFT JOIN bank_profiles bp ON bp.id = d.bank_profile_id ORDER BY d.period_end DESC, d.id DESC",
         )?;
         let rows = st.query_map([], |r| {
@@ -1066,6 +1308,7 @@ impl Db {
                 confidence: r.get(15)?,
                 imported_at: r.get(16)?,
                 tx_count: r.get(17)?,
+                review: Review::parse_list(&r.get::<_, String>(18)?),
             })
         })?;
         let all: Vec<DocumentRow> = rows.collect::<rusqlite::Result<_>>()?;
@@ -1156,8 +1399,26 @@ impl Db {
         } else {
             Vec::new()
         };
+        // a read that found nothing never replaces the statement you have
+        if nothing_read(scan) {
+            return Err(Error("the new read found no transactions or balances; the statement was left as it was".into()));
+        }
+        // same accounts as before, and what was already approved stays approved unless it stops adding up
+        let old: Vec<(i64, i64, bool)> = {
+            let mut st = self.conn.prepare("SELECT section_index, account_id, review_hold FROM documents WHERE sha256_hash = ?1")?;
+            st.query_map([sha256], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        let mut targets = self.plan_import(sha256, scan)?.default_targets();
+        for &(si, account, _) in &old {
+            if let Some(t) = targets.get_mut(si as usize) {
+                *t = Target::Existing(account);
+            }
+        }
+        let approved: Vec<usize> = old.iter().filter(|o| !o.2).map(|o| o.0 as usize).collect();
+        // the OCR mark comes back from the scan itself; strip it so the name doesn't grow
+        let filename = filename.trim_end_matches(" (read by OCR)");
         self.conn.execute("DELETE FROM documents WHERE sha256_hash = ?1", [sha256])?;
-        let rep = self.import_scan(entity_id, filename, sha256, scan)?;
+        let rep = self.import_scan_reviewed(entity_id, filename, sha256, scan, &targets, &approved)?;
         for k in kept {
             let id: Option<i64> = self.conn.query_row("SELECT id FROM transactions WHERE account_id = ?1 AND fitid = ?2", params![k.account, k.fitid], |r| r.get(0)).optional()?;
             let id = match (id, &k.manual) {
@@ -1283,6 +1544,35 @@ impl Db {
     }
 
     /// Re-run the statement equation for a document from what's now in the ledger.
+    /// Let a held statement count: its transactions join every view. Approving the first statement of a
+    /// kind confirms that bank's layout for that account type, which also releases the others held only
+    /// for that reason.
+    pub fn approve_document(&self, doc_id: i64) -> Result<()> {
+        let (note, profile_id, ty): (String, Option<i64>, String) = self.conn.query_row(
+            "SELECT d.review_note, a.bank_profile_id, a.account_type FROM documents d JOIN accounts a ON a.id = d.account_id WHERE d.id = ?1",
+            [doc_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        self.conn.execute("UPDATE documents SET review_hold = 0, review_note = '' WHERE id = ?1", [doc_id])?;
+        if Review::parse_list(&note).contains(&Review::NewLayout)
+            && let Some(mut p) = self.profiles()?.into_iter().find(|p| Some(p.id) == profile_id)
+        {
+            if !p.layout.verified.contains(&ty) {
+                p.layout.verified.push(ty.clone());
+                self.save_profile(&p)?;
+            }
+            self.conn.execute(
+                "UPDATE documents SET review_hold = 0, review_note = '' WHERE review_hold = 1 AND review_note = ?1
+                 AND account_id IN (SELECT id FROM accounts WHERE bank_profile_id = ?2 AND account_type = ?3)",
+                params![Review::NewLayout.code(), profile_id, ty],
+            )?;
+        }
+        self.match_transfers()?;
+        self.mark_card_payments()?;
+        self.mark_recurring()?;
+        Ok(())
+    }
+
     pub fn recheck_document(&self, doc_id: i64, _currency: Currency) -> Result<Reconciliation> {
         let (open, close, ty): (Option<String>, Option<String>, String) = self.conn.query_row(
             "SELECT d.statement_opening_balance, d.statement_closing_balance, a.account_type FROM documents d JOIN accounts a ON a.id = d.account_id WHERE d.id = ?1",
@@ -1305,6 +1595,19 @@ impl Db {
             "UPDATE documents SET reconciliation_status = ?2, extracted_tx_sum = ?3, extracted_tx_sum_minor = ?4, scan_confidence_score = CASE WHEN ?2 = 'Reconciled' THEN 1.0 ELSE scan_confidence_score END WHERE id = ?1",
             params![doc_id, status.to_db(), sum.to_string(), to_minor(sum)],
         )?;
+        // fixed by hand so it adds up now: that reason for holding it is gone
+        if status == Reconciliation::Reconciled {
+            let note: String = self.conn.query_row("SELECT review_note FROM documents WHERE id = ?1", [doc_id], |r| r.get(0))?;
+            let left: Vec<Review> = Review::parse_list(&note).into_iter().filter(|r| !matches!(r, Review::Mismatch | Review::NoBalances)).collect();
+            let was_held: bool = self.conn.query_row("SELECT review_hold FROM documents WHERE id = ?1", [doc_id], |r| r.get(0))?;
+            self.conn.execute("UPDATE documents SET review_note = ?2, review_hold = review_hold AND ?3 WHERE id = ?1", params![doc_id, Review::join(&left), !left.is_empty()])?;
+            // its rows just joined the ledger: pair its transfers and recurring charges like an import does
+            if was_held && left.is_empty() {
+                self.match_transfers()?;
+                self.mark_card_payments()?;
+                self.mark_recurring()?;
+            }
+        }
         Ok(status)
     }
 
@@ -1314,7 +1617,8 @@ impl Db {
         if f.split_lines {
             return self.with_split_lines(f);
         }
-        let mut sql = format!("{TX_SELECT} WHERE 1=1");
+        // a statement waiting for review counts nowhere until it's approved
+        let mut sql = format!("{TX_SELECT} WHERE (t.document_id IS NULL OR t.document_id NOT IN (SELECT id FROM documents WHERE review_hold = 1))");
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
         if !f.entity_ids.is_empty() {
             sql += &format!(" AND COALESCE(t.business_entity_id, a.entity_id) IN ({})", f.entity_ids.iter().map(|_| "?").collect::<Vec<_>>().join(","));
@@ -1434,7 +1738,7 @@ impl Db {
                 ent.to_string(),
                 to_minor(ent),
                 memo,
-                fitid(account_id, posted, amount, description, 1000 + seq as usize)
+                fitid(account_id, posted, amount, 1000 + seq as usize)
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -1798,7 +2102,11 @@ impl Db {
             h.update(doc.filename.as_bytes());
             let sha: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
             let ent = if doc.workspace == "Personal" { personal } else { business };
-            n += self.import_scan(ent, &doc.filename, &format!("demo-{sha}"), &scan)?.inserted;
+            // simulated statements: no new layout or OCR to confirm, only a mismatch holds one back
+            let sha = format!("demo-{sha}");
+            let targets = self.plan_import(&sha, &scan)?.default_targets();
+            let all: Vec<usize> = (0..scan.sections.len()).collect();
+            n += self.import_scan_reviewed(ent, &doc.filename, &sha, &scan, &targets, &all)?.inserted;
         }
         // a few answers already learned, so triage starts with the interesting merchants
         for (pattern, cat, payee) in [("SALARY", "Salary", "Island Air (Salary)"), ("RENT RECEIVED", "Rental Income", "Rent"), ("SERVICE CHARGE", "Bank Fees & Interest", "Scotiabank")] {
@@ -1851,6 +2159,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn imports_ask_about_new_accounts_hold_new_layouts_and_never_double_up() {
+        let db = Db::open_in_memory().unwrap();
+        let ent = db.create_entity("Personal", EntityKind::Personal, Currency::KYD).unwrap();
+        let profiles = db.profiles().unwrap();
+        let docs = crate::demo::demo_documents();
+        let cards: Vec<ScanResult> = docs
+            .iter()
+            .filter(|d| d.filename.starts_with("Butterfield_Visa"))
+            .take(2)
+            .map(|d| crate::parser::MultiPassScanner::new(&profiles).scan_tokens(d.tokens.clone()).unwrap())
+            .collect();
+        let rows = |db: &Db| db.transactions(&TxFilter::default()).unwrap().len();
+
+        // a card nobody has imported before: nothing happens without asking
+        let plan = db.plan_import("h1", &cards[0]).unwrap();
+        assert!(plan.automatic().is_none() && plan.sections[0].matched.is_none() && plan.sections[0].number_read);
+        // added, but Butterfield cards haven't been checked on a real statement: held, counting nowhere
+        assert_eq!(db.import_scan(ent, "a.pdf", "h1", &cards[0], &[Target::New]).unwrap().held, 1);
+        assert_eq!(rows(&db), 0);
+        let acct = db.accounts().unwrap()[0].id;
+        // the next month goes to that account by itself, and waits for the same reason
+        let plan = db.plan_import("h2", &cards[1]).unwrap();
+        assert_eq!(plan.automatic(), Some(vec![Target::Existing(acct)]));
+        db.import_scan(ent, "b.pdf", "h2", &cards[1], &plan.automatic().unwrap()).unwrap();
+        let held = db.documents_all(&[]).unwrap();
+        assert!(held.iter().all(|d| d.review == vec![Review::NewLayout]));
+        // approving one confirms Butterfield's card layout, which releases the other too
+        db.approve_document(held[0].id).unwrap();
+        assert!(db.documents_all(&[]).unwrap().iter().all(|d| d.review.is_empty()));
+        assert!(db.profiles().unwrap().iter().any(|p| p.slug == "butterfield_ky" && p.layout.verified.contains(&"CreditCard".to_string())));
+        let n = cards[0].sections[0].transactions.len() + cards[1].sections[0].transactions.len();
+        assert_eq!(rows(&db), n);
+
+        // the same statement read differently (a misread name, a different guess at the account type):
+        // same account, flagged as the same period, and not one row added
+        let mut again = cards[0].clone();
+        again.sections[0].transactions[0].description = "MlSREAD NAME".into();
+        again.sections[0].account_type = AccountType::Checking;
+        let plan = db.plan_import("h3", &again).unwrap();
+        assert_eq!(plan.sections[0].matched, Some(acct));
+        assert!(!plan.same_period.is_empty() && plan.automatic().is_none());
+        assert_eq!(db.import_auto(ent, "c.pdf", "h3", &again).unwrap().inserted, 0);
+        assert_eq!(rows(&db), n);
+
+        // no account number read: no guess, the bank's accounts in that currency are offered instead
+        let mut anon = cards[0].clone();
+        anon.sections[0].account_last4 = None;
+        let plan = db.plan_import("h4", &anon).unwrap();
+        assert!(plan.sections[0].matched.is_none() && !plan.sections[0].number_read && plan.sections[0].candidates.iter().any(|c| c.0 == acct));
+
+        // a ledger from before 0.2.4: old fingerprints are rekeyed and receipts follow their transaction
+        let t = &db.transactions(&TxFilter::default()).unwrap()[0];
+        db.conn.execute("UPDATE transactions SET fitid = 'old-style' WHERE id = ?1", [t.id]).unwrap();
+        db.conn.execute("INSERT INTO attachments (account_id, fitid, filename, stored, added_at) VALUES (?1, 'old-style', 'r.pdf', 'r.pdf', '')", [t.account_id]).unwrap();
+        db.conn.execute("DELETE FROM settings WHERE key = 'fitid_v2'", []).unwrap();
+        db.seed().unwrap();
+        let t2 = db.transaction(t.id).unwrap();
+        assert_ne!(t2.fitid, "old-style");
+        assert_eq!(t2.attachments, 1);
+    }
+
+    #[test]
     fn an_older_ledger_gets_the_corrected_cnb_profile_once() {
         let db = Db::open_in_memory().unwrap();
         let cnb = |db: &Db| db.profiles().unwrap().into_iter().find(|p| p.slug == "cnb_ky").unwrap();
@@ -1876,15 +2246,21 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let n = db.load_demo().unwrap();
         assert!(n > 500, "{n}");
-        let docs = db.documents(&[]).unwrap();
+        let docs = db.documents_all(&[]).unwrap();
         let bad: Vec<&DocumentRow> = docs.iter().filter(|d| d.reconciliation != Reconciliation::Reconciled).collect();
         assert_eq!(bad.len(), 1, "only the deliberately garbled statement: {bad:?}");
+        // it doesn't add up, so it waits for review and its rows count nowhere yet
+        assert_eq!(bad[0].review, vec![Review::Mismatch]);
+        assert!(db.documents(&[]).unwrap().iter().all(|d| d.id != bad[0].id));
+        assert!(db.transactions(&TxFilter::default()).unwrap().iter().all(|t| t.document_id != Some(bad[0].id)));
         // fix it the way the inspector does, and it reconciles
         let Reconciliation::Discrepancy(gap) = bad[0].reconciliation else { panic!() };
         let (_, rep) = db.document_report(bad[0].id).unwrap();
         let i = rep.skipped.iter().position(|l| l.date.is_some()).unwrap();
         db.convert_skipped_line(bad[0].id, i, rep.skipped[i].date.unwrap(), gap, "INCOMING WIRE").unwrap();
         assert_eq!(db.recheck_document(bad[0].id, Currency::USD).unwrap(), Reconciliation::Reconciled);
+        // fixed so it adds up: nothing left to hold it for
+        assert!(db.documents(&[]).unwrap().iter().any(|d| d.id == bad[0].id));
         let rows = db.transactions(&TxFilter::default()).unwrap();
         let paired = rows.iter().filter(|t| t.transfer_peer.is_some()).count();
         // card payments, RBC savings, loan payments (12 each) and the 6 USD→KYD sweeps
@@ -1894,7 +2270,8 @@ mod tests {
         let doc = &crate::demo::demo_documents()[0];
         let scan = crate::parser::MultiPassScanner::new(&profiles).scan_tokens(doc.tokens.clone()).unwrap();
         let p = db.entity_by_name("Personal").unwrap().unwrap();
-        let rep = db.import_scan(p, "x.pdf", "another-hash", &scan).unwrap();
+        assert!(!db.plan_import("another-hash", &scan).unwrap().same_period.is_empty(), "another copy of an imported period is caught");
+        let rep = db.import_auto(p, "x.pdf", "another-hash", &scan).unwrap();
         assert_eq!((rep.inserted, rep.duplicates), (0, scan.sections[0].transactions.len()));
         // HBO is a known service: filed as a subscription on import, so triage doesn't ask
         let hbo = db.transactions(&TxFilter { search: "HBO MAX".into(), ..Default::default() }).unwrap();

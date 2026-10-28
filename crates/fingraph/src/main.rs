@@ -689,7 +689,8 @@ impl App {
         // a statement that doesn't balance, a month with no statement, or a break between statements
         let cov = self.db.coverage(&ids, 12, today()).unwrap_or_default();
         let missing = cov.iter().map(|c| c.months.iter().filter(|m| m.1 == fingraph_core::workflows::MonthState::Missing).count() + c.breaks.len()).sum::<usize>();
-        let bad = docs.iter().filter(|d| matches!(d.reconciliation, fingraph_core::Reconciliation::Discrepancy(_))).count() + missing;
+        let waiting = self.db.documents_all(&ids).unwrap_or_default().iter().filter(|d| !d.review.is_empty()).count();
+        let bad = docs.iter().filter(|d| matches!(d.reconciliation, fingraph_core::Reconciliation::Discrepancy(_))).count() + missing + waiting;
         set("statements", if bad > 0 { format!("⚠ {bad}") } else { String::new() }, bad > 0);
         let (b, over) = budget::badge(self);
         set("budget", b, over);

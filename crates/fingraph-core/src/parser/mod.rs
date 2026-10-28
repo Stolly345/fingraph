@@ -247,6 +247,12 @@ pub struct Pass3Report {
     pub stitched_lines: usize,
     pub inherited_dates: usize,
     pub sections: usize,
+    /// Dated lines whose amount came on a later line (CNB's row shape).
+    #[serde(default)]
+    pub joined_rows: usize,
+    /// Where this statement didn't match its bank's declared layout, in plain words.
+    #[serde(default)]
+    pub layout_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,9 +367,101 @@ impl ScanResult {
     }
 }
 
+/// Words a layout sample keeps as they are: the vocabulary of headings, summary boxes and periods.
+const LAYOUT_WORDS: &[&str] = &[
+    "date", "dates", "transaction", "posting", "posted", "value", "description", "details", "particulars", "reference", "ref", "no.", "cheque", "#", "debit", "debits",
+    "credit", "credits", "cred", "amount", "balance", "withdrawals", "withdrawal", "deposits", "deposit", "opening", "closing", "beginning", "ending", "previous", "new",
+    "total", "totals", "page", "of", "statement", "period", "periodic", "to", "from", "as", "account", "currency", "kyd", "usd", "ci$", "us$", "$", "dr", "cr", "&",
+    "and", "other", "cheques", "payments", "purchases", "cash", "advances", "minimum", "payment", "due", "limit", "share", "shares", "savings", "loan", "chequing",
+    "checking", "interest", "brought", "carried", "forward", "-", "/", "(+)", "(-)", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    "january", "february", "march", "april", "june", "july", "august", "september", "october", "november", "december", "visa", "mastercard", "amex",
+    "american", "express", "card", "number", "business", "current", "personal", "product",
+];
+
+/// A statement's layout without its private contents, to share or keep as a test: every word stays where
+/// it was, and dates, amounts, headings, summary labels and the bank's own identifying words stay as
+/// printed; every other word has its letters turned to x and its digits to 0 (names, merchants,
+/// account and reference numbers). `keep` adds words, e.g. a bank profile's identifiers and labels.
+pub fn layout_sample(tokens: &[Token], keep: &[String]) -> Vec<Token> {
+    let keep: Vec<String> = keep.iter().flat_map(|k| k.split_whitespace()).map(|w| w.to_lowercase()).collect();
+    tokens
+        .iter()
+        .map(|t| {
+            let w = t.text.as_str();
+            let lower = w.to_lowercase();
+            let bare = lower.trim_matches(|c: char| matches!(c, ':' | ',' | '.' | '(' | ')'));
+            let dated = dates::find_dates(w).first().is_some_and(|d| d.0 == 0 && d.1 == w.len())
+                || (bare.len() == 4 && (bare.starts_with("19") || bare.starts_with("20")) && bare.bytes().all(|b| b.is_ascii_digit()));
+            if crate::money::is_amount_core(w) || dated || LAYOUT_WORDS.contains(&bare) || keep.iter().any(|k| k == &lower || k == bare) || w.chars().count() <= 2 {
+                return t.clone();
+            }
+            let text: String = w.chars().map(|c| if c.is_ascii_digit() { '0' } else if c.is_uppercase() { 'X' } else if c.is_alphabetic() { 'x' } else { c }).collect();
+            Token { text, ..t.clone() }
+        })
+        .collect()
+}
+
+/// A layout sample on disk: which bank it's from and its anonymised words. Samples of real statements go in
+/// `tests/fixtures/private/` (not committed), where `private_layout_samples` checks every one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayoutSample {
+    pub bank: Option<String>,
+    pub ocr: bool,
+    pub tokens: Vec<Token>,
+}
+
+/// The words of a PDF: its text layer, or OCR when it's only pictures of pages (true).
+pub fn page_tokens(path: &Path) -> Result<(Vec<Token>, bool)> {
+    let tokens = tokens_from_pdf(path)?;
+    if !tokens.is_empty() {
+        return Ok((tokens, false));
+    }
+    Ok((ocr_tokens(path)?, true))
+}
+
+/// A statement as a shareable layout sample (JSON), keeping its bank's own words.
+pub fn layout_sample_json(path: &Path, profiles: &[BankProfile]) -> Result<String> {
+    let (tokens, ocr) = page_tokens(path)?;
+    let scan = MultiPassScanner::new(profiles).scan_tokens(tokens.clone())?;
+    let p = scan.profile_slug.as_ref().and_then(|s| profiles.iter().find(|p| &p.slug == s));
+    let keep: Vec<String> = p
+        .map(|p| {
+            let a = &p.header_anchors;
+            let l = &p.layout;
+            [&p.routing_identifiers, &a.date, &a.posting_date, &a.description, &a.reference, &a.debit, &a.credit, &a.amount, &a.balance, &l.opening, &l.closing, &l.debits, &l.credits]
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(serde_json::to_string_pretty(&LayoutSample { bank: scan.profile_slug, ocr, tokens: layout_sample(&tokens, &keep) })?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_layout_sample_reads_the_same_without_the_names() {
+        let p = profiles::builtins();
+        let doc = &crate::demo::demo_documents()[1];
+        let keep: Vec<String> = p.iter().flat_map(|p| p.routing_identifiers.clone()).collect();
+        let sample = layout_sample(&doc.tokens, &keep);
+        let (a, b) = (MultiPassScanner::new(&p).scan_tokens(doc.tokens.clone()).unwrap(), MultiPassScanner::new(&p).scan_tokens(sample.clone()).unwrap());
+        assert_eq!(a.profile_slug, b.profile_slug);
+        let money = |r: &ScanResult| r.sections.iter().map(|s| (s.reconciliation.clone(), s.transactions.iter().map(|t| (t.posted, t.amount)).collect::<Vec<_>>())).collect::<Vec<_>>();
+        assert_eq!(money(&a), money(&b));
+        // the merchants are gone (heading words like PAYMENT may also appear in a description, and stay)
+        let words: Vec<&str> = sample.iter().map(|t| t.text.as_str()).collect();
+        let private: Vec<&str> = a.sections[0]
+            .transactions
+            .iter()
+            .flat_map(|t| t.description.split_whitespace())
+            .filter(|w| w.len() > 3 && !w.chars().any(|c| c.is_ascii_digit()) && !LAYOUT_WORDS.contains(&w.to_lowercase().as_str()))
+            .collect();
+        assert!(!private.is_empty() && private.iter().all(|w| !words.contains(w)), "{private:?}");
+    }
 
     #[test]
     fn ocr_misread_decimal_commas_are_fixed_and_real_thousands_kept() {

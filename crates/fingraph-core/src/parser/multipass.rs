@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::dates::{self, DateCtx, Order};
-use super::profiles::{self, BankProfile, LayoutKind};
+use super::profiles::{self, BankProfile, LayoutKind, RowShape};
 use super::{reconcile, ColumnBand, ColumnRole, Diagnostics, PageGeometry, ScanResult, ScannedTx, Section, SectionReport, SkippedLine, Token};
 use crate::money::{self, Printed};
 use crate::{AccountType, Currency, Error, Reconciliation, Result};
@@ -24,11 +24,11 @@ impl<'a> MultiPassScanner<'a> {
     }
 
     pub fn scan_pdf(&self, path: &Path) -> Result<ScanResult> {
-        let tokens = super::tokens_from_pdf(path)?;
-        if !tokens.is_empty() {
-            return self.scan_tokens(tokens);
+        let (tokens, ocr) = super::page_tokens(path)?;
+        let mut r = self.scan_tokens(tokens)?;
+        if !ocr {
+            return Ok(r);
         }
-        let mut r = self.scan_tokens(super::ocr_tokens(path)?)?;
         r.diagnostics.pass1.ocr = true;
         // never fully trusted: OCR can misread a name even when every balance checks out
         for s in &mut r.sections {
@@ -49,7 +49,38 @@ impl<'a> MultiPassScanner<'a> {
         for s in &mut sections {
             reconcile::verify_and_heal(s);
         }
+        layout_notes(&meta, &sections, &mut diag);
         Ok(ScanResult { profile_slug: meta.profile.map(|p| p.slug.clone()), period: meta.ctx.period, sections, diagnostics: diag })
+    }
+}
+
+/// Where the statement departed from what its bank profile declares, so a failed read names the rule.
+fn layout_notes(meta: &Meta, sections: &[Section], diag: &mut Diagnostics) {
+    let Some(p) = meta.profile else { return };
+    let dated_without_amount = |reason: &str| sections.iter().flat_map(|s| &s.report.skipped).filter(|l| l.reason == reason && l.date.is_some() && l.amount.is_none()).count();
+    let notes = &mut diag.pass3.layout_notes;
+    match meta.shape {
+        RowShape::AmountFirst => {
+            let n = dated_without_amount("unrecognised line in the table");
+            if n > 0 {
+                notes.push(format!("{n} dated line(s) had no amount; {} is set to print the amount on a transaction's first line", p.short_name));
+            }
+        }
+        _ => {
+            let n = dated_without_amount("dated line without an amount");
+            if n > 0 {
+                notes.push(format!("{n} dated line(s) never got an amount on the lines below them"));
+            }
+        }
+    }
+    let a = &p.header_anchors;
+    let declared: Vec<String> = [&a.date, &a.posting_date, &a.description, &a.reference, &a.debit, &a.credit, &a.amount, &a.balance].into_iter().flatten().map(|w| w.to_lowercase()).collect();
+    let seen: Vec<String> = diag.pages.iter().flat_map(|pg| pg.header_words.iter().map(|(_, w)| w.to_lowercase())).collect();
+    if !declared.is_empty() && !seen.is_empty() && !seen.iter().any(|w| declared.contains(w)) {
+        notes.push(format!("None of {}'s column headings ({}) were on the statement; the columns were found from generic words", p.short_name, declared.join(", ")));
+    }
+    if seen.is_empty() {
+        notes.push("No table header was found on any page".into());
     }
 }
 
@@ -170,6 +201,15 @@ pub(crate) struct Meta<'p> {
     pub noise: Vec<Regex>,
     pub fx: Option<Regex>,
     pub layout: LayoutKind,
+    pub shape: RowShape,
+    /// The bank's own summary labels (opening, closing, debits, credits), tried before the generic ones.
+    pub labels: [Option<Regex>; 4],
+}
+
+/// `["beginning balance"]` → `(?i)^(?:beginning\s+balance)`: a declared label, any spacing.
+fn label_regex(labels: &[String]) -> Option<Regex> {
+    let alts: Vec<String> = labels.iter().map(|l| l.split_whitespace().map(regex::escape).collect::<Vec<_>>().join(r"\s*")).filter(|a| !a.is_empty()).collect();
+    (!alts.is_empty()).then(|| Regex::new(&format!(r"(?i)^(?:{})", alts.join("|"))).ok()).flatten()
 }
 
 static LAST4: LazyLock<Regex> = LazyLock::new(|| {
@@ -181,7 +221,7 @@ pub(crate) static OPENING: LazyLock<Regex> =
 pub(crate) static CLOSING: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(?:(?:closing|new|ending)\s+balance|balance\s+carried\s+forward|carried\s+forward)").unwrap());
 static DEBITS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(?:total\s+)?(?:withdrawals|debits|minus)\b|^purchases\b|^total\s+purchases|^cheques\s*(?:&|and)\s*other\s+deb").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)^(?:total\s+)?(?:withdrawals|debits|minus)\b|^purchases\b|^total\s+purchases").unwrap());
 static CREDITS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(?:total\s+)?(?:deposits|credits|plus)\b|^payments\s*(?:&|and)\s*credits").unwrap());
 /// Words that may precede a summary amount on the line under its label (CNB: `as of 01/03/26   1,000.00`).
@@ -338,6 +378,11 @@ fn pass1<'p>(scanner: &MultiPassScanner<'p>, rows: &[Row], diag: &mut Diagnostic
         noise,
         fx,
         layout,
+        shape: profile.map_or(RowShape::Auto, |p| p.layout.row_shape),
+        labels: profile.map_or([None, None, None, None], |p| {
+            let l = &p.layout;
+            [label_regex(&l.opening), label_regex(&l.closing), label_regex(&l.debits), label_regex(&l.credits)]
+        }),
     }
 }
 
@@ -894,6 +939,7 @@ fn pass3(meta: &Meta, rows: &[Row], layout: &Layout, diag: &mut Diagnostics) -> 
                 (None, Some(po), d) => (Some(po), d.filter(|d| *d != po)),
                 (None, None, d) => (d, None),
             };
+            diag.pass3.joined_rows += head.is_some() as usize;
             let desc = match head {
                 Some(h) => h.lines.into_iter().chain((!desc.is_empty()).then(|| desc.clone())).collect::<Vec<_>>().join(" "),
                 None => desc.clone(),
@@ -968,6 +1014,7 @@ fn pass3(meta: &Meta, rows: &[Row], layout: &Layout, diag: &mut Diagnostics) -> 
         if let Some(d) = post.or(date)
             && !desc.is_empty()
             && !p.outside
+            && meta.shape != RowShape::AmountFirst
         {
             if let Some(h) = pending.take() {
                 orphan_head(b, h);
@@ -995,8 +1042,20 @@ fn pass3(meta: &Meta, rows: &[Row], layout: &Layout, diag: &mut Diagnostics) -> 
         let end_row = starts.get(k + 1).copied().unwrap_or(rows.len());
         let own: Vec<&Row> = outside.iter().filter(|&&i| i >= start_row && i < end_row).map(|&i| &rows[i]).collect();
         for (label, slot) in [(&*OPENING, 0), (&*CLOSING, 1), (&*DEBITS, 2), (&*CREDITS, 3)] {
-            let found = summary_value(&own, label, &meta.currency_columns, sec.currency).or_else(|| {
-                (n_sections == 1 || !meta.currency_columns.is_empty()).then(|| summary_value(&all, label, &meta.currency_columns, sec.currency)).flatten()
+            let find = |label: &Regex| {
+                summary_value(&own, label, &meta.currency_columns, sec.currency).or_else(|| {
+                    (n_sections == 1 || !meta.currency_columns.is_empty()).then(|| summary_value(&all, label, &meta.currency_columns, sec.currency)).flatten()
+                })
+            };
+            // the bank's declared label first; the generic words are the fallback, and using them is noted
+            let declared = meta.labels[slot].as_ref();
+            let found = declared.and_then(find).or_else(|| {
+                let v = find(label);
+                if declared.is_some() && v.is_some() && slot < 2 {
+                    let what = if slot == 0 { "opening" } else { "closing" };
+                    diag.pass3.layout_notes.push(format!("The {what} balance wasn't under any of this bank's own labels; a generic one was used"));
+                }
+                v
             });
             if let Some((v, line)) = found {
                 diag.pass1.summary_lines.push(line);
