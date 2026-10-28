@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::charts::{self, Chart, Data, LineSeries};
-use crate::{App, clear, dim, heading, today};
+use crate::{App, clear, dim, heading, info_caption, info_heading, today, with_info};
 
 const MONTHS: i32 = 6;
 
@@ -219,9 +219,9 @@ fn usual_text(name: &str, u: Decimal, subs: Decimal, one_off: Decimal, ccy: Curr
     }
 }
 
-fn kpi(title: &str) -> (gtk::Box, gtk::Label, gtk::Label) {
+fn kpi(title: &str, help: &str) -> (gtk::Box, gtk::Label, gtk::Label) {
     let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).css_classes(["card", "kpi"]).build();
-    b.append(&gtk::Label::builder().label(title).xalign(0.0).css_classes(["dim-label", "caption-heading"]).build());
+    b.append(&info_caption(title, help));
     let v = gtk::Label::builder().xalign(0.0).css_classes(["value", "tnum"]).build();
     let s = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label", "caption"]).build();
     b.append(&v);
@@ -269,10 +269,19 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     body.append(&nav);
 
     let ribbon = gtk::Box::builder().spacing(12).homogeneous(true).build();
-    let (k1, budgeted, budgeted_s) = kpi("Budgeted");
-    let (k2, spent, spent_s) = kpi("Spent");
-    let (k3, left, left_s) = kpi("Left");
-    let (k4, pace, pace_s) = kpi("Heading For");
+    let (k1, budgeted, budgeted_s) = kpi(
+        "Budgeted",
+        "This month's budgets added up across your categories. If money rolled over from last month or you moved money between categories, the line below shows what you actually have to spend.",
+    );
+    let (k2, spent, spent_s) = kpi(
+        "Spent",
+        "What you've spent this month as far as your statements go, split into categories with a budget and categories without one. Statements arrive after the month ends, so it fills in late.",
+    );
+    let (k3, left, left_s) = kpi("Left", "What's left in your budgeted categories: the budget (with rollovers and moves) minus what's been spent in them. Red means you're over.");
+    let (k4, pace, pace_s) = kpi(
+        "Heading For",
+        "Where this month's spending ends up if you keep the same pace: what's spent up to your newest statement, stretched to the whole month. A big bill early in the month makes it look higher than it will be.",
+    );
     for k in [&k1, &k2, &k3, &k4] {
         ribbon.append(k);
     }
@@ -287,7 +296,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     body.append(&funds_box);
     let projection = Chart::new(230);
 
-    body.append(&heading("Categories"));
+    body.append(&info_heading(
+        "Categories",
+        "One row per category. The pill says whether it's a fixed or variable expense (click it to switch). Below the name: what it usually costs, last month, and any trend, rollover or money moved. On the right: what you've spent of its budget. The bar turns amber near the limit and red when over.",
+    ));
     body.append(&dim(&format!(
         "Type a monthly amount for any category and press Enter (empty or 0 removes it). “Usually” is the median of the last {MONTHS} months — a one-off doesn't count. Transfers and categories left out in Preferences aren't spending."
     )));
@@ -298,7 +310,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let flow = Chart::new(300);
     let flow_card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
     let flow_title = heading("");
-    flow_card.append(&flow_title);
+    flow_card.append(&with_info(
+        &flow_title,
+        "Money coming in is on the left and where it went is on the right; the thicker a band, the more money. If more came in than went out, the difference shows as Saved on the right. If more went out, the gap shows as From savings on the left. Hover a band for its amount.",
+    ));
     flow_card.append(&dim("Money in on the left, where it went on the right (top-level categories; transfers between your own accounts left out). The difference is what you saved — or took from savings."));
     flow_card.append(&flow.widget);
     body.append(&flow_card);
@@ -426,7 +441,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             // ── the plan
             clear(&plan_box);
             if let Some(p) = &s.plan {
-                plan_box.append(&heading("Your Plan"));
+                plan_box.append(&info_heading(
+                    "Your Plan",
+                    "Your month on paper. Take-home pay is at the top, and everything that comes out of it is below: the spending budget, the share set aside for non-monthly bills, and loan payments. The last line is what's left to save. Green means you meet your savings goal, red means you're short.",
+                ));
                 let g = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
                 let line = |t: &str, sub: String, v: String, class: &str| {
                     let r = adw::ActionRow::builder().title(t).subtitle(glib::markup_escape_text(&sub)).build();
@@ -505,7 +523,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                         .collect(),
                 });
                 let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
-                card.append(&heading("Savings Over the Next 12 Months"));
+                card.append(&info_heading(
+                    "Savings Over the Next 12 Months",
+                    "How much you'd have saved in total by each month ahead. Green follows your budget exactly. Orange assumes your spending keeps changing the way it has lately. A widening gap between them means your spending is drifting from the plan. The dashed line is your savings goal; stay on or above it to be on track.",
+                ));
                 card.append(&dim(&format!(
                     "Green: take-home − budget − non-monthly bills − loans, every month ({} a month). Orange: each category's last six months drawn as a straight line (least squares) and carried forward — what happens if spending keeps drifting the way it has.",
                     money(save)
@@ -537,7 +558,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 let loans = s.plan.as_ref().map(|p| p.loan_payments).unwrap_or_default();
                 let save = income.map(|i| i - fixed_t - var_t - set_aside - loans);
 
-                split_box.append(&heading("Fixed vs Variable"));
+                split_box.append(&info_heading(
+                    "Fixed vs Variable",
+                    "The bar splits a month's money by colour: fixed expenses (bills that don't change much, like rent, insurance or phone), variable spending (things you choose, like groceries or eating out), non-monthly bills, loans, and what's saved. The variable part is where you have room to cut back. Switch a category with its Fixed/Variable pill under Categories.",
+                ));
                 split_box.append(&dim(match income {
                     Some(_) => "How your take-home divides each month: fixed expenses you can't easily change, variable spending you can, loan payments, and what's left to save. Amounts are budgets, or the usual cost where a category has no budget.",
                     None => "Fixed expenses you can't easily change against variable spending you can. Amounts are budgets, or the usual cost where a category has no budget. Set up your pay (Set Up Budget…) to see them against your take-home.",
@@ -599,7 +623,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 let cards = gtk::Box::builder().spacing(12).homogeneous(true).build();
                 for (title, cats, t, class) in [("Fixed Expenses", &fx_cats, fixed_t, "amount-fixed"), ("Variable Expenses", &var_cats, var_t, "amount-variable")] {
                     let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "kpi"]).build();
-                    card.append(&gtk::Label::builder().label(title).xalign(0.0).css_classes(["dim-label", "caption-heading"]).build());
+                    card.append(&info_caption(
+                        title,
+                        "This group's monthly total, using each category's budget or its usual cost if it has no budget (marked usual). Below: what's been spent in it this month, and its share of your take-home pay.",
+                    ));
                     card.append(&gtk::Label::builder().label(format!("{} a month", money(t))).xalign(0.0).css_classes(["value", "tnum", class]).build());
                     let sp = spent_in(cats);
                     let of = match income {
@@ -630,7 +657,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             // ── yearly and quarterly bills, a share set aside each month
             clear(&funds_box);
             {
-                funds_box.append(&heading("Non-Monthly Bills"));
+                funds_box.append(&info_heading(
+                    "Non-Monthly Bills",
+                    "Each bar shows how much has been set aside so far towards that bill. A full bar means it's covered by its due date. Suggestions under the list are yearly or quarterly charges FinGraph spotted in your statements; add one to start setting money aside for it.",
+                ));
                 funds_box.append(&dim(
                     "Bills that come once a quarter or once a year — insurance, licences, registrations, annual plans. Each month sets a share aside so the bill is covered when it comes; that comes out of what you save in Your Plan.",
                 ));
@@ -896,7 +926,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             // ── watchlists
             clear(&watch_box);
             {
-                watch_box.append(&heading("Watchlists"));
+                watch_box.append(&info_heading(
+                    "Watchlists",
+                    "Each row shows this month's spending at a merchant (or anything matching the wording you chose) against the limit you set, whatever category it's in. The bar turns amber near the limit and red when over.",
+                ));
                 watch_box.append(&dim("A monthly limit on a merchant or any wording on your statements (Amazon, Foster's, DoorDash) — it counts across categories, and going over shows up with the budget alerts."));
                 let lb = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
                 let watches = a.db.watchlists(&s.scope);

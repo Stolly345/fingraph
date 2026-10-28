@@ -447,7 +447,7 @@ fn download(g: &G, app: &Rc<App>) {
                         r
                     }
                     None => {
-                        let r = row("Another bank", "Download its PDF statements too. FinGraph doesn't know that bank's layout yet: after this guide, Bank Profiles → New Profile From a Sample teaches it from one statement.");
+                        let r = row("Another bank", "Download its PDF statements too. FinGraph doesn't know that bank's layout yet: after this guide, main menu → Bank Profiles → New Profile From a Sample teaches it from one statement.");
                         r.add_prefix(&pill("Other", "meh"));
                         r
                     }
@@ -850,7 +850,7 @@ fn sort(g: &G, app: &Rc<App>) {
             .description(if waiting == 0 {
                 "Every transaction has a category. New statements are sorted the same way, and anything new waits in To Review."
             } else {
-                "You skipped the rest. They wait in To Review (in the sidebar) whenever you're ready."
+                "You skipped the rest. They wait in To Review (Overview shows a Review button while any are left) whenever you're ready."
             })
             .build();
         st.add_css_class("compact");

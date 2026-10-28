@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 use crate::budget::{amount_text, parse_date};
 use crate::charts::{self, Chart, Data, LineSeries};
-use crate::{App, clear, dim, heading, today};
+use crate::{App, clear, dim, info_caption, info_heading, today};
 
 const MONTHS: i32 = 24;
 
@@ -110,9 +110,9 @@ fn goal_row(app: &App, s: &Snap, g: &Goal) -> adw::ActionRow {
 pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(18).margin_bottom(24).margin_start(18).margin_end(18).build();
     let ribbon = gtk::Box::builder().spacing(12).homogeneous(true).build();
-    let kpi = |t: &str| {
+    let kpi = |t: &str, help: &str| {
         let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).css_classes(["card", "kpi"]).build();
-        b.append(&gtk::Label::builder().label(t).xalign(0.0).css_classes(["dim-label", "caption-heading"]).build());
+        b.append(&info_caption(t, help));
         let v = gtk::Label::builder().xalign(0.0).css_classes(["value", "tnum"]).build();
         let s = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label", "caption"]).build();
         b.append(&v);
@@ -120,14 +120,20 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         ribbon.append(&b);
         (v, s)
     };
-    let (net_v, net_s) = kpi("Net Worth");
-    let (as_v, as_s) = kpi("Assets");
-    let (de_v, de_s) = kpi("Debts");
-    let (ch_v, ch_s) = kpi("Over 12 Months");
+    let (net_v, net_s) = kpi(
+        "Net Worth",
+        "Everything you own minus everything you owe. Bank balances come from your latest statements, and the things you've added by hand (a house, car, pension) are included too. Cards, loans and other debts are taken off.",
+    );
+    let (as_v, as_s) = kpi("Assets", "What you own: the balances of your bank accounts plus the assets you've added by hand.");
+    let (de_v, de_s) = kpi("Debts", "What you owe: credit card and loan balances from your statements, plus the debts you've added by hand.");
+    let (ch_v, ch_s) = kpi("Over 12 Months", "How much your net worth changed over the past year. Green means it grew, red means it shrank.");
     body.append(&ribbon);
     let chart = Chart::new(240);
     let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
-    card.append(&heading("Net Worth Over Time"));
+    card.append(&info_heading(
+        "Net Worth Over Time",
+        "The blue line is your net worth at each month end. The dashed green line is what you own and the dashed red line is what you owe; blue is the gap between them. A rising blue line means you're getting ahead. Hover a month for the numbers.",
+    ));
     card.append(&dim("Each month end: every account's last verified balance on or before it, plus the latest value of what you've added by hand. An account counts from its first statement; a month whose statement isn't in yet repeats the last balance."));
     card.append(&chart.widget);
     body.append(&card);
@@ -187,7 +193,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
             clear(&content);
             // ── what it's made of
-            content.append(&heading("Accounts"));
+            content.append(&info_heading("Accounts", "Each account's latest balance a statement confirmed, and the date of that statement. Red is money owed, such as on a card or loan."));
             let l = list();
             let mut accts: Vec<(&i64, &core::AccountBalances)> = s.accounts.iter().filter(|(_, x)| !x.points.is_empty()).collect();
             accts.sort_by_key(|(_, x)| (x.liability, x.name.clone()));
@@ -198,7 +204,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 l.append(&r);
             }
             content.append(&l);
-            content.append(&heading("Other Assets & Debts"));
+            content.append(&info_heading(
+                "Other Assets & Debts",
+                "Things you own or owe that no statement shows. Use Update Value… when the value changes; the chart uses each value from its date onward. Debts show with a minus and count against your net worth.",
+            ));
             content.append(&dim("Things no statement shows: a house or car, a pension, an investment account, a loan from family. Update the value now and then; the chart uses each one from its date on."));
             let l = list();
             for i in &s.items {
@@ -257,7 +266,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             content.append(&l);
 
             // ── goals
-            content.append(&heading("Goals"));
+            content.append(&info_heading(
+                "Goals",
+                "The bar shows how far along each goal is, and the label says whether you're on track to reach it by its date. A linked account updates by itself from each statement.",
+            ));
             content.append(&dim("Save up for something, or pay a card or loan down. Link an account and FinGraph follows its balance from each statement; otherwise record what you put in during Monthly Close."));
             let l = list();
             for g in a.db.goals(&s.scope).unwrap_or_default() {
@@ -325,7 +337,10 @@ fn payoff_section(app: &Rc<App>, s: &Snap, into: &gtk::Box, redraw: crate::Refre
             debts.push((i.name.clone(), s.fx.convert(*v, i.currency, ccy), i.apr, true, Err(i.clone())));
         }
     }
-    into.append(&heading("Paying Off Debt"));
+    into.append(&info_heading(
+        "Paying Off Debt",
+        "Compares two ways to clear your debts with the monthly amount you enter. Both pay every minimum, then put the extra on one debt at a time. Highest rate first (avalanche) usually costs the least interest. Smallest balance first (snowball) clears whole debts sooner, which some people find easier to stick with. Each card shows when you'd be debt-free and the total interest.",
+    ));
     if debts.is_empty() {
         into.append(&dim("Nothing owed on a card or loan in your statements, and no debts added by hand."));
         return;

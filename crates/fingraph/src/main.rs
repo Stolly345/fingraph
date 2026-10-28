@@ -38,6 +38,8 @@ use std::rc::Rc;
 const APP_ID: &str = "dev.fingraph.FinGraph";
 
 /// Ctrl+1 to Ctrl+9 for the first nine; all of them can be the page FinGraph reopens on.
+/// Pages reached from Overview (To Review) or the main menu, not listed in the sidebar.
+const OFF_SIDEBAR: [&str; 5] = ["review", "export", "rules", "directory", "profiles"];
 const MAIN_PAGES: [&str; 11] = ["overview", "review", "changes", "transactions", "subscriptions", "statements", "export", "statement", "budget", "outlook", "networth"];
 
 /// Which workspaces the window shows.
@@ -120,9 +122,12 @@ impl App {
         let menu = gio::Menu::new();
         let s1 = gio::Menu::new();
         s1.append(Some("Import Statements…"), Some("win.import"));
-        s1.append(Some("Load Demo Data (Cayman Personal + Business across Butterfield, Scotiabank, CNB, RBC & Credit Union)"), Some("win.demo"));
+        s1.append(Some("Reports & Export"), Some("win.show-export"));
         menu.append_section(None, &s1);
         let s2 = gio::Menu::new();
+        s2.append(Some("Rules & Categories"), Some("win.show-rules"));
+        s2.append(Some("Business Directory"), Some("win.show-directory"));
+        s2.append(Some("Bank Profiles"), Some("win.show-profiles"));
         s2.append(Some("Preferences"), Some("win.preferences"));
         s2.append(Some("Getting Started"), Some("win.welcome"));
         menu.append_section(None, &s2);
@@ -147,8 +152,6 @@ impl App {
             let prev = before.map(|b| b.widget_name().to_string()).unwrap_or_default();
             let title = if name.starts_with("account:") && !prev.starts_with("account:") {
                 Some("Accounts")
-            } else if name == "rules" {
-                Some("Setup")
             } else {
                 None
             };
@@ -204,7 +207,7 @@ impl App {
             usd_btn.set_active(true);
         }
 
-        // pages, in the order you use them; Accounts and Setup follow (see update_sidebar)
+        // pages, in the order you use them; Accounts follow (see update_sidebar)
         let (o, or) = dashboard::build(&app);
         let (rv, rvr) = review::build(&app);
         let (c, cr) = changes::build(&app);
@@ -241,13 +244,15 @@ impl App {
         ];
         for (name, title, icon, w, refresh) in pages {
             app.stack.add_titled(&w, Some(name), title);
-            side_list.append(&app.side_row(name, title, icon));
+            // To Review shows on Overview while there's something to answer; the rest are in the main menu
+            if !OFF_SIDEBAR.contains(&name) {
+                side_list.append(&app.side_row(name, title, icon));
+            }
             app.views.borrow_mut().push((name, refresh));
         }
-        side_list.append(&app.side_row("preferences", "Preferences", "emblem-system-symbolic"));
         {
             let w = Rc::downgrade(&app);
-            side_list.connect_row_selected(move |list, row| {
+            side_list.connect_row_selected(move |_, row| {
                 let (Some(a), Some(row)) = (w.upgrade(), row) else { return };
                 if a.quiet.get() {
                     return;
@@ -255,14 +260,6 @@ impl App {
                 let name = row.widget_name().to_string();
                 if let Some(id) = name.strip_prefix("account:").and_then(|s| s.parse::<i64>().ok()) {
                     return account::show(&a, id);
-                }
-                if name == "preferences" {
-                    // a dialog, not a page: put the highlight back where you were
-                    let here = a.stack.visible_child_name().unwrap_or_default();
-                    if let Some(r) = a.row_named(&here) {
-                        list.select_row(Some(&r));
-                    }
-                    return preferences::show(&a);
                 }
                 if a.stack.visible_child_name().as_deref() != Some(name.as_str()) {
                     a.show_view(&name);
@@ -342,6 +339,9 @@ impl App {
         add("preferences", Rc::new(preferences::show));
         for (i, page) in MAIN_PAGES.iter().enumerate() {
             add(&format!("page-{}", i + 1), Rc::new(move |a: &Rc<App>| a.show_view(page)));
+        }
+        for page in OFF_SIDEBAR {
+            add(&format!("show-{page}"), Rc::new(move |a: &Rc<App>| a.show_view(page)));
         }
         add("retriage", Rc::new(wizard::reset_and_retriage));
         add("fx", Rc::new(|a| a.fx_dialog()));
@@ -605,6 +605,8 @@ impl App {
             && self.side_list.selected_row().as_ref() != Some(&r)
         {
             self.side_list.select_row(Some(&r));
+        } else if OFF_SIDEBAR.contains(&name) {
+            self.side_list.unselect_all();
         }
         // the header shows only what this page uses
         self.range_dd.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "export" | "account"));
@@ -625,7 +627,6 @@ impl App {
         // a white symbol on a rounded tile in the page's colour (Setup pages share a quiet slate)
         let tile = match name {
             "overview" => "tile-blue",
-            "review" => "tile-orange",
             "changes" => "tile-purple",
             "transactions" => "tile-teal",
             "statement" => "tile-indigo",
@@ -647,7 +648,7 @@ impl App {
         if let Some(n) = MAIN_PAGES.iter().position(|p| *p == name).filter(|n| *n < 9) {
             row.set_tooltip_text(Some(&format!("Ctrl+{}", n + 1)));
         }
-        if let Some(&key) = ["review", "changes", "subscriptions", "statements", "budget"].iter().find(|k| **k == name) {
+        if let Some(&key) = ["changes", "subscriptions", "statements", "budget"].iter().find(|k| **k == name) {
             self.badges.borrow_mut().insert(key, badge);
         }
         gtk::ListBoxRow::builder().child(&row).name(name).build()
@@ -680,8 +681,6 @@ impl App {
                 }
             }
         };
-        let review = self.db.triage_count(&ids).unwrap_or(0);
-        set("review", if review > 0 { review.to_string() } else { String::new() }, false);
         let changes = changes::count(self);
         set("changes", if changes > 0 { changes.to_string() } else { String::new() }, false);
         let subs: Decimal = insights::subscriptions(&rows, self.display(), &fx, today()).iter().filter(|s| s.active).map(|s| s.monthly).sum();
@@ -695,7 +694,7 @@ impl App {
         let (b, over) = budget::badge(self);
         set("budget", b, over);
 
-        // accounts: rebuilt in place, just above Setup, only when they or their balances changed
+        // accounts: rebuilt in place at the end, only when they or their balances changed
         let balances = insights::latest_balances(&rows, &docs);
         let accounts: Vec<_> = self.db.accounts().unwrap_or_default().into_iter().filter(|x| ids.contains(&x.entity_id) && !x.hidden).collect();
         let key = format!("{:?}|{}", accounts.iter().map(|x| (x.id, &x.name, balances.get(&x.id))).collect::<Vec<_>>(), fingraph_core::money::fmt_money(Decimal::ONE, self.display()));
@@ -713,8 +712,7 @@ impl App {
                 i += 1;
             }
         }
-        let at = self.row_named("rules").map_or(-1, |r| r.index());
-        for (k, acct) in accounts.iter().enumerate() {
+        for acct in &accounts {
             let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_top(4).margin_bottom(4).margin_start(6).margin_end(6).build();
             b.append(&gtk::Label::builder().label(&acct.name).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).build());
             let (bal, tip) = match balances.get(&acct.id) {
@@ -724,7 +722,7 @@ impl App {
             let owed = balances.get(&acct.id).is_some_and(|(_, v)| v.is_sign_negative() && !v.is_zero());
             b.append(&gtk::Label::builder().label(&bal).xalign(1.0).css_classes(["caption", "tnum", if owed { "amount-out" } else { "dim-label" }]).build());
             let row = gtk::ListBoxRow::builder().child(&b).name(format!("account:{}", acct.id)).tooltip_text(tip).build();
-            self.side_list.insert(&row, if at < 0 { -1 } else { at + k as i32 });
+            self.side_list.append(&row);
             if selected.as_deref() == Some(row.widget_name().as_str()) {
                 self.side_list.select_row(Some(&row));
             }
@@ -884,6 +882,31 @@ pub fn heading(text: &str) -> gtk::Label {
     gtk::Label::builder().label(text).xalign(0.0).css_classes(["title-4"]).build()
 }
 
+/// A title with an ⓘ after it: hover to read how to read what's below, click to keep it open.
+pub fn with_info(title: &impl IsA<gtk::Widget>, help: &str) -> gtk::Box {
+    let b = gtk::Box::builder().spacing(6).build();
+    // a long title wraps rather than widening its card past the window
+    if let Some(l) = title.dynamic_cast_ref::<gtk::Label>() {
+        l.set_wrap(true);
+        l.set_hexpand(true);
+    }
+    b.append(title);
+    let text = gtk::Label::builder().label(help).wrap(true).max_width_chars(48).xalign(0.0).margin_top(6).margin_bottom(6).margin_start(6).margin_end(6).build();
+    let pop = gtk::Popover::builder().child(&text).build();
+    b.append(&gtk::MenuButton::builder().icon_name("help-about-symbolic").popover(&pop).tooltip_text(help).valign(gtk::Align::Center).css_classes(["flat", "circular", "info-button"]).build());
+    b
+}
+
+/// A section heading with its ⓘ.
+pub fn info_heading(text: &str, help: &str) -> gtk::Box {
+    with_info(&heading(text), help)
+}
+
+/// A small card title (the KPI tiles) with its ⓘ.
+pub fn info_caption(text: &str, help: &str) -> gtk::Box {
+    with_info(&gtk::Label::builder().label(text).xalign(0.0).css_classes(["dim-label", "caption-heading"]).build(), help)
+}
+
 pub fn dim(text: &str) -> gtk::Label {
     gtk::Label::builder().label(text).xalign(0.0).wrap(true).css_classes(["dim-label"]).build()
 }
@@ -909,6 +932,8 @@ fn css() {
          .kpi { padding: 14px 16px; }
          .kpi .value { font-size: 1.6em; font-weight: 800; }
          .chart-card { padding: 12px; }
+         .info-button { min-width: 22px; min-height: 22px; padding: 0; opacity: 0.6; }
+         .info-button:hover, .info-button:checked { opacity: 1; }
          .amount-out { color: @error_color; font-feature-settings: 'tnum'; }
          .amount-in { color: @success_color; font-feature-settings: 'tnum'; }
          levelbar.over block.filled { background-color: @error_color; }

@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::charts::{self, Chart, Data, LineSeries, Series};
-use crate::{App, heading, today};
+use crate::{App, heading, info_caption, today, with_info};
 
 fn f(d: Decimal) -> f64 {
     d.to_f64().unwrap_or(0.0)
@@ -21,9 +21,9 @@ struct Kpi {
     sub: gtk::Label,
 }
 
-fn kpi_card(title: &str) -> (gtk::Box, Kpi) {
+fn kpi_card(title: &str, help: &str) -> (gtk::Box, Kpi) {
     let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).css_classes(["card", "kpi"]).build();
-    b.append(&gtk::Label::builder().label(title).xalign(0.0).css_classes(["dim-label", "caption-heading"]).build());
+    b.append(&info_caption(title, help));
     let value = gtk::Label::builder().xalign(0.0).css_classes(["value", "tnum"]).ellipsize(gtk::pango::EllipsizeMode::End).build();
     let sub = gtk::Label::builder().xalign(0.0).css_classes(["dim-label", "caption"]).wrap(true).build();
     b.append(&value);
@@ -31,10 +31,10 @@ fn kpi_card(title: &str) -> (gtk::Box, Kpi) {
     (b, Kpi { value, sub })
 }
 
-fn chart_card(title: &str, chart: &gtk::Widget) -> (gtk::Box, gtk::Label) {
+fn chart_card(title: &str, help: &str, chart: &gtk::Widget) -> (gtk::Box, gtk::Label) {
     let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).hexpand(true).css_classes(["card", "chart-card"]).build();
     let t = heading(title);
-    b.append(&t);
+    b.append(&with_info(&t, help));
     b.append(chart);
     (b, t)
 }
@@ -44,18 +44,37 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let empty = adw::StatusPage::builder()
         .icon_name("x-office-spreadsheet-symbolic")
         .title("No transactions yet")
-        .description("Drop your bank statements on the Statements page, or load the demo data from the main menu to explore every chart.")
+        .description("Drop your bank statements on the Statements page, or load the demo data to explore every chart.")
         .build();
     let demo_btn = gtk::Button::builder().label("Load Demo Data").halign(gtk::Align::Center).css_classes(["pill", "suggested-action"]).action_name("win.demo").build();
     empty.set_child(Some(&demo_btn));
 
     // KPI ribbon
     let ribbon = gtk::Box::builder().spacing(12).homogeneous(true).build();
-    let (c1, k_net) = kpi_card("Net Cash Flow");
-    let (c2, k_rate) = kpi_card("Savings / Operating Margin");
-    let (c3, k_subs) = kpi_card("Active Subscription Burn");
-    let (c4, k_rec) = kpi_card("Reconciliation & Triage");
-    let (c5, k_age) = kpi_card("Age of Money");
+    // what needs an answer from you, shown only while something does
+    let review = adw::Banner::builder().button_label("Review").revealed(false).build();
+    review.set_action_name(Some("win.page-2"));
+
+    let (c1, k_net) = kpi_card(
+        "Net Cash Flow",
+        "Money in minus money out over the date range at the top. Transfers between your own accounts don't count as either. Green: more came in than went out. Red: you spent more than came in. The percentage compares it with the same length of time just before.",
+    );
+    let (c2, k_rate) = kpi_card(
+        "Savings / Operating Margin",
+        "The share of your income you kept: (income − expenses) ÷ income. 20% means you kept 20 cents of every dollar that came in. For a business it's the operating margin. Below zero means you spent more than you earned.",
+    );
+    let (c3, k_subs) = kpi_card(
+        "Active Subscription Burn",
+        "What the subscriptions still being charged cost you a month, with the yearly total below. USD ones are converted. The Subscriptions page lists each one.",
+    );
+    let (c4, k_rec) = kpi_card(
+        "Reconciliation & Triage",
+        "How many statements add up to the cent: the opening balance plus every transaction read equals the closing balance the bank printed. If one doesn't, the Statements page shows it. Uncategorized is how many transactions still have no category.",
+    );
+    let (c5, k_age) = kpi_card(
+        "Age of Money",
+        "How many days money sits between arriving and being spent. Each purchase spends the oldest money still in your accounts. Under 30 days means you're spending this month's pay as it arrives; over 30 means you're living on last month's money, which is the goal.",
+    );
     for c in [&c1, &c2, &c3, &c4, &c5] {
         ribbon.append(c);
     }
@@ -75,19 +94,37 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let balances = Chart::new(260);
     let pnl = Chart::new(240);
     let grid = gtk::Grid::builder().column_spacing(12).row_spacing(12).column_homogeneous(true).build();
-    let (m_card, _) = chart_card("Monthly Income vs. Expenses · Net Cash Flow", monthly.widget.upcast_ref());
+    let (m_card, _) = chart_card(
+        "Monthly Income vs. Expenses · Net Cash Flow",
+        "For each month: green bars are money in, red bars are money out, and the blue line is the difference. The line above zero means you saved that month; below zero means you spent more than came in. Hover a month for the numbers, click it to show just that month.",
+        monthly.widget.upcast_ref());
     let cat_box = gtk::Box::builder().spacing(12).build();
     donut.widget.set_hexpand(true);
     breakdown.widget.set_hexpand(true);
     cat_box.append(&donut.widget);
     cat_box.append(&breakdown.widget);
-    let (cat_card, cat_title) = chart_card("Spending by Category", cat_box.upcast_ref());
+    let (cat_card, cat_title) = chart_card(
+        "Spending by Category",
+        "Where your spending went in the date range. The ring splits it by category (bigger slice, more spent); the bars beside it rank the same categories. Click a slice to see the merchants inside that category, and click a bar to list its transactions. Transfers between your own accounts aren't spending.",
+        cat_box.upcast_ref());
     let back = gtk::Button::builder().label("All categories").icon_name("go-previous-symbolic").css_classes(["flat"]).halign(gtk::Align::Start).visible(false).build();
     cat_card.append(&back);
-    let (b_card, _) = chart_card("Cumulative Daily Spend Pace (this month vs its usual pace)", burn.widget.upcast_ref());
-    let (p_card, _) = chart_card("Where Most of Your Money Goes", pareto.widget.upcast_ref());
-    let (bal_card, _) = chart_card("Account Balance History (verified running balances)", balances.widget.upcast_ref());
-    let (pnl_card, _) = chart_card("Workspace / Property P&L", pnl.widget.upcast_ref());
+    let (b_card, _) = chart_card(
+        "Cumulative Daily Spend Pace (this month vs its usual pace)",
+        "How your spending adds up day by day through the month. Orange is this month; the dashed line is an average month; the shaded band runs from your lowest to highest recent month. Orange above the band means you're spending faster than usual, below it slower. It stops at your newest statement's date.",
+        burn.widget.upcast_ref());
+    let (p_card, _) = chart_card(
+        "Where Most of Your Money Goes",
+        "Your 10 biggest merchants in the date range, largest first. The line is a running total as a share of all your spending: over the third bar, it shows how much the top three take together. A line that climbs fast means a few places take most of your money, so that's where cutting back helps most. Click a bar to list its transactions.",
+        pareto.widget.upcast_ref());
+    let (bal_card, _) = chart_card(
+        "Account Balance History (verified running balances)",
+        "Each line is one account's balance over time, taken from the balances printed on your statements, so every point is one the bank confirmed. Credit cards and loans sit below zero: that's what you owe. Hover to see every account's balance on a date.",
+        balances.widget.upcast_ref());
+    let (pnl_card, _) = chart_card(
+        "Workspace / Property P&L",
+        "Income (green), expenses (red) and net (blue) for each workspace, property or project in the date range. A blue bar below zero means that one cost more than it brought in.",
+        pnl.widget.upcast_ref());
     grid.attach(&m_card, 0, 0, 1, 1);
     grid.attach(&cat_card, 1, 0, 1, 1);
     grid.attach(&b_card, 0, 1, 1, 1);
@@ -108,10 +145,13 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let refresh: crate::Refresh = {
         let w = Rc::downgrade(app);
         let (monthly, donut, breakdown, burn, pareto, balances, pnl) = (monthly.clone(), donut.clone(), breakdown.clone(), burn.clone(), pareto.clone(), balances.clone(), pnl.clone());
-        let (stack, drill, cat_title, back) = (stack.clone(), drill.clone(), cat_title.clone(), back.clone());
+        let (stack, drill, cat_title, back, review) = (stack.clone(), drill.clone(), cat_title.clone(), back.clone(), review.clone());
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
             let ids = a.entity_ids();
+            let waiting = a.db.triage_count(&ids).unwrap_or(0);
+            review.set_title(&format!("{waiting} merchant{} to review", if waiting == 1 { "" } else { "s" }));
+            review.set_revealed(waiting > 0);
             let rows = a.all_rows();
             if rows.is_empty() {
                 stack.set_visible_child_name("empty");
@@ -380,5 +420,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
         })
     };
-    (stack.upcast(), refresh)
+    let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+    page.append(&review);
+    page.append(&stack);
+    (page.upcast(), refresh)
 }

@@ -15,7 +15,7 @@ use rust_decimal::prelude::ToPrimitive;
 use std::rc::Rc;
 
 use crate::charts::{self, Chart, Data, LineSeries};
-use crate::{App, clear, dim, heading, today};
+use crate::{App, clear, dim, info_caption, info_heading, today};
 
 /// How far ahead the estimate runs.
 const AHEAD: i64 = 45;
@@ -76,9 +76,9 @@ fn safe_to_spend(app: &App) -> Option<(Decimal, Decimal, i64, NaiveDate)> {
 pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(18).margin_bottom(24).margin_start(18).margin_end(18).build();
     let ribbon = gtk::Box::builder().spacing(12).homogeneous(true).build();
-    let kpi = |t: &str| {
+    let kpi = |t: &str, help: &str| {
         let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).css_classes(["card", "kpi"]).build();
-        b.append(&gtk::Label::builder().label(t).xalign(0.0).css_classes(["dim-label", "caption-heading"]).build());
+        b.append(&info_caption(t, help));
         let v = gtk::Label::builder().xalign(0.0).css_classes(["value", "tnum"]).build();
         let s = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label", "caption"]).build();
         b.append(&v);
@@ -86,14 +86,26 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         ribbon.append(&b);
         (v, s)
     };
-    let (safe_v, safe_s) = kpi("Safe to Spend");
-    let (age_v, age_s) = kpi("Age of Money");
-    let (low_v, low_s) = kpi("Lowest Balance Ahead");
-    let (bill_v, bill_s) = kpi("Bills This Month");
+    let (safe_v, safe_s) = kpi(
+        "Safe to Spend",
+        "How much you can spend a day for the rest of the month and stay within budget: what's left in your variable budgets (fixed bills left out) divided by the days remaining. Your statements stop at their last date, so take off anything you've spent since then.",
+    );
+    let (age_v, age_s) = kpi("Age of Money", "How many days money sits between arriving and being spent. Each purchase spends the oldest money still in your accounts. Under 30 days means you're spending this month's pay as it arrives; over 30 means you're living on last month's money, which is the goal.");
+    let (low_v, low_s) = kpi(
+        "Lowest Balance Ahead",
+        "The lowest an account is expected to get before your next statement, and roughly when. It shows an account heading below zero first; otherwise your main account. Red means it would go overdrawn unless something changes.",
+    );
+    let (bill_v, bill_s) = kpi(
+        "Bills This Month",
+        "All your regular bills for this month added up, and how many already show on a statement. The rest should appear once the next statements arrive. The Bills list further down shows each one.",
+    );
     body.append(&ribbon);
     let chart = Chart::new(260);
     let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
-    card.append(&heading("Balances Until Your Next Statement"));
+    card.append(&info_heading(
+        "Balances Until Your Next Statement",
+        "Each line is one bank account's estimated balance, starting from its last verified balance. Drops are bills and card payments on their usual days, jumps are pay, and the gentle slope is everyday spending. If a line dips below zero, that account is likely to go overdrawn around that date. Hover for each day's estimate.",
+    ));
     card.append(&dim(&format!(
         "Solid from each account's last verified balance: regular payments in and out (pay, bills, card payments, standing orders) on their usual days, and everything else spread evenly at the last 90 days' rate. An estimate — the next statement replaces it. {AHEAD} days ahead."
     )));
@@ -198,7 +210,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
             clear(&content);
             if !fcs.is_empty() {
-                content.append(&heading("By Account"));
+                content.append(&info_heading(
+                    "By Account",
+                    "Each bank account's estimated balance today: its last verified balance plus the payments expected since. The line below gives its low point ahead, the next regular payment, and the usual day-to-day spend. Once a newer statement arrives, it also shows how close the last estimate was.",
+                ));
                 let checks = a.db.forecast_checks();
                 let l = list();
                 for fc in &fcs {
@@ -231,7 +246,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 let mut coming: Vec<(NaiveDate, String, Decimal, String, fingraph_core::Currency)> = fcs.iter().flat_map(|fc| fc.events.iter().filter(|e| e.0 > t && e.0 <= t + Duration::days(30)).map(|e| (e.0, e.1.clone(), e.2, fc.account.clone(), fc.currency))).collect();
                 coming.sort_by_key(|c| c.0);
                 if !coming.is_empty() {
-                    content.append(&heading("Coming Up · Next 30 Days"));
+                    content.append(&info_heading(
+                        "Coming Up · Next 30 Days",
+                        "Regular payments expected in the next 30 days, placed on the day they usually happen in your past statements. A plus sign means money coming in.",
+                    ));
                     content.append(&dim("Regular payments in and out of your bank accounts, by their usual day."));
                     let l = list();
                     for (d, who, v, acct, cur) in coming {
@@ -244,7 +262,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             }
 
             // ── this month's bills
-            content.append(&heading(&format!("Bills in {}", t.format("%B"))));
+            content.append(&info_heading(
+                &format!("Bills in {}", t.format("%B")),
+                "Each regular bill and whether this month's statements show it. A tick means paid. A warning means it was due but isn't on the statement, so check whether it was missed or paid another way. The waiting icon means it's due after your newest statement. A star means a new regular payment.",
+            ));
             if bills.is_empty() {
                 content.append(&dim("No regular bills found yet."));
             } else {
@@ -267,7 +288,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             // ── age of money
             if let Some(x) = aom {
                 let c = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
-                c.append(&heading("Age of Money"));
+                c.append(&info_heading(
+                    "Age of Money",
+                    "Your age of money at each month end, with a dashed line at 30 days. Above that line means you're paying for things with money that arrived more than a month earlier, a sign of a healthy buffer. A rising line means the buffer is growing.",
+                ));
                 c.append(&dim("How long money sits between arriving and being spent: income is stacked oldest first and each purchase spends the oldest money still there (the average of the last 10 purchases). Card purchases count when made, not when the card is paid."));
                 let pts: Vec<(f64, f64)> = x.by_month.iter().enumerate().map(|(i, p)| (i as f64, p.1 as f64)).collect();
                 *age_chart.axis.borrow_mut() = Rc::new(|v| format!("{v:.0}d"));

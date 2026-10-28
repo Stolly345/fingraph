@@ -1,6 +1,6 @@
 # FinGraph — PRD / System Reference
 
-**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.4 `.deb`
+**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.5 `.deb`
 **Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Status:** in daily personal use; not published
 
 > Single source of truth for what FinGraph is, how it's built, and why it behaves the way it does.
@@ -409,11 +409,17 @@ Thresholds, chart months, hidden cards and categories left out of spending are p
 **Sidebar** (`AdwNavigationSplitView`; 0.2.0 adds **Outlook** and **Net Worth** after Budget — no
 Ctrl shortcut, Ctrl+1–9 are taken): each page has a white symbolic icon on a coloured rounded
 tile (Setup pages slate); icons are all from Adwaita so none fall back to full-colour images; workspace switcher (one workspace or Consolidated across a
-chosen set) at the top; Overview, To Review *(count)*, What Changed *(count)*, Transactions,
-Combined Statement, Budget, Subscriptions *(monthly cost)*, Statements *(⚠ when one doesn't balance)*, Reports & Export
-(Ctrl+1–7; Combined Statement Ctrl+8, Budget Ctrl+9); **Accounts** — each with its last verified balance (owed in red), opening its overview;
-**Setup** — Rules & Categories, Business Directory, Bank Profiles, Preferences (Ctrl+,). The header shows only the
-controls a page uses (date range, KYD | USD). Reopens on the last page.
+chosen set) at the top; Overview, What Changed *(count)*, Transactions,
+Combined Statement, Budget, Subscriptions *(monthly cost)*, Statements *(⚠ when one doesn't balance)*
+(Ctrl+1–7, Reports & Export Ctrl+7; Combined Statement Ctrl+8, Budget Ctrl+9); **Accounts** — each with its last verified balance (owed in red), opening its overview;
+listed last. Since 0.2.5 the **main menu** holds Import Statements, Reports & Export and the setup pages — Rules & Categories, Business
+Directory, Bank Profiles, Preferences (Ctrl+,) — and **To Review** (Ctrl+2) is reached from a banner
+across the top of Overview ("N merchants to review" · Review), shown only while something waits.
+The header shows only the controls a page uses (date range, KYD | USD). Reopens on the last page.
+
+**ⓘ on every card** (0.2.5; `with_info`/`info_heading`/`info_caption` in `main.rs`): the KPI tiles
+and charts on Overview, and the cards and sections of Budget, Outlook and Net Worth, carry an ⓘ
+after their title — hover shows how to read it, a click keeps it open in a popover.
 
 **Pages**: Transactions (virtualised grid, search Ctrl+F, account/category filters, inline category,
 payee, business and tag edits with "Remember" toasts, bulk categorise/tag/business/subscription/
@@ -486,9 +492,9 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 10. Packaging & operations
 
-- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.4-1_amd64.deb` (binary, desktop entry with
+- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.5-1_amd64.deb` (binary, desktop entry with
   PDF "Open With", icon; depends on poppler-utils, GTK 4, libadwaita).
-- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.4-1_amd64.deb`.
+- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.5-1_amd64.deb`.
 - Data: `~/.local/share/fingraph/ledger.db` (+ `statements/`, `backups/`). Hand backups made during
   development sit beside the ledger as `ledger-backup-2026-10-27-*.db`.
 - Terminal: `cargo run -p fingraph-core --example ledger -- reset|rescan|reapply|cards`.
@@ -552,6 +558,7 @@ Fixes found while testing the guide on the owner's real statements:
 | Import rules (0.2.4) | Accounts match on number not detected type; new accounts, unreadable numbers and re-imported periods are asked; statements that don't reconcile, were OCR'd, are first of their kind or off-layout are held until approved; FITID no longer includes the description (re-keyed once). Found on the owner's ledger: one Amex USD statement imported from two files counted 7 rows twice (US$919.61) because the copies wrapped descriptions differently; a rescan under 0.2.4 drops them. Scotiabank's headings in the profile were guesses (`Withdrawals (-)`, `Total Minus`) — replaced with the real ones; declared layouts per bank (§6.1); anonymised layout samples (§6.3) |
 | CNB from a real statement (0.2.3) | The guessed CNB profile was wrong on every point. Real layout: `DD/MM` dates, one Amount column with a trailing minus, the date on a description's first line and the amount + balance on its last (Pass 3 now holds a dated amount-less line as a "head" that later lines join, across a page break too), summary amounts on an `as of` line under spaced-out labels, `ACCOUNT #: SV` = savings. Stored built-in CNB profiles are replaced once (`profile_rev:cnb_ky`). OCR fallback: 300 dpi grey, pale ink blanked at 180 (the CUSTOMER COPY watermark garbled digits), `--psm 6`, `49,48`→`49.48`; one printed balance that disagrees with both neighbours is ignored and noted ("Balance ignored") instead of failing the stretch |
 | Snappier (0.2.2) | Transactions 1.9 s → 0.1 s per refresh (cell buttons instead of a DropDown/EditableLabel per row; only changed rows are replaced); refreshes coalesce to one per frame (start-up did 5); rows read once per refresh; sidebar 75 → 30 ms; Subscriptions 109 → 7 ms; Combined Statement skips rebuilding when nothing changed; index on `transactions(document_id)` (schema v7); `synchronous=NORMAL` under WAL |
+| Sidebar and ⓘ (0.2.5) | Owner asked for To Review to disappear when empty — it became a banner on Overview instead; Setup pages moved to the main menu; an ⓘ explaining how to read each card on Overview, Budget, Outlook and Net Worth. "Top Merchants · Pareto" renamed "Where Most of Your Money Goes". Long card titles now wrap: the ⓘ had pushed Overview wider than the window |
 
 ---
 
