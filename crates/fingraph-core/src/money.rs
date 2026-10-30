@@ -207,7 +207,7 @@ impl Fx {
             (Currency::USD, Currency::KYD) => Some(self.usd_to_kyd),
             _ => {
                 let (f, t) = (self.per_usd(from, day)?, self.per_usd(to, day)?);
-                (!f.is_zero()).then(|| t / f)
+                t.checked_div(f)
             }
         }
     }
@@ -224,7 +224,8 @@ impl Fx {
         if from == to {
             return amount;
         }
-        round2(amount * self.rate_on(from, to, day).unwrap_or(Decimal::ONE))
+        // a rate too far out to multiply by is as good as none
+        self.rate_on(from, to, day).and_then(|r| amount.checked_mul(r)).map_or(amount, round2)
     }
 }
 
@@ -232,9 +233,11 @@ pub fn round2(d: Decimal) -> Decimal {
     d.round_dp_with_strategy(2, rust_decimal::RoundingStrategy::MidpointAwayFromZero)
 }
 
-/// Integer cents, for the `*_minor` columns.
+/// Integer cents, for the `*_minor` columns. Past what an i64 holds it saturates (never a silent 0); printed
+/// amounts are capped far below that.
 pub fn to_minor(d: Decimal) -> i64 {
-    (round2(d) * Decimal::ONE_HUNDRED).to_i64().unwrap_or(0)
+    let top = if d.is_sign_negative() { i64::MIN } else { i64::MAX };
+    round2(d).checked_mul(Decimal::ONE_HUNDRED).and_then(|c| c.to_i64()).unwrap_or(top)
 }
 
 pub fn from_minor(m: i64) -> Decimal {
@@ -295,10 +298,15 @@ thread_local! {
 
 /// Run `f` reading amounts the way `d` says.
 pub fn with_decimals<T>(d: Decimals, f: impl FnOnce() -> T) -> T {
-    let old = DECIMALS.replace(d);
-    let out = f();
-    DECIMALS.set(old);
-    out
+    // put back even if `f` panics (a scan's panic is caught, and the thread reads the next document)
+    struct Restore(Decimals);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DECIMALS.set(self.0);
+        }
+    }
+    let _restore = Restore(DECIMALS.replace(d));
+    f()
 }
 
 /// `1.234,56` → `1,234.56` when the document uses decimal commas: then one parser serves both.
@@ -331,6 +339,9 @@ pub fn infer_decimals<'a>(words: impl Iterator<Item = &'a str>) -> Decimals {
     if comma > point { Decimals::Comma } else { Decimals::Point }
 }
 
+/// Digits before the decimal point a printed amount may have (under ten trillion).
+const MAX_DIGITS: usize = 13;
+
 /// Is this one word the numeric core of an amount (`1,234.56`, `$-3,000.00`, `(12.00)`, `5.00CR`)?
 pub fn is_amount_core(word: &str) -> bool {
     let word = as_point(word);
@@ -348,7 +359,9 @@ pub fn is_amount_core(word: &str) -> bool {
     let mut groups = int.split(',');
     let first = groups.next().unwrap_or("");
     let max_first = if int.contains(',') { 3 } else { 12 };
-    !first.is_empty() && first.len() <= max_first && first.bytes().all(|b| b.is_ascii_digit()) && groups.all(|g| g.len() == 3 && g.bytes().all(|b| b.is_ascii_digit()))
+    // a trillion is past any statement: longer runs of digits are reference numbers, and they'd overflow the sums
+    int.bytes().filter(u8::is_ascii_digit).count() <= MAX_DIGITS
+        && !first.is_empty() && first.len() <= max_first && first.bytes().all(|b| b.is_ascii_digit()) && groups.all(|g| g.len() == 3 && g.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Words that may sit next to an amount's core and belong to it.
@@ -393,7 +406,7 @@ pub fn parse_printed(text: &str) -> Option<Printed> {
         credit_marker = Some(false);
     }
     let num: String = t[digits_start..digits_end].chars().filter(|c| *c != ',').collect();
-    let magnitude = Decimal::from_str(&num).ok()?;
+    let magnitude = Decimal::from_str(&num).ok().filter(|m| *m < Decimal::from(10i64.pow(MAX_DIGITS as u32)))?;
     Some(Printed { magnitude, negative, credit_marker, currency })
 }
 

@@ -51,19 +51,68 @@ impl Token {
 /// Every word of a PDF with its box, via poppler's `pdftotext -bbox` (font names aren't exposed there,
 /// so geometry does all the work). Image-only PDFs come back empty: see [`ocr_tokens`].
 pub fn tokens_from_pdf(path: &Path) -> Result<Vec<Token>> {
-    let out = Command::new("pdftotext")
-        .arg("-bbox")
-        .arg(path)
-        .arg("-")
-        .output()
-        .map_err(|e| Error(format!("couldn't run pdftotext (install poppler-utils): {e}")))?;
+    let out = output_within(Command::new("pdftotext").arg("-bbox").arg(path).arg("-"), 120).map_err(|e| Error(format!("couldn't run pdftotext (install poppler-utils): {e}")))?;
     if !out.status.success() {
         return Err(Error(format!("pdftotext failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
     }
     Ok(parse_bbox(&String::from_utf8_lossy(&out.stdout)))
 }
 
+/// A tool's output, or an error once it has run `secs` seconds (it's killed): a PDF that hangs poppler mustn't
+/// hold up the import queue for good.
+fn output_within(cmd: &mut Command, secs: u64) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let drain = |r: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut b = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut b);
+            }
+            b
+        })
+    };
+    let out = drain(child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let err = drain(child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let status = loop {
+        if let Some(s) = child.try_wait()? {
+            break s;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("gave up after {secs} s")));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    Ok(std::process::Output { status, stdout: out.join().unwrap_or_default(), stderr: err.join().unwrap_or_default() })
+}
+
+/// A scratch folder for page images only this user can open, under `$XDG_RUNTIME_DIR` when there is one (not
+/// the shared /tmp). It must be new: an existing folder of that name isn't ours. Leftovers from a run that was
+/// killed (over an hour old) are cleared first.
+fn private_scratch(kind: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let base = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(std::env::temp_dir);
+    for e in std::fs::read_dir(&base).into_iter().flatten().flatten() {
+        let stale = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > 3600);
+        let ours = e.file_name().to_string_lossy().starts_with("fingraph-") && e.file_type().is_ok_and(|t| t.is_dir());
+        if ours && stale {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = base.join(format!("fingraph-{kind}-{}-{nanos}", std::process::id()));
+    std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    Ok(dir)
+}
+
 const OCR_DPI: f64 = 300.0;
+/// Longest side of a rendered page, in pixels: a letter page at 300 dpi is 3,300. A PDF that declares a huge page
+/// is rendered coarser instead of filling memory (/tmp is often RAM).
+const OCR_MAX_PX: f64 = 4200.0;
 static OCR_SPLIT_HEAD: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"^\d{1,3},$").unwrap());
 static OCR_COMMA_CENTS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"^(\d{1,3}(?:,\d{3})*),(\d{2})(\D*)$").unwrap());
 
@@ -71,31 +120,45 @@ static OCR_COMMA_CENTS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock:
 /// rendered in grey, anything lighter than the ink is blanked (so a pale "CUSTOMER COPY" watermark
 /// doesn't garble the amounts under it), and tesseract's word boxes are scaled back to points.
 pub fn ocr_tokens(path: &Path) -> Result<Vec<Token>> {
-    let dir = std::env::temp_dir().join(format!("fingraph-ocr-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())));
-    std::fs::create_dir_all(&dir)?;
+    let dir = private_scratch("ocr")?;
     let r = ocr_in(path, &dir);
     let _ = std::fs::remove_dir_all(&dir);
     r
 }
 
+/// Page count and each page's longest side in points, from `pdfinfo` (first 20 pages).
+fn page_sizes(path: &Path) -> Result<Vec<f64>> {
+    let out = output_within(Command::new("pdfinfo").args(["-f", "1", "-l", "20"]).arg(path), 30).map_err(|e| Error(format!("couldn't run pdfinfo (install poppler-utils): {e}")))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let size = |l: &str| -> Option<f64> {
+        let (_, dims) = l.split_once("size:")?;
+        let mut n = dims.split_whitespace().filter_map(|w| w.parse::<f64>().ok());
+        Some(n.next()?.max(n.next()?))
+    };
+    let pages: usize = text.lines().find_map(|l| l.strip_prefix("Pages:")).and_then(|n| n.trim().parse().ok()).unwrap_or(0);
+    let each: Vec<f64> = text.lines().filter(|l| l.starts_with("Page ") && l.contains("size:")).filter_map(size).collect();
+    Ok((0..pages.min(20)).map(|i| each.get(i).or(each.first()).copied().unwrap_or(792.0)).collect())
+}
+
 fn ocr_in(path: &Path, dir: &Path) -> Result<Vec<Token>> {
     // ponytail: first 20 pages only (~3 s each), so a big scanned document in the watched folder can't
     // tie the machine up for minutes; raise it if a real statement ever runs longer
-    let out = Command::new("pdftoppm").args(["-r", &OCR_DPI.to_string(), "-gray", "-l", "20"]).arg(path).arg(dir.join("p")).output()?;
-    if !out.status.success() {
-        return Err(Error(format!("pdftoppm failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
-    }
-    let mut pages: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|e| e == "pgm")).collect();
-    pages.sort(); // p-01.pgm, p-02.pgm… zero-padded, so this is page order
-    let scale = 72.0 / OCR_DPI;
     let mut tokens: Vec<Token> = Vec::new();
-    for (i, img) in pages.iter().enumerate() {
-        threshold_pgm(img)?;
-        let out = Command::new("tesseract")
-            .arg(img)
-            .args(["stdout", "--psm", "6", "tsv"])
-            .output()
+    // one page at a time, each image deleted once read: at most one page's pixels on disk
+    for (i, side) in page_sizes(path)?.into_iter().enumerate() {
+        let dpi = OCR_DPI.min(OCR_MAX_PX * 72.0 / side.max(1.0)).floor();
+        let pg = (i + 1).to_string();
+        let img = dir.join("p");
+        let out = output_within(Command::new("pdftoppm").args(["-r", &dpi.to_string(), "-gray", "-singlefile", "-f", &pg, "-l", &pg]).arg(path).arg(&img), 60)?;
+        if !out.status.success() {
+            return Err(Error(format!("pdftoppm failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
+        }
+        let img = img.with_extension("pgm");
+        let scale = 72.0 / dpi;
+        threshold_pgm(&img)?;
+        let out = output_within(Command::new("tesseract").arg(&img).args(["stdout", "--psm", "6", "tsv"]), 120)
             .map_err(|e| Error(format!("this PDF is only pictures of pages; reading it needs tesseract (sudo apt install tesseract-ocr): {e}")))?;
+        let _ = std::fs::remove_file(&img);
         if !out.status.success() {
             return Err(Error(format!("tesseract failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
         }
@@ -241,6 +304,9 @@ pub struct Pass1Report {
     /// No bank profile and page 1 names no currency (only `$`, or none): KYD is a default, not a reading.
     #[serde(default)]
     pub currency_unstated: bool,
+    /// No bank profile, and the currency read from the wording isn't KYD or USD: a guess worth a look.
+    #[serde(default)]
+    pub currency_guessed: bool,
     pub currency: Option<Currency>,
     pub currency_columns: Vec<Currency>,
     pub summary_lines: Vec<String>,
@@ -388,6 +454,9 @@ pub struct SectionReport {
     /// unless reading the cell again confirms them.
     #[serde(default)]
     pub derived: Vec<(u32, f64)>,
+    /// What a person should check even though the read adds up (it holds the import).
+    #[serde(default)]
+    pub notes: Vec<String>,
     pub rescans: u32,
 }
 
@@ -472,26 +541,61 @@ const LAYOUT_WORDS: &[&str] = &[
 ];
 
 /// A statement's layout without its private contents, to share or keep as a test: every word stays where
-/// it was, and dates, amounts, headings, summary labels and the bank's own identifying words stay as
-/// printed; every other word has its letters turned to x and its digits to 0 (names, merchants,
-/// account and reference numbers). `keep` adds words, e.g. a bank profile's identifiers and labels.
-pub fn layout_sample(tokens: &[Token], keep: &[String]) -> Vec<Token> {
+/// it was, and headings, summary labels and the bank's own identifying words stay as printed; every other
+/// word has its letters turned to x and its digits to 0 (names, initials, merchants, account and reference
+/// numbers). Amounts and balances are all multiplied by one random whole number (2–9), so the statement still
+/// adds up but no real figure is left; dates stay only inside the statement's `period` (give or take 45 days:
+/// a date of birth goes). `keep` adds words, e.g. a bank profile's identifiers and labels.
+pub fn layout_sample(tokens: &[Token], keep: &[String], period: Option<(NaiveDate, NaiveDate)>) -> Vec<Token> {
     let keep: Vec<String> = keep.iter().flat_map(|k| k.split_whitespace()).map(|w| w.to_lowercase()).collect();
-    tokens
-        .iter()
-        .map(|t| {
-            let w = t.text.as_str();
-            let lower = w.to_lowercase();
-            let bare = lower.trim_matches(|c: char| matches!(c, ':' | ',' | '.' | '(' | ')'));
-            let dated = dates::find_dates(w).first().is_some_and(|d| d.0 == 0 && d.1 == w.len())
-                || (bare.len() == 4 && (bare.starts_with("19") || bare.starts_with("20")) && bare.bytes().all(|b| b.is_ascii_digit()));
-            if crate::money::is_amount_core(w) || dated || LAYOUT_WORDS.contains(&bare) || keep.iter().any(|k| k == &lower || k == bare) || w.chars().count() <= 2 {
-                return t.clone();
-            }
-            let text: String = w.chars().map(|c| if c.is_ascii_digit() { '0' } else if c.is_uppercase() { 'X' } else if c.is_alphabetic() { 'x' } else { c }).collect();
-            Token { text, ..t.clone() }
-        })
-        .collect()
+    let factor = 2 + (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos()) % 8) as i128;
+    let decimals = crate::money::infer_decimals(tokens.iter().map(|t| t.text.as_str()));
+    let near_period = |d: NaiveDate| period.is_none_or(|(a, b)| d >= a - chrono::Duration::days(45) && d <= b + chrono::Duration::days(45));
+    let this_year = chrono::Datelike::year(&chrono::Local::now());
+    crate::money::with_decimals(decimals, || {
+        tokens
+            .iter()
+            .map(|t| {
+                let w = t.text.as_str();
+                let lower = w.to_lowercase();
+                let bare = lower.trim_matches(|c: char| matches!(c, ':' | ',' | '.' | '(' | ')'));
+                if crate::money::is_amount_core(w) {
+                    return Token { text: scale_amount(w, factor, decimals), ..t.clone() };
+                }
+                let found = dates::find_dates(w);
+                let whole = found.first().filter(|d| d.0 == 0 && d.1 == w.len());
+                let year = |y: i32| period.map_or(y >= this_year - 10, |(a, b)| y >= chrono::Datelike::year(&a) - 1 && y <= chrono::Datelike::year(&b) + 1);
+                let dated = whole.is_some_and(|d| match d.2 {
+                    dates::Partial::Iso(day) => near_period(day),
+                    dates::Partial::Named { year: y, .. } | dates::Partial::Numeric { year: y, .. } => y.is_none_or(year),
+                }) || (bare.len() == 4 && bare.bytes().all(|b| b.is_ascii_digit()) && bare.parse().is_ok_and(year));
+                // short words stay only when they hold no letters (`-`, `&`, `12`): initials and short names go
+                let short = w.chars().count() <= 2 && !w.chars().any(char::is_alphabetic);
+                if dated || LAYOUT_WORDS.contains(&bare) || keep.iter().any(|k| k == &lower || k == bare) || short {
+                    return t.clone();
+                }
+                let text: String = w.chars().map(|c| if c.is_ascii_digit() { '0' } else if c.is_uppercase() { 'X' } else if c.is_alphabetic() { 'x' } else { c }).collect();
+                Token { text, ..t.clone() }
+            })
+            .collect()
+    })
+}
+
+/// `$1,234.56CR` times `k`, written the same way (`$8,641.92CR` for 7).
+fn scale_amount(w: &str, k: i128, decimals: crate::money::Decimals) -> String {
+    let (Some(a), Some(b)) = (w.find(|c: char| c.is_ascii_digit()), w.rfind(|c: char| c.is_ascii_digit())) else { return w.to_string() };
+    let core = &w[a..=b];
+    let (point, group) = if decimals == crate::money::Decimals::Comma { (',', '.') } else { ('.', ',') };
+    let Ok(cents) = core.chars().filter(char::is_ascii_digit).collect::<String>().parse::<i128>() else { return w.to_string() };
+    let v = cents * k;
+    let int = (v / 100).to_string();
+    let int = if core.contains(group) {
+        let n = int.len();
+        int.chars().enumerate().flat_map(|(i, c)| (i > 0 && (n - i) % 3 == 0).then_some(group).into_iter().chain([c])).collect()
+    } else {
+        int
+    };
+    format!("{}{int}{point}{:02}{}", &w[..a], v % 100, &w[b + 1..])
 }
 
 /// A layout sample on disk: which bank it's from and its anonymised words. Samples of real statements go in
@@ -509,25 +613,25 @@ pub struct LayoutSample {
 pub(crate) fn reread_cell(path: &Path, page: u32, x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<String> {
     const DPI: f64 = 400.0;
     let px = |v: f64| ((v.max(0.0)) * DPI / 72.0).round() as i64;
-    let dir = std::env::temp_dir().join(format!("fingraph-cell-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())));
-    if std::fs::create_dir_all(&dir).is_err() {
-        return Vec::new();
-    }
+    let Ok(dir) = private_scratch("cell") else { return Vec::new() };
     let img = dir.join("cell");
     let out = (|| -> Option<String> {
-        let ok = Command::new("pdftoppm")
-            .args(["-r", "400", "-gray", "-singlefile", "-f", &page.to_string(), "-l", &page.to_string()])
-            .args(["-x", &px(x0).to_string(), "-y", &px(y0).to_string(), "-W", &(px(x1) - px(x0)).max(1).to_string(), "-H", &(px(y1) - px(y0)).max(1).to_string()])
-            .arg(path)
-            .arg(&img)
-            .status()
-            .ok()?
-            .success();
+        let ok = output_within(
+            Command::new("pdftoppm")
+                .args(["-r", "400", "-gray", "-singlefile", "-f", &page.to_string(), "-l", &page.to_string()])
+                .args(["-x", &px(x0).to_string(), "-y", &px(y0).to_string(), "-W", &(px(x1) - px(x0)).clamp(1, 4000).to_string(), "-H", &(px(y1) - px(y0)).clamp(1, 400).to_string()])
+                .arg(path)
+                .arg(&img),
+            60,
+        )
+        .ok()?
+        .status
+        .success();
         let pgm = img.with_extension("pgm");
         if !ok || threshold_pgm(&pgm).is_err() {
             return None;
         }
-        let o = Command::new("tesseract").arg(&pgm).args(["stdout", "--psm", "7", "-c", "tessedit_char_whitelist=0123456789.,-()"]).output().ok()?;
+        let o = output_within(Command::new("tesseract").arg(&pgm).args(["stdout", "--psm", "7", "-c", "tessedit_char_whitelist=0123456789.,-()"]), 60).ok()?;
         o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
     })();
     let _ = std::fs::remove_dir_all(&dir);
@@ -579,7 +683,7 @@ pub fn layout_sample_json(path: &Path, profiles: &[BankProfile]) -> Result<Strin
                 .collect()
         })
         .unwrap_or_default();
-    Ok(serde_json::to_string_pretty(&LayoutSample { bank: scan.profile_slug, ocr, tokens: layout_sample(&tokens, &keep) })?)
+    Ok(serde_json::to_string_pretty(&LayoutSample { bank: scan.profile_slug, ocr, tokens: layout_sample(&tokens, &keep, scan.period) })?)
 }
 
 #[cfg(test)]
@@ -591,11 +695,15 @@ mod tests {
         let p = profiles::builtins();
         let doc = &crate::demo::demo_documents()[1];
         let keep: Vec<String> = p.iter().flat_map(|p| p.routing_identifiers.clone()).collect();
-        let sample = layout_sample(&doc.tokens, &keep);
-        let (a, b) = (MultiPassScanner::new(&p).scan_tokens(doc.tokens.clone()).unwrap(), MultiPassScanner::new(&p).scan_tokens(sample.clone()).unwrap());
+        let a = MultiPassScanner::new(&p).scan_tokens(doc.tokens.clone()).unwrap();
+        let sample = layout_sample(&doc.tokens, &keep, a.period);
+        let b = MultiPassScanner::new(&p).scan_tokens(sample.clone()).unwrap();
         assert_eq!(a.profile_slug, b.profile_slug);
-        let money = |r: &ScanResult| r.sections.iter().map(|s| (s.reconciliation.clone(), s.transactions.iter().map(|t| (t.posted, t.amount)).collect::<Vec<_>>())).collect::<Vec<_>>();
-        assert_eq!(money(&a), money(&b));
+        // the same rows on the same days, every amount the same multiple of the real one
+        let k = b.sections[0].transactions[0].amount / a.sections[0].transactions[0].amount;
+        assert!(k >= Decimal::TWO && k <= Decimal::from(9) && k.fract().is_zero(), "{k}");
+        let money = |r: &ScanResult, k: Decimal| r.sections.iter().map(|s| (s.reconciliation.clone(), s.transactions.iter().map(|t| (t.posted, t.amount * k)).collect::<Vec<_>>())).collect::<Vec<_>>();
+        assert_eq!(money(&a, k), money(&b, Decimal::ONE));
         // the merchants are gone (heading words like PAYMENT may also appear in a description, and stay)
         let words: Vec<&str> = sample.iter().map(|t| t.text.as_str()).collect();
         let private: Vec<&str> = a.sections[0]
@@ -605,6 +713,22 @@ mod tests {
             .filter(|w| w.len() > 3 && !w.chars().any(|c| c.is_ascii_digit()) && !LAYOUT_WORDS.contains(&w.to_lowercase().as_str()))
             .collect();
         assert!(!private.is_empty() && private.iter().all(|w| !words.contains(w)), "{private:?}");
+    }
+
+    /// What a sample mustn't keep: initials, short names, a date of birth, account/card/phone numbers, real figures.
+    #[test]
+    fn a_layout_sample_keeps_nothing_private() {
+        let words = ["Account", "No:", "0012345678", "4520-1234-5678-9012", "J.", "Al", "Ng", "Balance", "123,456.78", "DOB", "12/03/1985", "Tel", "345-916-1234", "05/08/2026", "PO", "Box", "&", "12"];
+        let t: Vec<Token> = words.iter().enumerate().map(|(i, w)| Token::new(1, i as f64 * 10.0, 0.0, i as f64 * 10.0 + 9.0, 8.0, w)).collect();
+        let period = Some((NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(), NaiveDate::from_ymd_opt(2026, 8, 31).unwrap()));
+        let out: Vec<String> = layout_sample(&t, &[], period).into_iter().map(|t| t.text).collect();
+        for gone in ["0012345678", "4520-1234-5678-9012", "J.", "Al", "Ng", "123,456.78", "12/03/1985", "345-916-1234", "PO"] {
+            assert!(!out.iter().any(|w| w == gone), "{gone} kept: {out:?}");
+        }
+        for kept in ["Account", "Balance", "05/08/2026", "&", "12"] {
+            assert!(out.iter().any(|w| w == kept), "{kept} lost: {out:?}");
+        }
+        assert!(crate::money::is_amount_core(&out[8]), "{}", out[8]);
     }
 
     /// A re-read amount cell confirms a worked-out amount only by its exact digits (OCR loses or garbles the point,

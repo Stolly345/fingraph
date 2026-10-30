@@ -75,7 +75,13 @@ fn verify(s: &mut Section) -> Vec<Gap> {
         }
         let expected = bal - pbal;
         let mut got: Decimal = s.transactions[ppos..pos].iter().map(|t| t.stmt_amount).sum();
-        if got != expected {
+        // a dated line left unread inside the stretch may be the row that's missing: a flipped sign that happens
+        // to cover for it (a lost +40 next to a -20) would hide it, so the stretch is left to Pass 5
+        let lo = pkey.or_else(|| ppos.checked_sub(1).map(|i| key(&s.transactions[i])));
+        let unread_row = s.report.skipped.iter().any(|l| {
+            l.date.is_some() && l.reason != SUMMARY_LINE && l.reason != AFTER_CLOSING && lo.is_none_or(|lo| before(lo, (l.page, l.y))) && before((l.page, l.y), at)
+        });
+        if got != expected && !unread_row {
             // self-healing sign: exactly one row whose flip fixes the stretch (prefer unsigned ones)
             let fixes: Vec<usize> = (ppos..pos).filter(|&i| !s.transactions[i].stmt_amount.is_zero() && got - s.transactions[i].stmt_amount * Decimal::TWO == expected).collect();
             let flexible: Vec<usize> = fixes.iter().copied().filter(|&i| s.transactions[i].sign_flexible).collect();
@@ -326,6 +332,8 @@ fn heal_and_judge(s: &mut Section) {
         {
             let hits: Vec<usize> = (0..s.report.skipped.len()).filter(|&i| s.report.skipped[i].amount == Some(d.abs()) && s.report.skipped[i].reason != SUMMARY_LINE && s.report.skipped[i].reason != AFTER_CLOSING).collect();
             if hits.len() == 1 {
+                // nothing but the total says it belongs here: any line worth the difference would do
+                s.report.notes.push(format!("\u{201c}{}\u{201d} was taken as a transaction because it's worth exactly what was missing: check it", s.report.skipped[hits[0]].text));
                 recover(s, hits[0], d);
                 fixed = true;
             }
@@ -358,6 +366,26 @@ fn heal_and_judge(s: &mut Section) {
         None if failing.is_empty() => Reconciliation::Unverified,
         None => Reconciliation::Discrepancy(failing.iter().map(|g| g.expected - g.got).sum()),
     };
+    if s.reconciliation == Reconciliation::Reconciled {
+        // a balance taken for a misprint could as well be two rows' amounts read the wrong way round
+        if !s.report.misread_balances.is_empty() {
+            s.report.notes.push(format!("{} printed balance(s) didn't match the rows around them and were left out of the checks: check the rows next to them", s.report.misread_balances.len()));
+        }
+        // a card or loan whose signs the arithmetic mostly set: a bank account taken for one (wording that only
+        // looked like a card's) adds up the same way. (A bank account's columns found from the amounts alone are
+        // often all set this way, each by its own balance: that's fine.)
+        let heals = s.report.sign_heals.len();
+        if s.account_type.is_liability() && heals >= 2 && heals * 2 > s.transactions.len() {
+            s.report.notes.push(format!("{heals} of {} rows had their sign set from the balance change: check the account type and which way the amounts go", s.transactions.len()));
+        }
+        // the printed totals are a second check, side by side: a lost charge and a lost refund cancel out in the net
+        let sum = &s.report.summary;
+        if let (Some(d), Some(c)) = (sum.total_debits, sum.total_credits)
+            && (d != sum.extracted_debits || c != sum.extracted_credits)
+        {
+            s.report.notes.push(format!("The printed totals (debits {d}, credits {c}) don't match the rows read (debits {}, credits {})", sum.extracted_debits, sum.extracted_credits));
+        }
+    }
     let n = s.report.segments.len();
     let ok = n - failing.len();
     s.confidence = match s.reconciliation {

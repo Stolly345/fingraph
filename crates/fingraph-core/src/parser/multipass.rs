@@ -399,14 +399,23 @@ fn layout_notes(meta: &Meta, sections: &[Section], diag: &mut Diagnostics) {
         let n = diag.pass3.debit_and_credit_lines;
         diag.pass3.layout_notes.push(format!("{n} line(s) printed both a debit and a credit: each was read as its own transaction, check their dates"));
     }
-    let Some(p) = meta.profile else { return };
+    if diag.pass1.currency_guessed {
+        let c = sections.first().map_or(Currency::KYD, |s| s.currency);
+        diag.pass3.layout_notes.push(format!("The currency was read as {} ({}) from the statement's wording, with no bank profile to confirm it: check it", c.code(), c.name()));
+    }
+    for n in sections.iter().flat_map(|s| &s.report.notes) {
+        if !diag.pass3.layout_notes.contains(n) {
+            diag.pass3.layout_notes.push(n.clone());
+        }
+    }
     let dated_without_amount = |reason: &str| sections.iter().flat_map(|s| &s.report.skipped).filter(|l| l.reason == reason && l.date.is_some() && l.amount.is_none()).count();
     let notes = &mut diag.pass3.layout_notes;
     match meta.shape {
         RowShape::AmountFirst => {
             let n = dated_without_amount("unrecognised line in the table");
             if n > 0 {
-                notes.push(format!("{n} dated line(s) had no amount; {} is set to print the amount on a transaction's first line", p.short_name));
+                let bank = meta.profile.map_or("the layout", |p| p.short_name.as_str());
+                notes.push(format!("{n} dated line(s) had no amount; {bank} is set to print the amount on a transaction's first line"));
             }
         }
         _ => {
@@ -416,6 +425,7 @@ fn layout_notes(meta: &Meta, sections: &[Section], diag: &mut Diagnostics) {
             }
         }
     }
+    let Some(p) = meta.profile else { return };
     let a = &p.header_anchors;
     let declared: Vec<String> = [&a.date, &a.posting_date, &a.description, &a.reference, &a.debit, &a.credit, &a.amount, &a.balance].into_iter().flatten().map(|w| w.to_lowercase()).collect();
     let seen: Vec<String> = diag.pages.iter().flat_map(|pg| pg.header_words.iter().map(|(_, w)| w.to_lowercase())).collect();
@@ -692,14 +702,18 @@ pub(crate) fn summary_value(rows: &[&Row], label: &Regex, cols: &[(Currency, f64
 }
 
 /// The statement's currency from what page 1 names, and whether it names one at all (else it's KYD by default).
-fn detect_currency(page1: &str) -> (Currency, bool) {
+/// Other currencies count only outside the transactions (`outside`: a card's `EUR 45.00` purchase isn't the
+/// card's currency) and only written as codes are (`Dear Ron,` isn't the Romanian leu).
+fn detect_currency(page1: &str, outside: &str) -> (Currency, bool) {
     let no_parens = Regex::new(r"\([^)]*\)").unwrap().replace_all(page1, "");
     let up = no_parens.to_uppercase();
     let kyd = up.matches("KYD").count() + up.matches("CI$").count() * 2;
     let usd = up.matches("USD").count() + up.matches("US$").count() * 2;
+    let outside = Regex::new(r"\([^)]*\)").unwrap().replace_all(outside, "").into_owned();
+    let up = outside.to_uppercase();
     // a statement from a bank back home names its own currency more than either (`GBP`, `£`, `C$`)
     let named = |c: Currency| -> usize {
-        let code = Regex::new(&format!(r"\b{}\b", c.code())).map_or(0, |r| r.find_iter(&up).count());
+        let code = Regex::new(&format!(r"\b{}\b", c.code())).map_or(0, |r| r.find_iter(&outside).count());
         let sym = c.symbol().to_uppercase();
         let symbol = if sym == c.code() {
             0
@@ -727,11 +741,16 @@ static TYPE_STATED: LazyLock<Regex> =
 /// CNB prints the account kind as a code: `ACCOUNT #: SV - 1234567`.
 static SAVINGS_CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"account\s*#\s*:?\s*sv\b").unwrap());
 
+/// Card and loan wording, as whole words (`advisable` isn't Visa, a `Principal Office` isn't a loan).
+static CARD_WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:credit\s+limit|minimum\s+payment|credit\s+card|card\s+number|mastercard|visa|american\s+express)\b").unwrap());
+static LOAN_WORDS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(?:loan\s+(?:account|balance)|principal\s+(?:balance|outstanding|amount|due|paid|repaid|and\s+interest|&\s+interest))\b").unwrap());
+
 fn detect_type(page1: &str) -> AccountType {
     let t = page1.to_lowercase();
-    if ["credit limit", "minimum payment", "credit card", "card number", "mastercard", "visa", "american express"].iter().any(|k| t.contains(k)) {
+    if CARD_WORDS.is_match(&t) {
         AccountType::CreditCard
-    } else if t.contains("loan account") || t.contains("loan balance") || t.contains("principal") {
+    } else if LOAN_WORDS.is_match(&t) {
         AccountType::Loan
     } else if t.contains("share savings") || t.contains("share account") {
         AccountType::ShareAccount
@@ -805,8 +824,8 @@ fn pass1<'p>(scanner: &MultiPassScanner<'p>, rows: &[Row], diag: &mut Diagnostic
     };
     let p1: Vec<&Row> = rows.iter().filter(|r| r.page == 1).collect();
     let (first, last) = (p1.iter().position(|r| either(r)), p1.iter().rposition(|r| either(r)));
-    let head: String = p1.iter().enumerate().filter(|(i, _)| first.is_none_or(|f| *i < f) || last.is_some_and(|l| *i > l)).map(|(_, r)| r.text()).collect::<Vec<_>>().join("\n");
-    let (profile, scores) = profiles::fingerprint(scanner.profiles, &head, &tokens);
+    let outside: String = p1.iter().enumerate().filter(|(i, _)| first.is_none_or(|f| *i < f) || last.is_some_and(|l| *i > l)).map(|(_, r)| r.text()).collect::<Vec<_>>().join("\n");
+    let (profile, scores) = profiles::fingerprint(scanner.profiles, &outside, &tokens);
     let mut order = profile.map_or_else(|| infer_order(rows), BankProfile::date_order);
     // no bank to say how it writes dates, and no date past the 12th to tell: the reading that keeps the statement
     // a statement (its dates inside a period of a quarter at most) wins; if both or neither do, it's a guess
@@ -860,8 +879,9 @@ fn pass1<'p>(scanner: &MultiPassScanner<'p>, rows: &[Row], diag: &mut Diagnostic
     diag.pass1.date_order_unproven = order_unproven;
     // said in so many words? ("Savings Bank" in a name doesn't say what this account is)
     diag.pass1.type_unstated = profile.is_none() && account_type != AccountType::CreditCard && !TYPE_STATED.is_match(&page1);
-    let (currency, said) = detect_currency(&page1);
+    let (currency, said) = detect_currency(&page1, &outside);
     diag.pass1.currency_unstated = !said && profile.is_none();
+    diag.pass1.currency_guessed = !currency.pegged() && profile.is_none();
     let currency_columns: Vec<(Currency, f64)> = rows
         .iter()
         .find_map(|r| {
@@ -1544,7 +1564,7 @@ fn split_row(r: &Row, g: &Geometry) -> Parts {
 }
 
 static GENERIC_FX: LazyLock<Regex> = LazyLock::new(|| Regex::new(profiles::GENERIC_FX).unwrap());
-static DIGITS4: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{4,}\b").unwrap());
+static DIGITS4: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)[0-9]{4,}(?-u:\b)").unwrap());
 // (not "balance carried forward": that's printed at the foot of a page, and the table carries on overleaf)
 static TABLE_END: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:closing|ending)\s+balance\b|\bnouveau\s+solde\b|\bsaldo\s+final\b").unwrap());
 static SUMMARY_ROW: LazyLock<Regex> = LazyLock::new(|| {
