@@ -15,6 +15,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+
 use std::process::Command;
 
 use crate::{AccountType, Currency, Error, Reconciliation, Result};
@@ -230,6 +231,10 @@ pub struct Pass1Report {
     pub period: Option<(NaiveDate, NaiveDate)>,
     pub account_last4: Option<String>,
     pub account_type: Option<AccountType>,
+    /// The statement doesn't say what kind of account it is (no card wording, no "savings account" and the
+    /// like, no bank profile that says): the type above is a default.
+    #[serde(default)]
+    pub type_unstated: bool,
     pub currency: Option<Currency>,
     pub currency_columns: Vec<Currency>,
     pub summary_lines: Vec<String>,
@@ -268,6 +273,9 @@ pub struct Pass3Report {
     /// Listed newest first (read bottom-up; transaction pages and positions are mirrored).
     #[serde(default)]
     pub newest_first: bool,
+    /// The transaction and posting date columns were taken the wrong way round, and swapped back.
+    #[serde(default)]
+    pub date_columns_swapped: bool,
 }
 
 /// What a read found out about a statement's layout. Approving a held statement teaches its bank profile
@@ -367,6 +375,10 @@ pub struct SectionReport {
     /// Printed balances that disagree with both neighbours (a misprint, or an OCR misread), left out of the checks.
     #[serde(default)]
     pub misread_balances: Vec<String>,
+    /// Where amounts were worked out from the balances rather than read (page, y): held until someone looks,
+    /// unless reading the cell again confirms them.
+    #[serde(default)]
+    pub derived: Vec<(u32, f64)>,
     pub rescans: u32,
 }
 
@@ -482,6 +494,57 @@ pub struct LayoutSample {
     pub tokens: Vec<Token>,
 }
 
+/// One amount cell of a scanned page read again: just that rectangle (points), rendered at 400 dpi with pale ink
+/// blanked, OCR'd as a single line allowed only digits and amount signs. Returns the words read. Nothing is
+/// believed on its own: callers only accept what the balances already asked for.
+pub(crate) fn reread_cell(path: &Path, page: u32, x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<String> {
+    const DPI: f64 = 400.0;
+    let px = |v: f64| ((v.max(0.0)) * DPI / 72.0).round() as i64;
+    let dir = std::env::temp_dir().join(format!("fingraph-cell-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return Vec::new();
+    }
+    let img = dir.join("cell");
+    let out = (|| -> Option<String> {
+        let ok = Command::new("pdftoppm")
+            .args(["-r", "400", "-gray", "-singlefile", "-f", &page.to_string(), "-l", &page.to_string()])
+            .args(["-x", &px(x0).to_string(), "-y", &px(y0).to_string(), "-W", &(px(x1) - px(x0)).max(1).to_string(), "-H", &(px(y1) - px(y0)).max(1).to_string()])
+            .arg(path)
+            .arg(&img)
+            .status()
+            .ok()?
+            .success();
+        let pgm = img.with_extension("pgm");
+        if !ok || threshold_pgm(&pgm).is_err() {
+            return None;
+        }
+        let o = Command::new("tesseract").arg(&pgm).args(["stdout", "--psm", "7", "-c", "tessedit_char_whitelist=0123456789.,-()"]).output().ok()?;
+        o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    out.unwrap_or_default().split_whitespace().map(str::to_string).collect()
+}
+
+/// A re-read cell's words as amounts (`.26` counts as 0.26).
+pub(crate) fn cell_amounts(words: &[String]) -> Vec<Decimal> {
+    words
+        .iter()
+        .filter_map(|w| {
+            let w = w.trim_matches(['(', ')']);
+            let w = if let Some(rest) = w.strip_prefix('.') { format!("0.{rest}") } else if let Some(rest) = w.strip_prefix("-.") { format!("-0.{rest}") } else { w.to_string() };
+            crate::money::is_amount_core(&w).then(|| crate::money::parse_printed(&w)).flatten().map(|p| p.magnitude)
+        })
+        .collect()
+}
+
+/// Whether a re-read cell shows exactly the digits of `amount` (`26` or `-26` for 0.26): OCR loses a faint point
+/// or reads it as a dash, but rarely invents digits — and `amount` came from the balances, not from this read.
+pub(crate) fn cell_shows_digits(words: &[String], amount: Decimal) -> bool {
+    let digits = |s: &str| s.chars().filter(char::is_ascii_digit).collect::<String>().trim_start_matches('0').to_string();
+    let want = digits(&format!("{:.2}", amount.abs()));
+    !want.is_empty() && words.iter().any(|w| digits(w) == want)
+}
+
 /// The words of a PDF: its text layer, or OCR when it's only pictures of pages (true).
 pub fn page_tokens(path: &Path) -> Result<(Vec<Token>, bool)> {
     let tokens = tokens_from_pdf(path)?;
@@ -533,6 +596,19 @@ mod tests {
             .filter(|w| w.len() > 3 && !w.chars().any(|c| c.is_ascii_digit()) && !LAYOUT_WORDS.contains(&w.to_lowercase().as_str()))
             .collect();
         assert!(!private.is_empty() && private.iter().all(|w| !words.contains(w)), "{private:?}");
+    }
+
+    /// A re-read amount cell confirms a worked-out amount only by its exact digits (OCR loses or garbles the point,
+    /// it rarely invents digits), and only well-formed amounts can fill a gap.
+    #[test]
+    fn a_reread_cell_confirms_by_digits_and_fills_only_with_amounts() {
+        let w = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let d = |s: &str| Decimal::from_str_exact(s).unwrap();
+        assert!(cell_shows_digits(&w(&["-26"]), d("0.26")));
+        assert!(cell_shows_digits(&w(&["1,243,92"]), d("1243.92")));
+        assert!(!cell_shows_digits(&w(&["126"]), d("0.26")));
+        assert!(!cell_shows_digits(&w(&["26"]), d("2.60")), "2.60 is 260");
+        assert_eq!(cell_amounts(&w(&[".26", "598.71", "26"])), vec![d("0.26"), d("598.71")]);
     }
 
     #[test]

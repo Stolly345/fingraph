@@ -531,10 +531,12 @@ pub enum Review {
     LayoutChanged,
     /// An amount couldn't be read and was worked out from the balances around it.
     Derived,
+    /// It doesn't start where the account's previous statement ended: a statement or rows may be missing.
+    Continuity,
 }
 
 impl Review {
-    pub const ALL: [Review; 7] = [Review::Mismatch, Review::NoBalances, Review::Ocr, Review::NewLayout, Review::OffLayout, Review::LayoutChanged, Review::Derived];
+    pub const ALL: [Review; 8] = [Review::Mismatch, Review::NoBalances, Review::Ocr, Review::NewLayout, Review::OffLayout, Review::LayoutChanged, Review::Derived, Review::Continuity];
     pub fn code(self) -> &'static str {
         match self {
             Review::Mismatch => "mismatch",
@@ -544,6 +546,7 @@ impl Review {
             Review::OffLayout => "offlayout",
             Review::LayoutChanged => "layoutchanged",
             Review::Derived => "derived",
+            Review::Continuity => "continuity",
         }
     }
     pub fn text(self) -> &'static str {
@@ -555,6 +558,7 @@ impl Review {
             Review::OffLayout => "it doesn't match this bank's declared layout (see the notes in its Scan Pass Report), so names or dates may be off",
             Review::LayoutChanged => "the bank changed how its statements look since this account's last one (see its Scan Pass Report): check it once, and approving it teaches FinGraph the new layout",
             Review::Derived => "an amount on it couldn't be read, so it was worked out from the balances before and after it (see Recovered in its Scan Pass Report): check that line against the PDF",
+            Review::Continuity => "it doesn't start where this account's previous statement ended (see its Scan Pass Report): a statement, or some of its rows, may be missing",
         }
     }
     pub fn parse_list(s: &str) -> Vec<Review> {
@@ -1167,7 +1171,7 @@ impl Db {
         if !scan.diagnostics.pass3.layout_notes.is_empty() {
             v.push(Review::OffLayout);
         }
-        if s.report.recovered.iter().any(|r| r.contains(crate::parser::reconcile::DERIVED)) {
+        if !s.report.derived.is_empty() {
             v.push(Review::Derived);
         }
         v
@@ -1205,13 +1209,46 @@ impl Db {
                 Target::Existing(id) => id,
                 Target::New => self.create_account(entity_id, profile, s)?,
             };
+            // the account's previous statement: where this one has to start
+            let mut s = std::borrow::Cow::Borrowed(s);
+            let mut continuity: Vec<String> = Vec::new();
+            let mut broken = false;
+            if let Some((start, _)) = scan.period
+                && let Some((prev, name)) = self.previous_closing(account_id, start)?
+            {
+                match s.opening {
+                    Some(o) if o != prev => {
+                        broken = true;
+                        continuity.push(format!("Opens at {o}, but the account's previous statement ({name}) closed at {prev}: a statement, or some of its rows, may be missing"));
+                    }
+                    Some(_) => {}
+                    None if s.reconciliation != Reconciliation::Reconciled => {
+                        // no opening printed: last month's closing is this month's opening; kept only if the rows then add up
+                        let mut t = s.clone().into_owned();
+                        t.opening = Some(prev);
+                        crate::parser::reconcile::verify_and_heal(&mut t);
+                        if t.reconciliation == Reconciliation::Reconciled {
+                            continuity.push(format!("No opening balance is printed: the previous statement's closing balance ({prev}, {name}) was used, and every row adds up from it"));
+                            s = std::borrow::Cow::Owned(t);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            let s = s.as_ref();
             let mut why = Self::review_reasons(profile, scan, s);
+            if broken && !approved.contains(&si) {
+                why.push(Review::Continuity);
+            }
             if approved.contains(&si) {
                 // approved before: only what this read found wrong holds it again
                 why.retain(|r| matches!(r, Review::Mismatch | Review::NoBalances | Review::OffLayout));
             }
             // the bank changed its layout: this one looks different from the account's statement before it
             let mut diagnostics = std::borrow::Cow::Borrowed(&scan.diagnostics);
+            if !continuity.is_empty() {
+                diagnostics.to_mut().pass3.layout_notes.extend(continuity);
+            }
             let changes = self.previous_layout(account_id, scan.period.map(|p| p.1))?.map(|o| scan.diagnostics.observed.changes_from(&o)).unwrap_or_default();
             if !changes.is_empty() && !approved.contains(&si) {
                 why.push(Review::LayoutChanged);
@@ -1667,6 +1704,21 @@ impl Db {
         self.mark_card_payments()?;
         self.mark_recurring()?;
         Ok(out)
+    }
+
+    /// The closing balance (statement terms) and file name of the account's statement just before a period
+    /// starting `start`: approved, reconciled, and ending at most three days before it starts (or on that day).
+    fn previous_closing(&self, account_id: i64, start: NaiveDate) -> Result<Option<(Decimal, String)>> {
+        let row: Option<(String, String)> = self
+            .conn
+            .query_row(
+                "SELECT statement_closing_balance, filename FROM documents WHERE account_id = ?1 AND review_hold = 0 AND reconciliation_status = 'Reconciled'
+                 AND statement_closing_balance IS NOT NULL AND period_end BETWEEN ?2 AND ?3 ORDER BY period_end DESC, id DESC LIMIT 1",
+                params![account_id, (start - chrono::Duration::days(3)).to_string(), (start + chrono::Duration::days(1)).to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(c, f)| (dec(&c), f)))
     }
 
     /// The layout of the account's last approved statement ending on or before `end` (any, without a period).
@@ -2568,6 +2620,56 @@ mod tests {
         assert_eq!(rep.held, 0, "and imports by itself");
         let d = db.documents_all(&[]).unwrap().into_iter().find(|d| d.id == rep.document_ids[0]).unwrap();
         assert_eq!(d.account_id, acct.id, "into the same account");
+    }
+
+    /// Each statement has to start where the account's previous one ended: one that doesn't is held (a statement
+    /// or rows may be missing), and one that prints no opening balance is proven from the previous closing.
+    #[test]
+    fn statements_follow_on_from_the_previous_closing() {
+        use crate::demo::{render, Bank, DemoTx, StatementSpec};
+        let db = Db::open_in_memory().unwrap();
+        let ent = db.create_entity("Personal", EntityKind::Personal, Currency::KYD).unwrap();
+        let d = |m: u32, day: u32| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        let dec = |s: &str| Decimal::from_str(s).unwrap();
+        let month = |m: u32, opening: &str| {
+            let txs = vec![DemoTx::new(d(m, 20), "POS PURCHASE", dec("-62.10")).memo("KIRK HOME CENTRE"), DemoTx::new(d(m + 1, 2), "ELECTRONIC CREDIT", dec("500.00")).memo("SALARY")];
+            StatementSpec::new(Bank::Scotiabank, AccountType::Checking, Currency::KYD, "2045", dec(opening), (d(m, 16), d(m + 1, 15)), txs)
+        };
+        let import = |i: usize, toks: Vec<crate::parser::Token>| {
+            let scan = crate::parser::MultiPassScanner::new(&db.profiles().unwrap()).scan_tokens(toks).unwrap();
+            let rep = db.import_auto(ent, &format!("m{i}.pdf"), &format!("c{i}"), &scan).unwrap();
+            let doc = db.documents_all(&[]).unwrap().into_iter().find(|x| x.id == rep.document_ids[0]).unwrap();
+            let notes = db.document_report(doc.id).unwrap().0.pass3.layout_notes;
+            (doc, notes)
+        };
+        // 1,000.00 → 1,437.90 → 1,875.80: each one follows on
+        assert!(import(1, render(&[month(1, "1000.00")])).0.review.is_empty());
+        assert!(import(2, render(&[month(2, "1437.90")])).0.review.is_empty());
+        // March opens 50.00 above February's close
+        let (doc, notes) = import(3, render(&[month(3, "1925.80")]));
+        assert_eq!(doc.review, vec![Review::Continuity]);
+        assert!(notes.iter().any(|n| n.contains("may be missing")), "{notes:?}");
+
+        // April prints no opening balance (nor totals) anywhere: its first row is proven from March's closing
+        let db2 = Db::open_in_memory().unwrap();
+        let ent2 = db2.create_entity("Personal", EntityKind::Personal, Currency::KYD).unwrap();
+        let toks = |spec: StatementSpec| render(&[spec]);
+        let without_opening = |toks: Vec<crate::parser::Token>| -> Vec<crate::parser::Token> {
+            // the opening line, and the debit/credit totals (which would prove the rows without it)
+            let ys: Vec<(u32, f64)> = toks.iter().filter(|t| ["opening", "previous", "withdrawals", "deposits"].contains(&t.text.to_lowercase().as_str())).map(|t| (t.page, t.y0)).collect();
+            toks.into_iter().filter(|t| !ys.contains(&(t.page, t.y0))).collect()
+        };
+        let read = |db: &Db, toks: Vec<crate::parser::Token>, i: usize| {
+            let scan = crate::parser::MultiPassScanner::new(&db.profiles().unwrap()).scan_tokens(toks).unwrap();
+            let rep = db.import_auto(ent2, &format!("n{i}.pdf"), &format!("n{i}"), &scan).unwrap();
+            (scan, db.documents_all(&[]).unwrap().into_iter().find(|x| x.id == rep.document_ids[0]).unwrap())
+        };
+        let (_, march) = read(&db2, toks(month(3, "1875.80")), 3);
+        assert!(march.review.is_empty());
+        let (scan, april) = read(&db2, without_opening(toks(month(4, "2313.70"))), 4);
+        assert_ne!(scan.sections[0].reconciliation, Reconciliation::Reconciled, "on its own, April's first row is unproven");
+        assert_eq!(april.reconciliation, Reconciliation::Reconciled, "from March's closing it adds up");
+        assert!(april.review.is_empty(), "{:?}", april.review);
     }
 
     #[test]

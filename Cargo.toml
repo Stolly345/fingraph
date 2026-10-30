@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/fingraph-core", "crates/fingraph"]
 
 [workspace.package]
-version = "0.2.9"
+version = "0.2.10"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"

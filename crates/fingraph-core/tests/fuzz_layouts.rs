@@ -88,6 +88,10 @@ struct Layout {
     watermark: bool,
     margin: bool,
     relisting: bool,
+    /// A card that prints no "credit limit"/"minimum payment": only its fees and payments tell it's a card.
+    card_unmarked: bool,
+    /// Two dates on each line, the transaction's and the posting one; Some(true) prints the posting date first.
+    two_dates: Option<bool>,
     per_page: usize,
 }
 
@@ -108,6 +112,9 @@ impl Layout {
             (self.margin, "margin"),
             (self.relisting, "relisting"),
             (!self.opening_row && !self.summary_box, "no_opening_printed"),
+            (self.card_unmarked, "card_unmarked"),
+            (self.two_dates == Some(false), "two_dates"),
+            (self.two_dates == Some(true), "two_dates_posting_first"),
         ] {
             if on {
                 v.push(name.into());
@@ -119,6 +126,8 @@ impl Layout {
 
 struct Tx {
     date: NaiveDate,
+    /// When it posted (the ledger date): the same day or a few days after.
+    posted: NaiveDate,
     desc: String,
     memo: String,
     /// Ledger sign: negative = money out of the holder's pocket (a card charge too).
@@ -245,6 +254,8 @@ fn generate(seed: u64) -> Statement {
         watermark: r.chance(15),
         margin: r.chance(15),
         relisting: r.chance(10),
+        card_unmarked: cols == Cols::CardAmount && r.chance(20),
+        two_dates: if r.chance(20) { Some(r.chance(50)) } else { None },
         per_page: 12 + r.below(20),
     };
     let l = &layout;
@@ -262,9 +273,17 @@ fn generate(seed: u64) -> Statement {
             let deposit = if card { r.chance(10) } else { r.chance(25) };
             let amt = if deposit { r.cents(50, 3000) } else { -r.cents(2, 900) };
             let desc = if deposit { if card { "PAYMENT RECEIVED".to_string() } else { format!("DEPOSIT REF {}", 1000 + i) } } else { MERCHANTS[r.below(MERCHANTS.len())].to_string() };
-            Tx { date: start + Duration::days(*d), desc, memo: format!("REF {} AUTH {}", 400_000 + r.below(99_999), r.below(9_999)), amount: amt }
+            let date = start + Duration::days(*d);
+            Tx { date, posted: (date + Duration::days(r.below(4) as i64)).min(end), desc, memo: format!("REF {} AUTH {}", 400_000 + r.below(99_999), r.below(9_999)), amount: amt }
         })
         .collect();
+    // fees: a card's raise what's owed, a bank account's lower its balance; either way money out
+    for t in txs.iter_mut() {
+        if r.chance(12) {
+            t.desc = if card { ["ANNUAL FEE", "LATE PAYMENT FEE", "FINANCE CHARGE"][r.below(3)] } else { ["MONTHLY SERVICE FEE", "SERVICE CHARGE", "ATM FEE"][r.below(3)] }.into();
+            t.amount = -r.cents(2, 60);
+        }
+    }
     let opening = if card { r.cents(0, 2000) } else { r.cents(1000, 20_000) };
     // statement terms: a card's balance is what's owed (a charge raises it)
     let stmt = |t: &Tx| if card { -t.amount } else { t.amount };
@@ -275,7 +294,10 @@ fn generate(seed: u64) -> Statement {
         bals.push(bal);
     }
     let closing = bal;
-    let truth: Vec<(NaiveDate, Decimal)> = txs.iter().map(|t| (t.date, t.amount)).collect();
+    let two = layout.two_dates;
+    let truth: Vec<(NaiveDate, Decimal)> = txs.iter().map(|t| (if two.is_some() { t.posted } else { t.date }, t.amount)).collect();
+    // with two dates the description moves right to make room
+    let desc_x = if two.is_some() { 175.0 } else { 120.0 };
 
     let mut sh = Sheet { page: 1, y: 40.0, tokens: Vec::new() };
     let bank = ["Meadowlark Savings Bank", "Coral Reef Trust Ltd.", "First Harbour Bank", "Union Pacific Credit Union"][r.below(4)];
@@ -293,7 +315,7 @@ fn generate(seed: u64) -> Statement {
     sh.put(40.0, &format!("Account Number: ****{}", 1000 + r.below(8999)));
     sh.y += LINE * 1.5;
     // card statements always say so (credit limit, minimum payment): it's how a charge's sign is known
-    if card {
+    if card && !l.card_unmarked {
         sh.put(40.0, ["Credit Limit:", "Minimum Payment Due:", "Visa Credit Card"][r.below(3)]);
         sh.right(260.0, &money(r.cents(500, 9000), l, false));
         sh.y += LINE * 1.5;
@@ -330,8 +352,22 @@ fn generate(seed: u64) -> Statement {
         if heads == Heads::None {
             return;
         }
-        sh.put(40.0, h_date);
-        sh.put(120.0, h_desc);
+        match two {
+            Some(posting_first) => {
+                let (t, p) = match heads {
+                    Heads::English => ("Trans Date", "Post Date"),
+                    Heads::Unusual => ("Txn", "Booked"),
+                    Heads::French => ("Date opér.", "Date valeur"),
+                    Heads::Spanish => ("F. operación", "F. valor"),
+                    Heads::None => ("", ""),
+                };
+                let (a, b) = if posting_first { (p, t) } else { (t, p) };
+                sh.put(40.0, a);
+                sh.put(105.0, b);
+            }
+            None => sh.put(40.0, h_date),
+        }
+        sh.put(desc_x, h_desc);
         for (x, h) in &money_heads {
             sh.right(*x, h);
         }
@@ -395,18 +431,25 @@ fn generate(seed: u64) -> Statement {
             }
         };
         margin(&mut sh, &mut r);
-        sh.put(40.0, &fmt_date(t.date, date, false));
-        sh.put(120.0, &t.desc);
+        match two {
+            Some(posting_first) => {
+                let (a, b) = if posting_first { (t.posted, t.date) } else { (t.date, t.posted) };
+                sh.put(40.0, &fmt_date(a, date, false));
+                sh.put(105.0, &fmt_date(b, date, false));
+            }
+            None => sh.put(40.0, &fmt_date(t.date, date, false)),
+        }
+        sh.put(desc_x, &t.desc);
         match l.wrap {
             Some(false) => {
                 sh.y += LINE;
-                sh.put(120.0, &t.memo);
+                sh.put(desc_x, &t.memo);
                 amounts(&mut sh);
             }
             Some(true) => {
                 amounts(&mut sh);
                 sh.y += LINE;
-                sh.put(120.0, &t.memo);
+                sh.put(desc_x, &t.memo);
             }
             None => amounts(&mut sh),
         }
@@ -457,7 +500,8 @@ fn judge(s: &Statement) -> (Outcome, String) {
     got.sort();
     want.sort();
     let right = got == want;
-    let proven = r.is_reconciled();
+    // proven = it would go through with nothing to look at: reconciled and no notes
+    let proven = r.is_reconciled() && r.diagnostics.pass3.layout_notes.is_empty();
     let outcome = match (right, proven) {
         (true, true) => Outcome::Exact,
         (true, false) => Outcome::RightHeld,
@@ -501,10 +545,16 @@ fn generated_statements() {
     // per feature: (statements with it, of those not read exactly)
     let mut by_feature: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut bad = Vec::new();
+    // statements that can be proven at all (a card that doesn't say it's a card can't: it's held by design)
+    let (mut provable, mut provable_exact) = (0usize, 0usize);
     for k in 0..n {
         let s = generate(seed * 1_000_003 + k);
         let (o, why) = judge(&s);
         *tally.entry(o).or_default() += 1;
+        if !s.layout.card_unmarked {
+            provable += 1;
+            provable_exact += (o == Outcome::Exact) as usize;
+        }
         for f in s.layout.features() {
             let e = by_feature.entry(f).or_default();
             e.0 += 1;
@@ -526,9 +576,10 @@ fn generated_statements() {
         println!("  {f:<24} {miss:>4}/{all:<4} {:>5.1}%", 100.0 * miss as f64 / all as f64);
     }
     assert!(bad.is_empty(), "wrong rows marked Reconciled:\n{}", bad.join("\n"));
-    // the default set (seed 1, 400 statements) read 96.8% exactly when the engine was finished (2026-10-30): a
-    // change that loses more than a couple of points shows here
+    // of the provable ones in the default set (seed 1, 400 statements), 96.6% read exactly when the engine was
+    // finished (2026-10-30): a change that loses more than a couple of points shows here
+    println!("provable: {provable_exact}/{provable} read exactly");
     if n == 400 && seed == 1 {
-        assert!(exact * 1000 >= 940 * n as usize, "exact reads fell to {exact}/{n}");
+        assert!(provable_exact * 1000 >= 940 * provable, "exact reads of provable statements fell to {provable_exact}/{provable}");
     }
 }

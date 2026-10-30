@@ -22,7 +22,7 @@ never a real ledger.*
 ```sh
 sudo apt install poppler-utils tesseract-ocr libgtk-4-dev libadwaita-1-dev
 cargo deb -p fingraph
-sudo apt install ./target/debian/fingraph_0.2.9-1_amd64.deb
+sudo apt install ./target/debian/fingraph_0.2.10-1_amd64.deb
 ```
 
 Or run it from source with `cargo run -p fingraph --release`.

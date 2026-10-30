@@ -181,6 +181,9 @@ fn leftover_text(text: &str) -> String {
 fn recover(s: &mut Section, li: usize, stmt: Decimal) {
     let mut line = s.report.skipped.remove(li);
     let at = (line.page, line.y);
+    if line.reason == DERIVED {
+        s.report.derived.push(at);
+    }
     // its balance was a balance-only point; now it's this transaction's
     s.checkpoints.retain(|c| (c.0, c.1) != at);
     let idx = s.transactions.iter().position(|t| before(at, key(t))).unwrap_or(s.transactions.len());

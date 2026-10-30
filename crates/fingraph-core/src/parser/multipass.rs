@@ -25,11 +25,13 @@ impl<'a> MultiPassScanner<'a> {
 
     pub fn scan_pdf(&self, path: &Path) -> Result<ScanResult> {
         let (tokens, ocr) = super::page_tokens(path)?;
+        let decimals = money::infer_decimals(tokens.iter().map(|t| t.text.as_str()));
         let mut r = self.scan_tokens(tokens)?;
         if !ocr {
             return Ok(r);
         }
         r.diagnostics.pass1.ocr = true;
+        money::with_decimals(decimals, || reread_scanned_amounts(path, &mut r));
         // never fully trusted: OCR can misread a name even when every balance checks out
         for s in &mut r.sections {
             s.confidence = s.confidence.min(0.9);
@@ -95,6 +97,14 @@ impl<'a> MultiPassScanner<'a> {
         let mut sections = pass3(&meta, rows, &layout, &mut diag);
         for s in &mut sections {
             // newest first: the balances run backwards down the page, so read the page bottom-up
+            if transaction_and_posting_swapped(s) {
+                for t in &mut s.transactions {
+                    if let Some(e) = t.effective {
+                        (t.posted, t.effective) = (e, Some(t.posted));
+                    }
+                }
+                diag.pass3.date_columns_swapped = true;
+            }
             let flipped = newest_first(s);
             if flipped {
                 mirror(s);
@@ -111,6 +121,53 @@ impl<'a> MultiPassScanner<'a> {
         diag.observed = observe(&meta, rows, &sections, &diag);
         Some(ScanResult { profile_slug: meta.profile.map(|p| p.slug.clone()), period: meta.ctx.period, sections, diagnostics: diag })
     }
+}
+
+static FEE_WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:fees?|service\s+charges?|finance\s+charges?|overdraft\s+charges?)\b").unwrap());
+static PAID_WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bpayment\s*(?:-\s*)?(?:received|thank\s*you)|\bthank\s+you\s+for\s+(?:your\s+)?payment|\bautopay\s+payment").unwrap());
+static PAY_WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:salary|payroll|direct\s+deposit)\b").unwrap());
+
+/// Whether the transactions' own wording agrees with the account type the statement was read as. On a card
+/// a fee raises the balance and a "payment received" lowers it; on a bank account it's the other way round,
+/// and salary raises it. Reading a card as a bank account flips every sign and still adds up, so this is the
+/// only check that can see it: two or more lines that clearly disagree hold the statement (the type isn't
+/// changed — a person looks).
+fn polarity_note(s: &Section) -> Option<String> {
+    let (mut card, mut bank) = (0, 0);
+    for t in &s.transactions {
+        let text = format!("{} {}", t.description, t.memo);
+        let up = t.stmt_amount > Decimal::ZERO;
+        if FEE_WORDS.is_match(&text) {
+            if up { card += 1 } else { bank += 1 }
+        } else if PAID_WORDS.is_match(&text) {
+            if up { bank += 1 } else { card += 1 }
+        } else if PAY_WORDS.is_match(&text) && up {
+            bank += 1;
+        }
+    }
+    let liability = s.account_type.is_liability();
+    let (against, with) = if liability { (bank, card) } else { (card, bank) };
+    (against >= 2 && against > 2 * with).then(|| {
+        let (was, looks) = (s.account_type.label(), if liability { "a bank account" } else { "a credit card" });
+        format!("Read as {was}, but {against} of its lines (fees, payments, salary) move the balance the way {looks}'s would: if it is one, every amount's sign is the wrong way round")
+    })
+}
+
+/// Two dates on a line: the transaction's and the day it posted, which is never earlier. When most lines
+/// have the "posting" date before the "transaction" date, the two columns were taken the wrong way round
+/// (headings unknown, or misleading): the ledger date is the later one.
+fn transaction_and_posting_swapped(s: &Section) -> bool {
+    let (mut fine, mut wrong) = (0, 0);
+    for t in &s.transactions {
+        if let Some(e) = t.effective {
+            let days = (t.posted - e).num_days();
+            // within a few weeks either way (a December/January pair can look a year apart otherwise)
+            if days.abs() <= 40 {
+                if days >= 0 { fine += 1 } else { wrong += 1 }
+            }
+        }
+    }
+    wrong >= 2 && wrong > 3 * fine
 }
 
 /// A section listed newest first: its dates go down the page far more often than up.
@@ -151,6 +208,57 @@ fn mirror_positions(s: &mut Section) {
     }
     for l in &mut s.report.skipped {
         flip(&mut l.page, &mut l.y);
+    }
+    for d in &mut s.report.derived {
+        flip(&mut d.0, &mut d.1);
+    }
+}
+
+/// A scanned statement's doubtful amounts, read again one cell at a time (`reread_cell`): an amount worked out
+/// from the balances is confirmed when its cell reads as exactly that; a gap the balances couldn't fill is
+/// filled when an unreadable dated line's cell now reads as an amount and the statement then adds up.
+fn reread_scanned_amounts(path: &Path, r: &mut ScanResult) {
+    // the amount columns of each page (not the balance: it's printed on the same line)
+    let zones: Vec<(u32, f64, f64)> = r
+        .diagnostics
+        .pages
+        .iter()
+        .filter_map(|pg| {
+            let bands: Vec<&ColumnBand> = pg.columns.iter().filter(|b| b.role.is_money() && b.role != ColumnRole::Balance).collect();
+            Some((pg.page, bands.iter().map(|b| b.x0).reduce(f64::min)? - 4.0, bands.iter().map(|b| b.x1).reduce(f64::max)? + 4.0))
+        })
+        .collect();
+    // the line's own height, about: a taller crop catches the next line's amount
+    let cell = |page: u32, y: f64| zones.iter().find(|z| z.0 == page).map(|z| super::reread_cell(path, page, z.1, y - 5.5, z.2, y + 5.5)).unwrap_or_default();
+    for s in &mut r.sections {
+        let confirmed: Vec<(u32, f64)> = s
+            .report
+            .derived
+            .iter()
+            .copied()
+            .filter(|&(pg, y)| s.transactions.iter().find(|t| t.page == pg && t.y == y).is_some_and(|t| super::cell_shows_digits(&cell(pg, y), t.stmt_amount)))
+            .collect();
+        for &(pg, _) in &confirmed {
+            s.report.recovered.push(format!("p{pg}: the worked-out amount was read again from its column and matches"));
+        }
+        s.report.derived.retain(|d| !confirmed.contains(d));
+        if s.reconciliation == Reconciliation::Reconciled {
+            continue;
+        }
+        let mut t = s.clone();
+        let mut changed = false;
+        for l in t.report.skipped.iter_mut().filter(|l| l.date.is_some() && l.amount.is_none()) {
+            if let Some(v) = super::cell_amounts(&cell(l.page, l.y)).into_iter().find(|v| Some(*v) != l.balance.map(|b| b.abs())) {
+                l.amount = Some(v);
+                changed = true;
+            }
+        }
+        if changed {
+            reconcile::verify_and_heal(&mut t);
+            if t.reconciliation == Reconciliation::Reconciled {
+                *s = t;
+            }
+        }
     }
 }
 
@@ -209,6 +317,18 @@ fn layout_notes(meta: &Meta, sections: &[Section], diag: &mut Diagnostics) {
     if meta.ctx.period.is_none() && diag.pass3.yearless_dates > 0 {
         let y = meta.ctx.fallback_year;
         diag.pass3.layout_notes.push(format!("The dates have no year and no statement period was found, so {y} was assumed: check the year"));
+    }
+    for s in sections {
+        if let Some(note) = polarity_note(s) {
+            diag.pass3.layout_notes.push(note);
+        } else if diag.pass1.type_unstated && !s.transactions.is_empty() && s.transactions.iter().all(|t| t.balance.is_none()) {
+            // no running balance and no word on what the account is: a card and a bank account read the same
+            // amounts in opposite directions, and both add up
+            diag.pass3.layout_notes.push(format!(
+                "The statement doesn't say whether it's a card or a bank account, and prints no running balance, so which way its amounts go can't be checked: it was read as {}",
+                s.account_type.label()
+            ));
+        }
     }
     if diag.pass3.debit_and_credit_lines > 0 {
         let n = diag.pass3.debit_and_credit_lines;
@@ -513,6 +633,10 @@ fn detect_currency(page1: &str) -> Currency {
     if usd > kyd { Currency::USD } else { Currency::KYD }
 }
 
+/// Words that state a bank account's kind (cards are told by their own wording in `detect_type`).
+static TYPE_STATED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:chequing|checking|current|savings|share|deposit|loan|business|personal)\s+(?:account|acct|a/c)\b|\baccount\s+type\b|\b(?:compte\s+(?:chèques|courant|d'épargne)|cuenta\s+(?:corriente|de\s+ahorros?))\b").unwrap());
+
 /// CNB prints the account kind as a code: `ACCOUNT #: SV - 1234567`.
 static SAVINGS_CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"account\s*#\s*:?\s*sv\b").unwrap());
 
@@ -596,6 +720,8 @@ fn pass1<'p>(scanner: &MultiPassScanner<'p>, rows: &[Row], diag: &mut Diagnostic
     if layout == LayoutKind::CreditCardDRCR {
         account_type = AccountType::CreditCard;
     }
+    // said in so many words? ("Savings Bank" in a name doesn't say what this account is)
+    diag.pass1.type_unstated = profile.is_none() && account_type != AccountType::CreditCard && !TYPE_STATED.is_match(&page1);
     let currency = detect_currency(&page1);
     let currency_columns: Vec<(Currency, f64)> = rows
         .iter()
@@ -1400,7 +1526,8 @@ fn pass3(meta: &Meta, rows: &[Row], layout: &Layout, diag: &mut Diagnostics) -> 
         let desc = p.desc.trim().to_string();
         let skip = |b: &mut Building, reason: &str| {
             let amount = txn_money.first().or(p.loose.first().map(|l| (ColumnRole::Amount, *l)).as_ref()).map(|(_, pr)| pr.magnitude).or_else(|| (bal.is_none()).then(|| money::find_amount(&text).map(|pr| pr.magnitude)).flatten());
-            let d = date.or(post).or_else(|| dates::parse_first(&text, &meta.ctx));
+            // the posting date when both are printed, like every other row
+            let d = post.or(date).or_else(|| dates::parse_first(&text, &meta.ctx));
             if amount.is_some() || d.is_some() {
                 // a dated line whose amount couldn't be read (`-26` for `.26` by OCR) still says its balance
                 let balance = bal.filter(|_| amount.is_none() && d.is_some());

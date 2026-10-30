@@ -1,7 +1,7 @@
 # FinGraph — PRD / System Reference
 
-**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.9 `.deb`
-**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Updated:** 2026-10-30 for 0.2.9 · **Status:** in daily personal use; not published
+**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.10 `.deb`
+**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Updated:** 2026-10-30 for 0.2.10 · **Status:** in daily personal use; not published
 
 > Single source of truth for what FinGraph is, how it's built, and why it behaves the way it does.
 > It replaces the Python/Flet prototype in `~/Projects/FinGraph` (left untouched; its
@@ -334,6 +334,33 @@ two seeds), and none wrong yet marked Reconciled — the test fails on one, and 
 - A card read as a chequing account flips every sign and still adds up: the arithmetic can't tell, so the account
   type from the letterhead (credit limit, minimum payment…) is what decides. Real card statements always print it.
 
+**0.2.10: four checks from an outside review** (owner pasted another AI's suggestions; agreed with these four,
+declined its multi-sign "subset-sum" solver: using the balances to choose many signs spends the check that
+would prove them, so "Reconciled" would stop meaning anything).
+1. **Continuity** (`Db::previous_closing`, at import): each statement must open where the account's previous
+   approved, reconciled statement (ending within 3 days before it starts) closed. A printed opening that doesn't
+   is held (`Review::Continuity`: a statement or rows may be missing); a statement printing no opening is checked
+   from the previous closing and kept that way only if every row then adds up. All of the owner's 41 statements
+   chain exactly.
+2. **Card or bank account** (`polarity_note`): fees raise a card's balance and lower a bank account's; a
+   "payment received" does the opposite; salary raises a bank account's. Two or more lines that disagree with
+   the type read hold the statement (the type isn't changed). And a statement that doesn't say what account it
+   is (`type_unstated`: no card wording, no "savings account" and the like — "Savings Bank" in a name doesn't
+   count) and prints no running balance is held: a card and a bank account read the same amounts in opposite
+   directions and both add up. The generator now makes cards that don't say so; every one is held.
+3. **Transaction vs posting date** (`transaction_and_posting_swapped`): a transaction never posts before it
+   happened, so when most lines have the "posting" date first the columns were taken the wrong way round and are
+   swapped (the ledger date stays the posting date). Recovered lines use the posting date too (they had used the
+   other one). The generator prints two dates in either order, with and without headings.
+4. **Scanned amounts read again** (`reread_cell`, scans only): an amount worked out from the balances is
+   confirmed when its cell, rendered alone at 400 dpi and OCR'd as one line of digits, shows exactly its digits
+   (`-26` confirms 0.26: OCR loses a faint point, it rarely invents digits); a gap is filled from a re-read cell
+   only with a well-formed amount that the balances then accept. Derived amounts are tracked by position
+   (`SectionReport::derived`); confirmed ones no longer hold the statement. The scanned sample's `.26` is
+   confirmed this way.
+Generator: 90–92% of all, 94–96% of provable statements read exactly (harder set: two-date layouts and
+unmarked cards added), none wrong and passed through — "proven" now also needs no notes.
+
 **Profiles for unknown banks (Approve):** approving a reconciled statement from a bank with no profile makes one
 (`BankProfile::from_statement`): named and fingerprinted by what the letterhead says (`bank_identifiers`: a
 proper name with Bank/Trust/Credit Union…, and the bank's web address — never an email domain or a merchant's
@@ -607,10 +634,10 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 10. Packaging & operations
 
-- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.9-1_amd64.deb` (binary, desktop entry with
+- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.10-1_amd64.deb` (binary, desktop entry with
   PDF "Open With", icon, README; depends on poppler-utils, GTK 4, libadwaita; recommends
   tesseract-ocr for picture-only statements).
-- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.9-1_amd64.deb`. The
+- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.10-1_amd64.deb`. The
   version is bumped for every change to the app: apt skips a same-version `.deb` unless given
   `--reinstall`, and once that made a fix look missing. A docs-only rebuild keeps the version and
   is installed with `--reinstall`.
