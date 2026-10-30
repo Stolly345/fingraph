@@ -597,11 +597,14 @@ pub fn fund_ideas(rows: &[TxRow], ccy: Currency, fx: &Fx, today: NaiveDate) -> V
         by.entry(crate::rules::payer_key(&t.raw_description, &t.memo)).or_default().push(t);
     }
     let idea = |stem: &str, last: &TxRow, cadence: i64| {
-        let every = if cadence >= 300 { 12 } else { 3 };
+        // the cadence in whole months (182 days → 6), stepped by calendar month from the last charge
+        let every = ((cadence * 10_000 + 152_188) / 304_375).max(3) as i32;
         let amount = -crate::insights::value(last, ccy, fx);
-        let mut due = last.posted + chrono::Duration::days(cadence);
+        let mut k = 1;
+        let mut due = day_in(add_months(month_start(last.posted), every), last.posted);
         while due < month_start(today) {
-            due += chrono::Duration::days(cadence);
+            k += 1;
+            due = day_in(add_months(month_start(last.posted), every * k), last.posted);
         }
         let payee = if last.clean_payee.is_empty() { crate::rules::title_case(stem) } else { last.clean_payee.clone() };
         FundIdea { stem: stem.to_string(), payee, amount: amount.round_dp(2), every_months: every, next_due: due }
@@ -938,5 +941,13 @@ mod tests {
         assert!(db.closes("1").unwrap().is_empty());
         let ideas = fund_ideas(&rows, Currency::KYD, &fx, NaiveDate::from_ymd_opt(2026, 10, 27).unwrap());
         println!("{ideas:?}");
+    }
+
+    #[test]
+    fn a_half_yearly_subscription_is_a_six_monthly_fund() {
+        let ymd = |y, m, dd| NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        let rows: Vec<TxRow> = [(1, ymd(2026, 1, 10)), (2, ymd(2026, 7, 11))].into_iter().map(|(id, day)| TxRow { is_subscription: true, ..crate::insights::tests::row(id, day, "NORDVPN", "-60.00", "Subscriptions", "") }).collect();
+        let ideas = fund_ideas(&rows, Currency::KYD, &Fx::default(), ymd(2026, 10, 1));
+        assert_eq!(ideas.iter().map(|f| (f.every_months, f.next_due)).collect::<Vec<_>>(), vec![(6, ymd(2027, 1, 11))]);
     }
 }

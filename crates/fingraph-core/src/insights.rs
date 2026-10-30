@@ -58,23 +58,56 @@ impl Range {
         }
     }
 
-    /// The same-length window just before.
+    /// The period just before, in calendar terms: whole months → the months before (September → August
+    /// 1–31, a year → the year before); year to date → the same dates a year earlier; a month to date → the
+    /// same days of the month before; else the same number of days before.
     pub fn prior(from: NaiveDate, to: NaiveDate) -> (NaiveDate, NaiveDate) {
+        // `d` moved `n` months, a month end staying a month end
+        let shift = |d: NaiveDate, n: i32| {
+            let m = add_months(month_start(d), n);
+            let end = add_months(m, 1) - Duration::days(1);
+            if d + Duration::days(1) == add_months(month_start(d), 1) { end } else { m.with_day(d.day()).unwrap_or(end) }
+        };
+        if from.day() == 1 && to >= from {
+            let whole = to + Duration::days(1) == add_months(month_start(to), 1);
+            let months = (to.year() - from.year()) * 12 + to.month() as i32 - from.month() as i32 + 1;
+            let n = if !whole && from.month() == 1 && to.year() == from.year() { 12 } else { months };
+            return (shift(from, -n), shift(to, -n).min(from - Duration::days(1)));
+        }
         let len = (to - from).num_days() + 1;
         (from - Duration::days(len), from - Duration::days(1))
     }
 }
 
 /// Money in the display currency: exact when it already is, the workspace figure (which honours
-/// statement FX lines) when that matches, else the configured rate.
+/// statement FX lines) when that matches, else the rate on the day it was posted. Nothing (zero) while
+/// no rate is known for its currency: see [`missing_rates`]. An unknown currency is never counted 1:1.
 pub fn value(t: &TxRow, display: Currency, fx: &Fx) -> Decimal {
     if t.currency == display {
         t.amount
     } else if t.entity_currency == display {
         t.amount_entity
     } else {
-        fx.convert(t.amount, t.currency, display)
+        known(fx, t.amount, t.currency, display, t.posted).or_else(|| known(fx, t.amount_entity, t.entity_currency, display, t.posted)).unwrap_or_default()
     }
+}
+
+/// `v` converted at `day`'s rate, if rates for both currencies are known.
+pub fn known(fx: &Fx, v: Decimal, from: Currency, to: Currency, day: NaiveDate) -> Option<Decimal> {
+    (from == to || (fx.knows(from) && fx.knows(to))).then(|| fx.convert_on(v, from, to, Some(day)))
+}
+
+/// The currencies in `rows` that can't be shown in `display` yet (no rate downloaded): their amounts are
+/// left out of totals, so say so next to them.
+pub fn missing_rates(rows: &[TxRow], display: Currency, fx: &Fx) -> Vec<Currency> {
+    let mut out: Vec<Currency> = rows
+        .iter()
+        .filter(|t| t.currency != display && t.entity_currency != display && !(fx.knows(t.currency) && fx.knows(display)) && !(fx.knows(t.entity_currency) && fx.knows(display)))
+        .map(|t| t.currency)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn counts(t: &TxRow) -> bool {
@@ -116,7 +149,8 @@ pub fn flows(rows: &[TxRow], from: NaiveDate, to: NaiveDate, ccy: Currency, fx: 
     let (mut inc, mut exp) = (Decimal::ZERO, Decimal::ZERO);
     for t in rows.iter().filter(|t| in_range(t, from, to) && counts(t)) {
         let v = value(t, ccy, fx);
-        if v.is_sign_positive() { inc += v } else { exp += -v }
+        // money back filed under a spending category is a refund: less spent, not income
+        if v.is_sign_positive() && t.category_kind != Some(CategoryKind::Expense) { inc += v } else { exp -= v }
     }
     (inc, exp)
 }
@@ -129,6 +163,7 @@ pub fn kpis(rows: &[TxRow], docs: &[DocumentRow], from: NaiveDate, to: NaiveDate
     let net_prior = pi - pe;
     let subs = subscriptions(rows, ccy, fx, today);
     let subs_monthly: Decimal = subs.iter().filter(|s| s.active).map(|s| s.monthly).sum();
+    let subs_annual: Decimal = subs.iter().filter(|s| s.active).map(|s| s.annual).sum();
     Kpis {
         income,
         expenses,
@@ -138,7 +173,7 @@ pub fn kpis(rows: &[TxRow], docs: &[DocumentRow], from: NaiveDate, to: NaiveDate
         net_delta_pct: pct(net, net_prior).filter(|_| crate::workflows::prior_covered(docs, (from, to), (pf, pt))),
         savings_rate_pct: (!income.is_zero()).then(|| (net / income * Decimal::ONE_HUNDRED).to_f64().unwrap_or(0.0)),
         subs_monthly: round2(subs_monthly),
-        subs_annual: round2(subs_monthly * Decimal::from(12)),
+        subs_annual: round2(subs_annual),
         statements: docs.len(),
         reconciled: docs.iter().filter(|d| d.reconciliation == Reconciliation::Reconciled).count(),
         uncategorized: rows.iter().filter(|t| t.category_id.is_none() && t.transfer_peer.is_none()).count(),
@@ -176,11 +211,12 @@ pub fn by_category(rows: &[TxRow], from: NaiveDate, to: NaiveDate, ccy: Currency
     let mut m: BTreeMap<String, Decimal> = BTreeMap::new();
     for t in rows.iter().filter(|t| in_range(t, from, to) && counts(t)) {
         let v = value(t, ccy, fx);
-        if v.is_sign_negative() && t.category_kind != Some(CategoryKind::Income) {
-            *m.entry(top_category(t, parents)).or_default() += -v;
+        // a refund in a spending category takes back what it was spent on
+        if (v.is_sign_negative() && t.category_kind != Some(CategoryKind::Income)) || (v.is_sign_positive() && t.category_kind == Some(CategoryKind::Expense)) {
+            *m.entry(top_category(t, parents)).or_default() -= v;
         }
     }
-    let mut v: Vec<_> = m.into_iter().collect();
+    let mut v: Vec<_> = m.into_iter().filter(|x| x.1 > Decimal::ZERO).collect();
     v.sort_by_key(|x| std::cmp::Reverse(x.1));
     v
 }
@@ -284,7 +320,9 @@ pub fn balances(rows: &[TxRow], docs: &[DocumentRow], ccy: Currency, fx: &Fx) ->
         if let Some(b) = t.balance {
             let s = by.entry(t.account_id).or_insert_with(|| BalanceSeries { account: t.account_name.clone(), bank: t.bank_short.clone(), points: Vec::new() });
             let b = if t.account_type.is_liability() { -b } else { b };
-            s.points.push((t.posted, fx.convert(b, t.currency, ccy)));
+            if let Some(v) = known(fx, b, t.currency, ccy, t.posted) {
+                s.points.push((t.posted, v));
+            }
         }
     }
     for d in docs {
@@ -292,7 +330,9 @@ pub fn balances(rows: &[TxRow], docs: &[DocumentRow], ccy: Currency, fx: &Fx) ->
             let s = by.entry(d.account_id).or_insert_with(|| BalanceSeries { account: d.account_name.clone(), bank: d.bank_short.clone(), points: Vec::new() });
             if !s.points.iter().any(|p| p.0 == end) {
                 let c = if liab.get(&d.account_id).copied().unwrap_or(false) { -c } else { c };
-                s.points.push((end, fx.convert(c, acc_ccy.get(&d.account_id).copied().unwrap_or(d.currency), ccy)));
+                if let Some(v) = known(fx, c, acc_ccy.get(&d.account_id).copied().unwrap_or(d.currency), ccy, end) {
+                    s.points.push((end, v));
+                }
             }
         }
     }
@@ -314,8 +354,14 @@ pub fn balances(rows: &[TxRow], docs: &[DocumentRow], ccy: Currency, fx: &Fx) ->
 
 /// Each account's latest verified balance in its own currency (cards and loans negative: what you
 /// owe) and the date it was printed: a running balance or a statement's closing balance.
+/// Accounts with a row of their own in `rows`, not only a charge flagged to this workspace's business from
+/// another workspace's account: a borrowed row doesn't bring its whole account (balance, forecast) along.
+pub fn own_accounts(rows: &[TxRow]) -> BTreeMap<i64, &TxRow> {
+    rows.iter().filter(|t| t.business_entity_id.is_none_or(|b| b == t.account_entity_id)).map(|t| (t.account_id, t)).collect()
+}
+
 pub fn latest_balances(rows: &[TxRow], docs: &[DocumentRow]) -> BTreeMap<i64, (NaiveDate, Decimal)> {
-    let liab: BTreeMap<i64, bool> = rows.iter().map(|t| (t.account_id, t.account_type.is_liability())).collect();
+    let liab: BTreeMap<i64, bool> = own_accounts(rows).into_iter().map(|(a, t)| (a, t.account_type.is_liability())).collect();
     let mut out: BTreeMap<i64, (NaiveDate, Decimal)> = BTreeMap::new();
     let mut put = |acct: i64, d: NaiveDate, b: Decimal| {
         let b = if liab.get(&acct).copied().unwrap_or(false) { -b } else { b };
@@ -323,7 +369,7 @@ pub fn latest_balances(rows: &[TxRow], docs: &[DocumentRow]) -> BTreeMap<i64, (N
             out.insert(acct, (d, b));
         }
     };
-    let mut with_balance: Vec<&TxRow> = rows.iter().filter(|t| t.balance.is_some()).collect();
+    let mut with_balance: Vec<&TxRow> = rows.iter().filter(|t| t.balance.is_some() && liab.contains_key(&t.account_id)).collect();
     with_balance.sort_by_key(|t| (t.posted, t.id));
     for t in with_balance {
         put(t.account_id, t.posted, t.balance.unwrap_or_default());
@@ -429,7 +475,16 @@ pub fn subscriptions(rows: &[TxRow], ccy: Currency, fx: &Fx, today: NaiveDate) -
             let last = v[v.len() - 1];
             let (cad, guessed) = billing_cycle(&stem, &v.iter().map(|t| t.posted).collect::<Vec<_>>());
             let latest_disp = -value(last, ccy, fx);
-            let monthly = round2(latest_disp * Decimal::from(30) / Decimal::from(cad));
+            // charges a year: calendar cycles exactly (a monthly CI$10 is CI$120 a year), others by days
+            let per_year = match cad {
+                7 => Decimal::from(52),
+                14 => Decimal::from(26),
+                30 => Decimal::from(12),
+                91 => Decimal::from(4),
+                365 => Decimal::ONE,
+                _ => Decimal::from(365) / Decimal::from(cad),
+            };
+            let monthly = round2(latest_disp * per_year / Decimal::from(12));
             Subscription {
                 payee: payee(last),
                 account: last.account_name.clone(),
@@ -441,7 +496,7 @@ pub fn subscriptions(rows: &[TxRow], ccy: Currency, fx: &Fx, today: NaiveDate) -
                 last_charged: last.posted,
                 charges: v.len(),
                 monthly,
-                annual: round2(latest_disp * Decimal::from(365) / Decimal::from(cad)),
+                annual: round2(latest_disp * per_year),
                 active: (today - last.posted).num_days() <= 2 * cad + 7,
                 tx_ids: v.iter().map(|t| t.id).collect(),
                 cadence_guessed: guessed,
@@ -596,13 +651,36 @@ impl Default for Tuning {
 }
 
 /// The "What changed?" cards for the window ending `to`.
+/// Split lines put back together as the charges they came from (the first line's details, the whole amount):
+/// a charge split in two is one payment, not two of the same price.
+pub fn whole_charges(rows: &[TxRow]) -> Vec<TxRow> {
+    let mut out: Vec<TxRow> = Vec::with_capacity(rows.len());
+    let mut at: BTreeMap<i64, usize> = BTreeMap::new();
+    for t in rows {
+        match (t.split_seq, at.get(&t.id)) {
+            (Some(_), Some(&i)) => {
+                out[i].amount += t.amount;
+                out[i].amount_entity += t.amount_entity;
+            }
+            _ => {
+                if t.split_seq.is_some() {
+                    at.insert(t.id, out.len());
+                }
+                out.push(TxRow { split_seq: None, ..t.clone() });
+            }
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveDate, ccy: Currency, fx: &Fx, parents: &BTreeMap<i64, String>, tune: &Tuning) -> Vec<Insight> {
     let mut out = Vec::new();
     let money = |d: Decimal| fmt_money(d, ccy);
+    let whole = whole_charges(rows);
 
     // price creep: a subscription got dearer within the last 90 days
-    for s in subscriptions(rows, ccy, fx, to) {
+    for s in subscriptions(&whole, ccy, fx, to) {
         if let Some((old, new, when)) = s.last_rise
             && s.active
             && (to - when).num_days() <= 90
@@ -683,7 +761,7 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
 
     // annual renewals: insurance, licences, registrations, memberships — charged once a year
     let mut yearly: BTreeMap<(i64, String), Vec<&TxRow>> = BTreeMap::new();
-    for t in rows.iter().filter(|t| t.amount.is_sign_negative() && counts(t) && t.posted <= to) {
+    for t in whole.iter().filter(|t| t.amount.is_sign_negative() && counts(t) && t.posted <= to) {
         yearly.entry((t.account_id, merchant_stem(&t.raw_description, &t.memo))).or_default().push(t);
     }
     for v in yearly.values_mut() {
@@ -718,7 +796,7 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
 
     // duplicates: same account, merchant and amount, each within 72 hours of the last. Bank fees
     // repeat by design (one per transfer) and subscriptions by schedule, so neither counts.
-    let mut seen: Vec<(&TxRow, String)> = rows
+    let mut seen: Vec<(&TxRow, String)> = whole
         .iter()
         .filter(|t| in_range(t, from, to) && t.amount.is_sign_negative() && counts(t) && !t.is_subscription)
         .filter(|t| t.category_name.as_deref() != Some("Bank Fees & Interest") && !rules::is_bank_fee(&t.raw_description, &t.memo))
@@ -818,11 +896,11 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::db::{Db, TxFilter};
 
-    fn row(id: i64, day: NaiveDate, raw: &str, amount: &str, cat: &str, tag: &str) -> TxRow {
+    pub(crate) fn row(id: i64, day: NaiveDate, raw: &str, amount: &str, cat: &str, tag: &str) -> TxRow {
         TxRow {
             id,
             document_id: None,
@@ -969,5 +1047,65 @@ mod tests {
         assert!(bal.len() >= 7, "every demo account has a balance: {bal:?}");
         let fees = bank_fees(&rows, Currency::KYD, &fx);
         assert!(fees.iter().any(|f| f.bank == "Scotiabank") && fees.iter().any(|f| f.bank == "Butterfield"));
+    }
+
+    #[test]
+    fn the_prior_period_is_the_calendar_one_before() {
+        let d = |y, m, dd| NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        assert_eq!(Range::prior(d(2026, 9, 1), d(2026, 9, 30)), (d(2026, 8, 1), d(2026, 8, 31)));
+        assert_eq!(Range::prior(d(2026, 3, 1), d(2026, 3, 31)), (d(2026, 2, 1), d(2026, 2, 28)));
+        assert_eq!(Range::prior(d(2026, 2, 1), d(2026, 2, 28)), (d(2026, 1, 1), d(2026, 1, 31)));
+        // a year, year to date, a month to date, and anything else by days
+        assert_eq!(Range::prior(d(2025, 1, 1), d(2025, 12, 31)), (d(2024, 1, 1), d(2024, 12, 31)));
+        assert_eq!(Range::prior(d(2026, 1, 1), d(2026, 10, 30)), (d(2025, 1, 1), d(2025, 10, 30)));
+        assert_eq!(Range::prior(d(2026, 3, 1), d(2026, 3, 30)), (d(2026, 2, 1), d(2026, 2, 28)));
+        assert_eq!(Range::prior(d(2026, 8, 2), d(2026, 10, 30)), (d(2026, 5, 4), d(2026, 8, 1)));
+    }
+
+    #[test]
+    fn a_refund_takes_back_what_was_spent() {
+        let day = NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+        let rows = [row(1, day, "AMAZON", "-300.00", "Shopping", ""), row(2, day + Duration::days(7), "AMAZON", "300.00", "Shopping", ""), row(3, day, "FOSTERS", "-50.00", "Groceries", "")];
+        let (from, to) = (NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(), NaiveDate::from_ymd_opt(2026, 10, 31).unwrap());
+        let fx = Fx::default();
+        assert_eq!(by_category(&rows, from, to, Currency::KYD, &fx, &BTreeMap::new()), vec![("Groceries".to_string(), "50.00".parse().unwrap())]);
+        assert_eq!(flows(&rows, from, to, Currency::KYD, &fx), (Decimal::ZERO, "50.00".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_split_charge_is_not_a_double_charge() {
+        let db = Db::open_in_memory().unwrap();
+        db.load_demo().unwrap();
+        let cats = db.categories().unwrap();
+        let g = cats.iter().find(|c| c.name == "Groceries").unwrap().id;
+        let t = db.transactions(&TxFilter::default()).unwrap().into_iter().find(|t| t.category_id == Some(g) && t.transfer_peer.is_none() && t.amount < "-20".parse().unwrap()).unwrap();
+        let half = (t.amount / Decimal::TWO).round_dp(2);
+        db.set_splits(t.id, &[crate::workflows::SplitLine { amount: half, category_id: Some(g), ..Default::default() }, crate::workflows::SplitLine { amount: t.amount - half, category_id: Some(g), ..Default::default() }]).unwrap();
+        let rows = db.transactions(&TxFilter { split_lines: true, ..Default::default() }).unwrap();
+        let ins = insights(&rows, &db.entities().unwrap(), t.posted, t.posted, Currency::KYD, &db.fx().unwrap(), &BTreeMap::new(), &Tuning::default());
+        assert!(!ins.iter().any(|i| i.kind == InsightKind::Duplicate && i.tx_ids.contains(&t.id)), "{:?}", ins.iter().map(|i| &i.title).collect::<Vec<_>>());
+        assert_eq!(whole_charges(&rows).iter().filter(|r| r.id == t.id).map(|r| r.amount).collect::<Vec<_>>(), vec![t.amount]);
+    }
+
+    #[test]
+    fn a_currency_without_a_rate_is_left_out_and_said() {
+        let jpy = Currency::parse("JPY").unwrap();
+        let mut t = row(1, NaiveDate::from_ymd_opt(2026, 10, 2).unwrap(), "TOKYO HANDS", "-15000", "Shopping", "");
+        (t.currency, t.entity_currency) = (jpy, jpy);
+        let fx = Fx::default();
+        assert_eq!(value(&t, Currency::KYD, &fx), Decimal::ZERO);
+        assert_eq!(missing_rates(&[t.clone()], Currency::KYD, &fx), vec![jpy]);
+        assert!(missing_rates(&[t], jpy, &fx).is_empty());
+    }
+
+    #[test]
+    fn a_monthly_subscription_costs_twelve_a_year() {
+        let d = |m| NaiveDate::from_ymd_opt(2026, m, 5).unwrap();
+        let rows: Vec<TxRow> = (1..=9).map(|m| TxRow { is_subscription: true, ..row(m as i64, d(m), "SPOTIFY", "-10.00", "Subscriptions", "") }).collect();
+        let fx = Fx::default();
+        let s = subscriptions(&rows, Currency::KYD, &fx, d(10));
+        assert_eq!((s[0].monthly, s[0].annual), ("10.00".parse().unwrap(), "120.00".parse().unwrap()));
+        let k = kpis(&rows, &[], d(9), d(10), Currency::KYD, &fx, d(10));
+        assert_eq!((k.subs_monthly, k.subs_annual), (s[0].monthly, s[0].annual));
     }
 }

@@ -11,7 +11,12 @@ use crate::insights::month_start;
 use crate::{AccountType, Currency, Fx};
 
 fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
+    if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
+}
+
+/// Text from a statement or typed in: a leading `=`, `+`, `-` or `@` would run as a formula in a spreadsheet.
+fn csv_text(s: &str) -> String {
+    csv_field(&if s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{s}") } else { s.to_string() })
 }
 
 /// `Date,Account,Payee,Description,Amount,Currency,Amount (workspace),Category,Tag,Memo,FITID`
@@ -19,20 +24,20 @@ pub fn csv(rows: &[TxRow]) -> String {
     let mut out = String::from("Date,Account,Payee,Description,Amount,Currency,Amount (workspace),Workspace currency,Category,Tag,Memo,FITID\n");
     for t in rows {
         let cells = [
-            t.posted.to_string(),
-            t.account_name.clone(),
-            t.clean_payee.clone(),
-            t.raw_description.clone(),
-            t.amount.to_string(),
-            t.currency.code().into(),
-            t.amount_entity.to_string(),
-            t.entity_currency.code().into(),
-            t.category_name.clone().unwrap_or_default(),
-            t.tag.clone(),
-            t.memo.clone(),
-            t.fitid.clone(),
+            csv_field(&t.posted.to_string()),
+            csv_text(&t.account_name),
+            csv_text(&t.clean_payee),
+            csv_text(&t.raw_description),
+            csv_field(&t.amount.to_string()),
+            csv_field(t.currency.code()),
+            csv_field(&t.amount_entity.to_string()),
+            csv_field(t.entity_currency.code()),
+            csv_text(t.category_name.as_deref().unwrap_or_default()),
+            csv_text(&t.tag),
+            csv_text(&t.memo),
+            csv_text(&t.fitid),
         ];
-        out += &cells.iter().map(|c| csv_field(c)).collect::<Vec<_>>().join(",");
+        out += &cells.join(",");
         out.push('\n');
     }
     out
@@ -50,7 +55,8 @@ pub fn qif(rows: &[TxRow]) -> String {
         let _ = write!(out, "!Option:AutoSwitch\n!Account\nN{name}\nT{qty}\n^\n!Clear:AutoSwitch\n!Type:{qty}\n");
         v.sort_by_key(|t| t.posted);
         for t in v {
-            let _ = write!(out, "D{}\nT{}\nP{}\n", t.posted.format("%m/%d/%Y"), t.amount, t.clean_payee);
+            let payee = if t.clean_payee.is_empty() { &t.raw_description } else { &t.clean_payee };
+            let _ = write!(out, "D{}\nT{}\nP{}\n", t.posted.format("%m/%d/%Y"), t.amount, payee.replace('\n', " "));
             if !t.memo.is_empty() {
                 let _ = writeln!(out, "M{}", t.memo.replace('\n', " "));
             }
@@ -67,15 +73,31 @@ fn sgml(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+/// The header says US-ASCII: accents dropped (é → e), typographic marks made plain, anything else `?`.
+fn ascii(s: &str) -> String {
+    const FROM: &str = "ÀÁÂÃÄÅàáâãäåÇçÈÉÊËèéêëÌÍÎÏìíîïÑñÒÓÔÕÖØòóôõöøÙÚÛÜùúûüÝýÿ‘’‚“”„–—•›‹";
+    const TO: &str = "AAAAAAaaaaaaCcEEEEeeeeIIIIiiiiNnOOOOOOooooooUUUUuuuuYyy\u{27}\u{27}\u{27}\"\"\"--*><";
+    s.chars().map(|c| if c.is_ascii() { c } else { FROM.chars().position(|f| f == c).and_then(|i| TO.chars().nth(i)).unwrap_or('?') }).collect()
+}
+
+/// A text element: plain ASCII, cut to `max` characters, then escaped (so an `&amp;` is never cut in half).
+fn sgml_text(s: &str, max: usize) -> String {
+    sgml(&ascii(s).chars().take(max).collect::<String>())
+}
+
+static WORDS: std::sync::LazyLock<[regex::Regex; 4]> = std::sync::LazyLock::new(|| {
+    [r"(?i)\b(fees?|service charge)\b", r"(?i)\binterest\b", r"(?i)\b(atm|abm)\b", r"(?i)\b(cheque|check|chq)\b"].map(|p| regex::Regex::new(p).unwrap())
+});
+
 fn trntype(t: &TxRow) -> &'static str {
-    let up = t.raw_description.to_uppercase();
-    if up.contains("FEE") || up.contains("SERVICE CHARGE") {
+    let d = &t.raw_description;
+    if WORDS[0].is_match(d) {
         "FEE"
-    } else if up.contains("INTEREST") {
+    } else if WORDS[1].is_match(d) {
         if t.amount.is_sign_positive() { "INT" } else { "DEBIT" }
-    } else if up.contains("ATM") || up.contains("ABM") {
+    } else if WORDS[2].is_match(d) {
         "ATM"
-    } else if up.contains("CHEQUE") || up.contains("CHECK") {
+    } else if WORDS[3].is_match(d) {
         "CHECK"
     } else if t.transfer_peer.is_some() {
         "XFER"
@@ -98,7 +120,7 @@ fn ofx_doc(acct: &Account, rows: &[&TxRow], intu_bid: Option<&str>, balance: Opt
     let mut s = String::from("OFXHEADER:100\nDATA:OFXSGML\nVERSION:102\nSECURITY:NONE\nENCODING:USASCII\nCHARSET:1252\nCOMPRESSION:NONE\nOLDFILEUID:NONE\nNEWFILEUID:NONE\n\n");
     let _ = write!(s, "<OFX>\n<SIGNONMSGSRSV1>\n<SONRS>\n<STATUS>\n<CODE>0\n<SEVERITY>INFO\n</STATUS>\n<DTSERVER>{now}\n<LANGUAGE>ENG\n");
     if let Some(bid) = intu_bid {
-        let _ = write!(s, "<FI>\n<ORG>{}\n<FID>{bid}\n</FI>\n<INTU.BID>{bid}\n", sgml(&acct.bank_short));
+        let _ = write!(s, "<FI>\n<ORG>{}\n<FID>{bid}\n</FI>\n<INTU.BID>{bid}\n", sgml_text(&acct.bank_short, 32));
     }
     s += "</SONRS>\n</SIGNONMSGSRSV1>\n";
     let (msgs, trnrs, stmtrs) = if card { ("CREDITCARDMSGSRSV1", "CCSTMTTRNRS", "CCSTMTRS") } else { ("BANKMSGSRSV1", "STMTTRNRS", "STMTRS") };
@@ -111,10 +133,10 @@ fn ofx_doc(acct: &Account, rows: &[&TxRow], intu_bid: Option<&str>, balance: Opt
     }
     let _ = write!(s, "<BANKTRANLIST>\n<DTSTART>{from}\n<DTEND>{to}\n");
     for t in rows {
-        let name: String = sgml(if t.clean_payee.is_empty() { &t.raw_description } else { &t.clean_payee }).chars().take(32).collect();
+        let name = sgml_text(if t.clean_payee.is_empty() { &t.raw_description } else { &t.clean_payee }, 32);
         let _ = write!(s, "<STMTTRN>\n<TRNTYPE>{}\n<DTPOSTED>{}\n<TRNAMT>{}\n<FITID>{}\n<NAME>{name}\n", trntype(t), t.posted.format("%Y%m%d"), t.amount, &t.fitid[..t.fitid.len().min(32)]);
         let memo = if t.memo.is_empty() { t.raw_description.clone() } else { format!("{} {}", t.raw_description, t.memo) };
-        let _ = write!(s, "<MEMO>{}\n</STMTTRN>\n", sgml(&memo).chars().take(255).collect::<String>());
+        let _ = write!(s, "<MEMO>{}\n</STMTTRN>\n", sgml_text(&memo.replace('\n', " "), 255));
     }
     s += "</BANKTRANLIST>\n";
     let (bal, asof) = balance.map(|(b, d)| (b, d.format("%Y%m%d").to_string())).unwrap_or((Decimal::ZERO, to));
@@ -160,7 +182,7 @@ pub fn pnl_csv(rows: &[TxRow], ccy: Currency, fx: &Fx) -> String {
         for (mo, v) in months.iter().zip(&vals) {
             *totals.entry(*mo).or_default() += v;
         }
-        let _ = writeln!(out, "{},{},{}", csv_field(cat), vals.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","), vals.iter().copied().sum::<Decimal>());
+        let _ = writeln!(out, "{},{},{}", csv_text(cat), vals.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","), vals.iter().copied().sum::<Decimal>());
     }
     let tv: Vec<Decimal> = months.iter().map(|m| totals.get(m).copied().unwrap_or_default()).collect();
     let _ = writeln!(out, "Net,{},{}", tv.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","), tv.iter().copied().sum::<Decimal>());
@@ -192,5 +214,23 @@ mod tests {
         assert!(ofx(chq, &rows).contains("<ACCTTYPE>CHECKING"));
         let p = pnl_csv(&rows, Currency::KYD, &db.fx().unwrap());
         assert!(p.lines().last().unwrap().starts_with("Net,"));
+    }
+
+    #[test]
+    fn text_is_cut_before_escaping_and_words_are_whole() {
+        let db = Db::open_in_memory().unwrap();
+        db.load_demo().unwrap();
+        let acct = db.accounts().unwrap().into_iter().find(|a| a.account_type == AccountType::Checking).unwrap();
+        let mut rows: Vec<TxRow> = db.transactions(&TxFilter::default()).unwrap().into_iter().filter(|t| t.account_id == acct.id).take(1).collect();
+        rows[0].clean_payee = "ABCDEFGHIJKLMNOPQRSTUVWXYZABC & Sons".into();
+        rows[0].raw_description = "STARBUCKS COFFEE Café".into();
+        rows[0].transfer_peer = None;
+        let o = ofx(&acct, &rows);
+        assert!(o.contains("<NAME>ABCDEFGHIJKLMNOPQRSTUVWXYZABC &amp; \n"), "{o}");
+        assert!(!o.contains("<TRNTYPE>FEE") && o.contains("STARBUCKS COFFEE Cafe") && o.is_ascii());
+        rows[0].raw_description = "=HYPERLINK(\"x\")".into();
+        let c = csv(&rows);
+        assert!(c.contains(",\"'=HYPERLINK(\"\"x\"\")\","), "{c}");
+        assert!(c.contains(&format!(",{},", rows[0].amount)));
     }
 }
