@@ -308,9 +308,10 @@ fn fill(app: &Rc<App>, i: usize, m: NaiveDate, b: &gtk::Box, redo: crate::Refres
             let r2 = redo.clone();
             btn.connect_clicked(move |_| {
                 if let Some(a) = w.upgrade() {
-                    let _ = a.db.close_month(&sc, m, &sum2);
-                    crate::outlook::remember_forecast(&a);
-                    a.toast(&format!("{} closed", m.format("%B %Y")));
+                    if a.saved(a.db.close_month(&sc, m, &sum2)) {
+                        crate::outlook::remember_forecast(&a);
+                        a.toast(&format!("{} closed", m.format("%B %Y")));
+                    }
                     r2();
                 }
             });
@@ -320,7 +321,7 @@ fn fill(app: &Rc<App>, i: usize, m: NaiveDate, b: &gtk::Box, redo: crate::Refres
                 let (w, sc) = (Rc::downgrade(app), s.scope.clone());
                 reopen.connect_clicked(move |_| {
                     if let Some(a) = w.upgrade() {
-                        let _ = a.db.reopen_month(&sc, m);
+                        a.saved(a.db.reopen_month(&sc, m));
                         redo();
                     }
                 });

@@ -149,7 +149,7 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
                     let (w, ids) = (Rc::downgrade(&a), s.tx_ids.clone());
                     not.connect_clicked(move |_| {
                         if let Some(a) = w.upgrade() {
-                            let _ = a.db.set_subscription(&ids, false);
+                            a.saved(a.db.set_subscription(&ids, false));
                             a.refresh();
                         }
                     });
@@ -215,8 +215,9 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
                         let (w, id) = (Rc::downgrade(&a), rule.id);
                         forget.connect_clicked(move |_| {
                             if let Some(a) = w.upgrade() {
-                                let _ = a.db.delete_rule(id);
-                                a.toast("Rule forgotten");
+                                if a.saved(a.db.delete_rule(id)) {
+                                    a.toast("Rule forgotten");
+                                }
                                 a.refresh();
                             }
                         });
@@ -283,7 +284,7 @@ pub fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
     d.add_responses(&[("cancel", "Cancel"), ("ok", "Save & Apply")]);
     d.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
     let w = Rc::downgrade(app);
-    d.connect_response(None, move |_, r| {
+    d.connect_response(None, move |_, r| crate::shielded(|| {
         let Some(a) = w.upgrade() else { return };
         if r != "ok" || pattern.text().trim().is_empty() {
             return;
@@ -307,14 +308,14 @@ pub fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
             amount_max: fingraph_core::money::parse_user(&amt_max.text()).map(|d| d.abs()),
         };
         if let Some(old) = existing.as_ref().filter(|o| o.id != 0) {
-            let _ = a.db.delete_rule(old.id);
+            a.saved(a.db.delete_rule(old.id));
         }
         match a.db.learn(&rule) {
             Ok(n) => a.toast(&format!("Rule saved · {n} transactions updated")),
             Err(e) => a.toast(&e.to_string()),
         }
         a.refresh();
-    });
+    }));
     d.present(Some(&app.win));
 }
 
@@ -334,7 +335,7 @@ fn category_dialog(app: &Rc<App>) {
     d.add_responses(&[("cancel", "Cancel"), ("ok", "Add")]);
     d.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
     let w = Rc::downgrade(app);
-    d.connect_response(None, move |_, r| {
+    d.connect_response(None, move |_, r| crate::shielded(|| {
         let Some(a) = w.upgrade() else { return };
         let n = name.text().trim().to_string();
         if r != "ok" || n.is_empty() {
@@ -351,6 +352,6 @@ fn category_dialog(app: &Rc<App>) {
             }
             Err(_) => a.toast(&format!("“{n}” already exists there")),
         }
-    });
+    }));
     d.present(Some(&app.win));
 }

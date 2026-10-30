@@ -100,11 +100,11 @@ pub fn confirm(app: &Rc<App>, title: &str, body: &str, verb: &str, then: impl Fn
     d.add_responses(&[("cancel", "Cancel"), ("go", verb)]);
     d.set_response_appearance("go", adw::ResponseAppearance::Destructive);
     let w = Rc::downgrade(app);
-    d.connect_response(None, move |_, r| {
+    d.connect_response(None, move |_, r| crate::shielded(|| {
         if let (Some(a), "go") = (w.upgrade(), r) {
             then(&a);
         }
-    });
+    }));
     d.present(Some(&app.win));
 }
 
@@ -227,7 +227,7 @@ fn money(app: &Rc<App>) -> adw::PreferencesPage {
         |a, p, v| {
             p.statement_fx_wins = v;
             fingraph_core::money::set_style(p.currency_codes, p.brackets, v);
-            let _ = a.db.revalue_all();
+            a.saved(a.db.revalue_all());
         },
     ));
     page.add(&g);
@@ -449,7 +449,7 @@ fn dashboard(app: &Rc<App>) -> adw::PreferencesPage {
             if !r.is_active() {
                 h.push(key.clone());
             }
-            let _ = a.db.set_setting("hidden_insights", &h.join(","));
+            a.saved(a.db.set_setting("hidden_insights", &h.join(",")));
             a.refresh();
         });
         cards.add(&row);
@@ -536,10 +536,11 @@ fn workspaces(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPa
             let (w, id, name) = (Rc::downgrade(app), e.id, name.clone());
             ccy.connect_selected_notify(move |c| {
                 if let Some(a) = w.upgrade() {
-                    let _ = a.db.update_entity(id, name.text().trim(), currency_at(c.selected()));
-                    // a workspace in another currency needs that currency's rates
-                    a.update_rates(false);
-                    a.refresh();
+                    if a.saved(a.db.update_entity(id, name.text().trim(), currency_at(c.selected()))) {
+                        // the header and amounts follow the new currency; it needs that currency's rates
+                        a.reload_entities();
+                        a.update_rates(false);
+                    }
                 }
             });
         }
@@ -658,7 +659,7 @@ fn workspaces(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPa
 fn data(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPage {
     let p = app.db.prefs();
     let page = adw::PreferencesPage::builder().name("data").title("Data").icon_name("drive-harddisk-symbolic").build();
-    let where_ = adw::PreferencesGroup::builder().title("Your Ledger").description("Everything stays on this computer. Nothing is sent anywhere.").build();
+    let where_ = adw::PreferencesGroup::builder().title("Your Ledger").description("Your statements and ledger stay on this computer. The only thing ever sent is a request for exchange rates (currency codes and dates), and only with Download exchange rates on (Money).").build();
     let path = app.db.path().unwrap_or_default();
     let ledger = adw::ActionRow::builder()
         .title(glib::markup_escape_text(&path.display().to_string()))
@@ -804,7 +805,7 @@ fn erase_dialog(app: &Rc<App>, prefs: &adw::PreferencesDialog) {
         typed.connect_changed(move |e| d.set_response_enabled("erase", e.text().trim() == "ERASE"));
     }
     let (w, prefs) = (Rc::downgrade(app), prefs.clone());
-    d.connect_response(None, move |_, r| {
+    d.connect_response(None, move |_, r| crate::shielded(|| {
         let Some(a) = w.upgrade() else { return };
         if r != "erase" {
             return;
@@ -826,7 +827,7 @@ fn erase_dialog(app: &Rc<App>, prefs: &adw::PreferencesDialog) {
             }
             Err(e) => a.toast(&e.to_string()),
         }
-    });
+    }));
     d.present(Some(&app.win));
 }
 

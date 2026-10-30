@@ -34,7 +34,7 @@ pub fn dialog(app: &Rc<App>, tx_id: i64, on_closed: Option<Rc<dyn Fn()>>) {
         let (w, touch) = (Rc::downgrade(app), touch.clone());
         payee.connect_apply(move |e| {
             if let Some(a) = w.upgrade() {
-                let _ = a.db.set_payee(tx_id, e.text().trim());
+                a.saved(a.db.set_payee(tx_id, e.text().trim()));
                 touch();
             }
         });
@@ -55,7 +55,7 @@ pub fn dialog(app: &Rc<App>, tx_id: i64, on_closed: Option<Rc<dyn Fn()>>) {
         category.connect_selected_notify(move |c| {
             if let Some(a) = w.upgrade() {
                 let id = (c.selected() as usize).checked_sub(1).and_then(|i| cats.get(i)).map(|c| c.id);
-                let _ = a.db.set_category(&[tx_id], id);
+                a.saved(a.db.set_category(&[tx_id], id));
                 touch();
             }
         });
@@ -77,7 +77,7 @@ pub fn dialog(app: &Rc<App>, tx_id: i64, on_closed: Option<Rc<dyn Fn()>>) {
         let (w, touch, home) = (Rc::downgrade(app), touch.clone(), t.account_entity_id);
         workspace.connect_selected_notify(move |c| {
             if let (Some(a), Some(e)) = (w.upgrade(), ents.get(c.selected() as usize)) {
-                let _ = a.db.set_business(&[tx_id], (e.id != home).then_some(e.id));
+                a.saved(a.db.set_business(&[tx_id], (e.id != home).then_some(e.id)));
                 touch();
             }
         });
@@ -90,7 +90,7 @@ pub fn dialog(app: &Rc<App>, tx_id: i64, on_closed: Option<Rc<dyn Fn()>>) {
         let (w, touch) = (Rc::downgrade(app), touch.clone());
         tag.connect_apply(move |e| {
             if let Some(a) = w.upgrade() {
-                let _ = a.db.set_tag(&[tx_id], &e.text());
+                a.saved(a.db.set_tag(&[tx_id], &e.text()));
                 touch();
             }
         });
@@ -99,7 +99,7 @@ pub fn dialog(app: &Rc<App>, tx_id: i64, on_closed: Option<Rc<dyn Fn()>>) {
         let (w, touch) = (Rc::downgrade(app), touch.clone());
         memo.connect_apply(move |e| {
             if let Some(a) = w.upgrade() {
-                let _ = a.db.set_memo(tx_id, &e.text());
+                a.saved(a.db.set_memo(tx_id, &e.text()));
                 touch();
             }
         });
@@ -111,7 +111,7 @@ pub fn dialog(app: &Rc<App>, tx_id: i64, on_closed: Option<Rc<dyn Fn()>>) {
         let (w, touch) = (Rc::downgrade(app), touch.clone());
         sub.connect_active_notify(move |s| {
             if let Some(a) = w.upgrade() {
-                let _ = a.db.set_subscription(&[tx_id], s.is_active());
+                a.saved(a.db.set_subscription(&[tx_id], s.is_active()));
                 touch();
             }
         });
@@ -165,7 +165,14 @@ pub fn dialog(app: &Rc<App>, tx_id: i64, on_closed: Option<Rc<dyn Fn()>>) {
             }
         });
     }
+    // typed but not applied (no Enter or ✓) still counts: changes apply as made
+    let typed = [(payee.clone(), t.clean_payee.clone()), (tag.clone(), t.tag.clone()), (memo.clone(), t.memo.clone())];
     dlg.connect_closed(move |_| {
+        for (e, was) in &typed {
+            if e.text() != was.as_str() {
+                e.emit_by_name::<()>("apply", &[]);
+            }
+        }
         if changed.get()
             && let Some(f) = &on_closed
         {

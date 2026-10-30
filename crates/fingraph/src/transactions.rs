@@ -340,8 +340,9 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                         return;
                     }
                     if !cb.is_active() {
-                        let _ = a.db.set_business(&[id], None);
-                        a.toast(&format!("{} is personal again", t.clean_payee));
+                        if a.saved(a.db.set_business(&[id], None)) {
+                            a.toast(&format!("{} is personal again", t.clean_payee));
+                        }
                         return a.refresh();
                     }
                     a.with_business(t.account_entity_id, move |a: &Rc<App>, biz| {
@@ -475,9 +476,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         let busy = Rc::new(std::cell::Cell::new(false));
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
-            if busy.replace(true) {
+            if busy.get() {
                 return;
             }
+            let _busy = crate::Quiet::on(&busy);
             // filter choices (keep the current pick when it still exists)
             let ents = a.entity_ids();
             let accts: Vec<_> = a.db.accounts().unwrap_or_default().into_iter().filter(|x| ents.contains(&x.entity_id) && !x.hidden).collect();
@@ -556,7 +558,6 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let tail = old[head..].iter().rev().zip(rows[head..].iter().rev()).take_while(|(a, b)| a == b).count();
             let objs: Vec<glib::BoxedAnyObject> = rows[head..rows.len() - tail].iter().cloned().map(glib::BoxedAnyObject::new).collect();
             store.splice(head as u32, (old.len() - head - tail) as u32, &objs);
-            busy.set(false);
         })
     };
     {
@@ -568,13 +569,14 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             }
         });
     }
+    // through the app's refresh, which keeps a bug in this page from closing the app
     for dd in [&account_dd, &category_dd] {
-        let r = refresh.clone();
-        dd.connect_selected_notify(move |_| r());
+        let w = Rc::downgrade(app);
+        dd.connect_selected_notify(move |_| w.upgrade().iter().for_each(App::refresh));
     }
     {
-        let r = refresh.clone();
-        search.connect_search_changed(move |_| r());
+        let w = Rc::downgrade(app);
+        search.connect_search_changed(move |_| w.upgrade().iter().for_each(App::refresh));
     }
     {
         let (bar, sel_label, store) = (bar.clone(), sel_label.clone(), store.clone());
@@ -621,12 +623,11 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         bulk_unlink.connect_clicked(move |_| {
             let Some(a) = w.upgrade() else { return };
             let rows = sr();
-            for t in &rows {
-                let _ = a.db.unlink_transfer(t.id);
-            }
+            let ok = rows.iter().all(|t| a.saved(a.db.unlink_transfer(t.id)));
             let ids: Vec<i64> = rows.iter().filter(|t| t.category_name.as_deref() == Some("Transfers")).map(|t| t.id).collect();
-            let _ = a.db.set_category(&ids, None);
-            a.toast(&format!("{} unlinked — they count as spending/income again", rows.len()));
+            if ok && a.saved(a.db.set_category(&ids, None)) {
+                a.toast(&format!("{} unlinked — they count as spending/income again", rows.len()));
+            }
             a.refresh();
         });
     }
@@ -646,12 +647,12 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             d.add_responses(&[("cancel", "Cancel"), ("ok", "Tag")]);
             d.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
             let w = Rc::downgrade(&a);
-            d.connect_response(None, move |_, r| {
+            d.connect_response(None, move |_, r| crate::shielded(|| {
                 if let (Some(a), "ok") = (w.upgrade(), r) {
-                    let _ = a.db.set_tag(&ids, &e.text());
+                    a.saved(a.db.set_tag(&ids, &e.text()));
                     a.refresh();
                 }
-            });
+            }));
             d.present(Some(&a.win));
         });
     }
@@ -717,12 +718,12 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             d.add_responses(&[("cancel", "Cancel"), ("del", "Delete")]);
             d.set_response_appearance("del", adw::ResponseAppearance::Destructive);
             let w = Rc::downgrade(&a);
-            d.connect_response(None, move |_, r| {
+            d.connect_response(None, move |_, r| crate::shielded(|| {
                 if let (Some(a), "del") = (w.upgrade(), r) {
-                    let _ = a.db.delete_transactions(&ids);
+                    a.saved(a.db.delete_transactions(&ids));
                     a.refresh();
                 }
-            });
+            }));
             d.present(Some(&a.win));
         });
     }

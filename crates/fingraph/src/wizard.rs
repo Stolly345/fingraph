@@ -66,7 +66,7 @@ pub fn reset_and_retriage(app: &Rc<App>) {
     d.add_responses(&[("cancel", "Cancel"), ("reset", "Reset & Re-triage")]);
     d.set_response_appearance("reset", adw::ResponseAppearance::Destructive);
     let w = Rc::downgrade(app);
-    d.connect_response(None, move |_, r| {
+    d.connect_response(None, move |_, r| crate::shielded(|| {
         let Some(a) = w.upgrade() else { return };
         if r != "reset" {
             return;
@@ -82,7 +82,7 @@ pub fn reset_and_retriage(app: &Rc<App>) {
             }
             Err(e) => a.toast(&e.to_string()),
         }
-    });
+    }));
     d.present(Some(&app.win));
 }
 
@@ -111,12 +111,12 @@ fn answer(app: &Rc<App>, g: &TriageGroup, category_id: Option<i64>, payee: &str,
     match app.db.learn(&rule) {
         Ok(n) => {
             // the wizard's own group is confirmed even where an older rule had guessed
-            let _ = app.db.set_category(&g.tx_ids, category_id);
+            app.saved(app.db.set_category(&g.tx_ids, category_id));
             if subscription {
-                let _ = app.db.set_subscription(&g.tx_ids, true);
+                app.saved(app.db.set_subscription(&g.tx_ids, true));
             }
             if business.is_some() {
-                let _ = app.db.set_business(&g.tx_ids, business);
+                app.saved(app.db.set_business(&g.tx_ids, business));
             }
             answered.set(answered.get() + 1);
             app.toast(&format!("Learned “{}” · updated {} transaction{}", g.suggested_payee, n.max(g.count), if n.max(g.count) == 1 { "" } else { "s" }));

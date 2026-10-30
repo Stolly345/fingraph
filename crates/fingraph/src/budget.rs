@@ -528,7 +528,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     let mut n = 0;
                     for c in cats.iter().filter(|c| !has.contains(&c.id)) {
                         if let Some(v) = usual.get(&c.name) {
-                            let _ = a.db.set_budget(&sc, c.id, Some((*v, ccy)));
+                            a.saved(a.db.set_budget(&sc, c.id, Some((*v, ccy))));
                             n += 1;
                         }
                     }
@@ -828,7 +828,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                         let (w, id, redraw) = (Rc::downgrade(&a), fd.id, redraw.clone());
                         rm.connect_clicked(move |_| {
                             if let Some(a) = w.upgrade() {
-                                let _ = a.db.delete_fund(id);
+                                a.saved(a.db.delete_fund(id));
                                 redraw();
                             }
                         });
@@ -848,7 +848,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     add.connect_clicked(move |_| {
                         if let Some(a) = w.upgrade() {
                             let fd = Fund { id: 0, name: i.payee.clone(), amount: i.amount.round_dp(0), currency: ccy, every_months: i.every_months, next_due: i.next_due, stem: i.stem.clone() };
-                            let _ = a.db.save_fund(&sc, &fd);
+                            a.saved(a.db.save_fund(&sc, &fd));
                             redraw();
                         }
                     });
@@ -922,7 +922,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     let (w, name, redraw) = (Rc::downgrade(&a), c.name.clone(), redraw.clone());
                     kind.connect_clicked(move |_| {
                         if let Some(a) = w.upgrade() {
-                            let _ = a.db.set_fixed(&name, !is_fixed);
+                            a.saved(a.db.set_fixed(&name, !is_fixed));
                             redraw();
                         }
                     });
@@ -980,7 +980,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                         if v.is_none() && !t.trim().is_empty() {
                             return a.toast("Type an amount, like 600 or 1,250.00");
                         }
-                        let _ = a.db.set_budget(&sc, id, v.map(|v| (v, ccy)));
+                        a.saved(a.db.set_budget(&sc, id, v.map(|v| (v, ccy))));
                         redraw();
                     });
                 }
@@ -990,7 +990,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     let (w, sc, id, redraw) = (Rc::downgrade(&a), s.scope.clone(), c.id, redraw.clone());
                     use_.connect_clicked(move |_| {
                         if let Some(a) = w.upgrade() {
-                            let _ = a.db.set_budget(&sc, id, Some((u, ccy)));
+                            a.saved(a.db.set_budget(&sc, id, Some((u, ccy))));
                             redraw();
                         }
                     });
@@ -1018,7 +1018,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     undo.connect_clicked(move |_| {
                         if let Some(a) = w.upgrade() {
                             for mv in &mine {
-                                let _ = a.db.delete_move(mv.id);
+                                a.saved(a.db.delete_move(mv.id));
                             }
                             redraw();
                         }
@@ -1031,7 +1031,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     let (w, sc, id, redraw, popover) = (Rc::downgrade(&a), s.scope.clone(), c.id, redraw.clone(), popover.clone());
                     roll.connect_toggled(move |cb| {
                         if let Some(a) = w.upgrade() {
-                            let _ = a.db.set_rollover(&sc, id, cb.is_active().then_some(m));
+                            a.saved(a.db.set_rollover(&sc, id, cb.is_active().then_some(m)));
                             popover.popdown();
                             redraw();
                         }
@@ -1093,7 +1093,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                         if let Some(a) = w.upgrade() {
                             let mut v = watches.clone();
                             v.remove(i);
-                            let _ = a.db.save_watchlists(&sc, &v);
+                            a.saved(a.db.save_watchlists(&sc, &v));
                             redraw();
                         }
                     });
@@ -1122,7 +1122,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                         }
                         let mut v = watches.clone();
                         v.push(core::Watch { name: fingraph_core::rules::title_case(&p), pattern: p, limit: l, currency: ccy });
-                        let _ = a.db.save_watchlists(&sc, &v);
+                        a.saved(a.db.save_watchlists(&sc, &v));
                         redraw();
                     };
                     let save = Rc::new(save);
@@ -1222,14 +1222,14 @@ pub(crate) fn move_dialog(app: &Rc<App>, sc: &str, m: NaiveDate, this: i64, into
     dlg.set_response_appearance("move", adw::ResponseAppearance::Suggested);
     dlg.set_default_response(Some("move"));
     let (w, sc, ids) = (Rc::downgrade(app), sc.to_string(), others.iter().map(|n| n.0).collect::<Vec<_>>());
-    dlg.connect_response(Some("move"), move |_, _| {
+    dlg.connect_response(Some("move"), move |_, _| crate::shielded(|| {
         let Some(a) = w.upgrade() else { return };
         let Some(v) = parse_user(&amount.text()).map(|v| v.abs()).filter(|v| !v.is_zero()) else { return a.toast("Type an amount to move") };
         let other = ids[(pick.selected() as usize).min(ids.len() - 1)];
         let (from, to) = if into { (other, this) } else { (this, other) };
-        let _ = a.db.add_move(&sc, m, from, to, v, ccy);
+        a.saved(a.db.add_move(&sc, m, from, to, v, ccy));
         done();
-    });
+    }));
     dlg.present(Some(&app.win));
 }
 
@@ -1253,7 +1253,7 @@ fn fund_dialog(app: &Rc<App>, sc: &str, f: Option<Fund>, ccy: Currency, done: cr
     dlg.add_responses(&[("cancel", "Cancel"), ("save", "Save")]);
     dlg.set_response_appearance("save", adw::ResponseAppearance::Suggested);
     let (w, sc) = (Rc::downgrade(app), sc.to_string());
-    dlg.connect_response(Some("save"), move |_, _| {
+    dlg.connect_response(Some("save"), move |_, _| crate::shielded(|| {
         let Some(a) = w.upgrade() else { return };
         let (Some(v), Some(d)) = (parse_user(&amount.text()), parse_date(&due.text())) else { return a.toast("Type the amount, and the due date like 15 Mar 2027") };
         let mut nf = f.clone();
@@ -1261,9 +1261,9 @@ fn fund_dialog(app: &Rc<App>, sc: &str, f: Option<Fund>, ccy: Currency, done: cr
         nf.amount = v.abs();
         nf.every_months = EVERY[(every.selected() as usize).min(EVERY.len() - 1)].0;
         nf.next_due = d;
-        let _ = a.db.save_fund(&sc, &nf);
+        a.saved(a.db.save_fund(&sc, &nf));
         done();
-    });
+    }));
     dlg.present(Some(&app.win));
 }
 
@@ -1848,19 +1848,19 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
                 return show(step.get() + 1);
             }
             let (p, budgets) = read();
-            let _ = a.db.save_plan(&s.scope, &p);
+            a.saved(a.db.save_plan(&s.scope, &p));
             for (id, v) in budgets {
-                let _ = a.db.set_budget(&s.scope, id, v.map(|v| (v, ccy)));
+                a.saved(a.db.set_budget(&s.scope, id, v.map(|v| (v, ccy))));
             }
             for l in bills.borrow().iter() {
                 match l.amount() {
                     Some(v) => {
                         let f = Fund { id: l.id, name: l.name(), amount: v, currency: l.currency, every_months: l.every(), next_due: l.next_due(), stem: l.stem.clone() };
-                        let _ = a.db.save_fund(&s.scope, &f);
+                        a.saved(a.db.save_fund(&s.scope, &f));
                     }
                     // emptied: you don't have it any more
                     None if l.id != 0 => {
-                        let _ = a.db.delete_fund(l.id);
+                        a.saved(a.db.delete_fund(l.id));
                     }
                     None => {}
                 }

@@ -74,7 +74,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         let w = Rc::downgrade(app);
         dd.connect_selected_notify(move |d| {
             if let Some(a) = w.upgrade() {
-                let _ = a.db.set_setting(key, &d.selected().to_string());
+                a.saved(a.db.set_setting(key, &d.selected().to_string()));
                 a.refresh();
             }
         });
@@ -147,8 +147,15 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         "Spending by Category",
         "Where your spending went in the date range. The ring splits it by category (bigger slice, more spent); the bars beside it rank the same categories. Click a slice to see the merchants inside that category, and click a bar to list its transactions. Transfers between your own accounts aren't spending.",
         cat_box.upcast_ref());
-    let back = gtk::Button::builder().label("All categories").icon_name("go-previous-symbolic").css_classes(["flat"]).halign(gtk::Align::Start).visible(false).build();
+    let back = gtk::Button::builder()
+        .child(&adw::ButtonContent::builder().label("All categories").icon_name("go-previous-symbolic").build())
+        .css_classes(["flat"])
+        .halign(gtk::Align::Start)
+        .visible(false)
+        .build();
     cat_card.append(&back);
+    // the latest refresh's category bars, which Back redraws
+    let breakdown_now: Rc<RefCell<Option<crate::Refresh>>> = Rc::default();
     let (b_card, _) = chart_card(
         "Cumulative Daily Spend Pace (this month vs its usual pace)",
         "How your spending adds up day by day through the month. Orange is this month; the dashed line is an average month; the shaded band runs from your lowest to highest recent month. Orange above the band means you're spending faster than usual, below it slower. It stops at your newest statement's date.",
@@ -181,11 +188,21 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
     // state for drill-down
     let drill: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    {
+        let (drill, now) = (drill.clone(), breakdown_now.clone());
+        back.connect_clicked(move |_| {
+            *drill.borrow_mut() = None;
+            let f = now.borrow().clone();
+            if let Some(f) = f {
+                f();
+            }
+        });
+    }
 
     let refresh: crate::Refresh = {
         let w = Rc::downgrade(app);
         let (monthly, donut, breakdown, burn, pareto, balances, pnl) = (monthly.clone(), donut.clone(), breakdown.clone(), burn.clone(), pareto.clone(), balances.clone(), pnl.clone());
-        let (stack, drill, cat_title, back, review) = (stack.clone(), drill.clone(), cat_title.clone(), back.clone(), review.clone());
+        let (stack, drill, cat_title, back, review, breakdown_now) = (stack.clone(), drill.clone(), cat_title.clone(), back.clone(), review.clone(), breakdown_now.clone());
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
             let ids = a.entity_ids();
@@ -289,7 +306,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     .sum();
                 let wf = (data_end - Duration::days(364)).max(data_start);
                 let (_, spent) = insights::flows(&rows, wf, data_end, ccy, &fx);
-                let monthly = spent * Decimal::from(365) / Decimal::from(12) / Decimal::from((data_end - wf).num_days() + 1);
+                let monthly = spent * Decimal::from(365) / Decimal::from(12) / Decimal::from(((data_end - wf).num_days() + 1).max(1));
                 if monthly.is_zero() || cash.is_sign_negative() {
                     k_run.value.set_label("—");
                     k_run.sub.set_label("Needs account balances and spending");
@@ -301,9 +318,12 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             k_rate.value.set_label(&k.savings_rate_pct.map_or("—".into(), |p| format!("{p:.1}%")));
             k_rate.sub.set_label("(Income − Expenses) ÷ Income, transfers excluded");
             k_subs.value.set_label(&format!("{}/mo", money(k.subs_monthly)));
-            k_subs.sub.set_label(&format!("{} a year across KYD & USD", money(k.subs_annual)));
-            k_rec.value.set_label(&format!("{}/{}", k.reconciled, k.statements));
-            k_rec.sub.set_label(&format!("statements reconciled to the cent · {} uncategorized", k.uncategorized));
+            k_subs.sub.set_label(&format!("{} a year", money(k.subs_annual)));
+            // a statement waiting for review isn't reconciled, and isn't in `docs`
+            let held = a.db.documents_all(&ids).unwrap_or_default().iter().filter(|d| !d.review.is_empty()).count();
+            k_rec.value.set_label(&format!("{}/{}", k.reconciled, k.statements + held));
+            let held = if held > 0 { format!(" · {held} waiting for review") } else { String::new() };
+            k_rec.sub.set_label(&format!("statements reconciled to the cent{held} · {} uncategorized", k.uncategorized));
             // split lines add up to their charge, so they age money the same way
             match fingraph_core::outlook::age_of_money(&all_rows, &docs, ccy, &fx) {
                 Some(x) => {
@@ -418,18 +438,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     a.show_transactions(ids);
                 });
             }
-            {
-                let (drill, sb) = (drill.clone(), show_breakdown.clone());
-                let back2 = back.clone();
-                // one handler: reconnecting on each refresh would stack them
-                if back2.widget_name() != "wired" {
-                    back2.set_widget_name("wired");
-                    back2.connect_clicked(move |_| {
-                        *drill.borrow_mut() = None;
-                        sb();
-                    });
-                }
-            }
+            *breakdown_now.borrow_mut() = Some(show_breakdown.clone());
 
             // burn curve
             let bc = insights::burn_curve(&rows, end, ccy, &fx, prefs.band_months);
