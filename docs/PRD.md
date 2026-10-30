@@ -1,7 +1,7 @@
 # FinGraph — PRD / System Reference
 
-**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.12 `.deb`
-**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Updated:** 2026-10-30 for 0.2.12 · **Status:** in daily personal use; not published
+**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.13 `.deb`
+**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Updated:** 2026-10-30 for 0.2.13 · **Status:** in daily personal use; not published
 
 > Single source of truth for what FinGraph is, how it's built, and why it behaves the way it does.
 > It replaces the Python/Flet prototype in `~/Projects/FinGraph` (left untouched; its
@@ -92,7 +92,7 @@ from a terminal.
 
 ---
 
-## 5. Data model (schema v8)
+## 5. Data model (schema v9)
 
 `entities` (workspaces: Personal / Business / RentalProperty, base currency) · `bank_profiles` ·
 `accounts` (bank, masked number, type, currency, OFX ids, `hidden`) · `fx_rates` (peg 1 KYD = 1.20 USD)
@@ -418,6 +418,36 @@ is linked and renamed from `Bank …`; the bank's other held statements are re-r
 bank makes nothing ("set it up in Bank Profiles → New from Sample"). Fingerprints count triple only in page 1's
 letterhead and footer: a page-1 transfer line saying "Credit Union" had made a statement CICSA's.
 
+### 6.5 Currencies and exchange rates (0.2.13)
+
+Many people in Cayman keep accounts back home. FinGraph knows 65 currencies (`money::CURRENCIES`: code, symbol,
+name — codes that are also English words such as ALL, TOP, CUP, PEN, TRY, GEL, MAD, BOB are left out, or a
+description's "TOP UP 20.00" would read as Tongan pa'anga). `Currency` is an index into that table, stored and
+serialised as the ISO code, so existing ledgers needed no change.
+- **Which currency a statement is in**: page 1's codes and symbols (`GBP`, `£`, `C$`, `J$`, `₱`…). KYD/USD as before;
+  another currency wins when it's named more often than either. A page that names none (only `$`) is read as KYD
+  and noted (held): a bare `$` can't be told apart. Accounts can be set to any currency in Preferences → Workspaces &
+  Accounts (statements and rows follow, amounts are revalued). Workspaces, the header's display menu, the setup
+  guide, the budget wizard and net-worth items take any currency.
+- **Rates**: KYD↔USD stays on the peg, 1 KYD = 1.20 USD (no service quotes it reliably: Frankfurter 0.8372 per USD,
+  fawazahmed0 0.8312). Every other currency goes through the US dollar at each day's rate, kept in `fx_daily`
+  (units per USD, by day, with the source; schema v9): a transaction converts at the latest rate on or before its
+  own day. A rate printed on a statement still wins. A currency with no rate yet converts one for one, and
+  Preferences says so.
+- **Downloads** (`rates.rs`, off by default — FinGraph's only network access, switched on in Preferences → Money →
+  Exchange Rates): Frankfurter (`/v2/rates?base=USD&quotes=…&from=…&to=…`, central-bank and official rates, decades
+  of history) first; the fawazahmed0 currency API (static daily files on jsDelivr, then its Cloudflare mirror, from
+  2 March 2024) when Frankfurter is down. Only currency codes and dates are sent, via `curl`. What's fetched:
+  each statement period not yet covered, and the days since the latest rate (`Db::rates_needed`), at start-up,
+  after imports, when a currency is chosen, and on Update Now. Chosen after testing both live on 2026-10-30 (and
+  ExchangeRate-API's free tier, which has no history); Frankfurter had one outage that morning. No self-hosted
+  server option (owner's choice).
+- Checked: `a_statement_in_pounds_converts_at_each_days_rate` (GBP statement → GBP account, rates asked for, each
+  row at its own day's rate into KYD); `currencies_by_code_and_symbol`, `dated_rates_through_the_dollar`; the
+  services' answers parsed offline (`both_answers_read_as_units_per_dollar`) and live (`live_rates`, ignored). Sample
+  statements now read as INR, SGD, EUR, HKD + USD; the `$`-only ones are noted. The owner's ledger: every converted
+  amount identical after migration and Rescan All.
+
 ## 7. Categorisation pipeline
 
 Applied on import, in this order; earlier steps win.
@@ -683,10 +713,10 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 10. Packaging & operations
 
-- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.12-1_amd64.deb` (binary, desktop entry with
+- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.13-1_amd64.deb` (binary, desktop entry with
   PDF "Open With", icon, README; depends on poppler-utils, GTK 4, libadwaita; recommends
   tesseract-ocr for picture-only statements).
-- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.12-1_amd64.deb`. The
+- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.13-1_amd64.deb`. The
   version is bumped for every change to the app: apt skips a same-version `.deb` unless given
   `--reinstall`, and once that made a fix look missing. A docs-only rebuild keeps the version and
   is installed with `--reinstall`.
@@ -793,6 +823,9 @@ in use (Butterfield, RBC, CNB, the Credit Union) — none from RBC or Butterfiel
 
 ## 13. Outstanding / known limits
 
+- A statement that only prints `$` can't say whether it's KYD, USD, CAD…: it's held as KYD with a note, and the
+  account's currency is set by hand once. Currencies outside the 65 (or without a Frankfurter/fallback rate)
+  convert one for one.
 - **Three of five banks unverified on real PDFs** (Butterfield, RBC, CICSA): follow §6.3. Until then
   every statement from them is held for review on import; the first approval of each teaches its profile (§6.4).
 - Not read (out of scope for KYD/USD Cayman statements): decimal-comma amounts (`15.320,00 €`, `10 750,00 $`),

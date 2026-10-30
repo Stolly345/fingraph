@@ -314,7 +314,7 @@ pub fn workspaces_dialog(app: &Rc<App>) {
     let mut edits = Vec::new();
     for e in &ents {
         let name = adw::EntryRow::builder().title(format!("{} workspace", e.kind.as_str())).text(&e.name).build();
-        let ccy = adw::ComboRow::builder().title(format!("{} currency", e.name)).model(&gtk::StringList::new(&["KYD", "USD"])).selected(if e.base_currency == Currency::USD { 1 } else { 0 }).build();
+        let ccy = crate::preferences::currency_row(&format!("{} currency", e.name), e.base_currency);
         g.add(&name);
         g.add(&ccy);
         edits.push((e.id, name, ccy));
@@ -337,7 +337,7 @@ pub fn workspaces_dialog(app: &Rc<App>) {
     save.connect_clicked(move |_| {
         let Some(a) = w.upgrade() else { return };
         for (id, name, ccy) in &edits {
-            let c = if ccy.selected() == 1 { Currency::USD } else { Currency::KYD };
+            let c = crate::preferences::currency_at(ccy.selected());
             if let Err(e) = a.db.update_entity(*id, name.text().trim(), c) {
                 a.toast(&e.to_string());
             }

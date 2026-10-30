@@ -79,8 +79,13 @@ pub struct App {
     /// Every row of the workspaces on screen, kept only while a refresh runs (several parts want it).
     rows_cache: RefCell<Option<(Vec<i64>, Vec<TxRow>)>>,
     refreshing: Cell<bool>,
-    kyd_btn: gtk::ToggleButton,
-    usd_btn: gtk::ToggleButton,
+    /// The currency amounts are shown in: KYD, USD and any other currency in use.
+    display_dd: gtk::DropDown,
+    display_list: RefCell<Vec<Currency>>,
+    /// True while the currency list is rebuilt: its selection changes aren't the user's.
+    display_quiet: Cell<bool>,
+    /// An exchange-rate download is running.
+    rates_busy: Cell<bool>,
     /// The watched folder (Preferences → Import), while watching.
     pub watch: RefCell<Option<gio::FileMonitor>>,
     scope: RefCell<Scope>,
@@ -113,11 +118,9 @@ impl App {
         // ── header: workspace, currency, range, triage
         // the workspace decides everything below it, so it heads the sidebar
         let workspace_btn = gtk::MenuButton::builder().tooltip_text("Workspace").always_show_arrow(true).hexpand(true).margin_start(8).margin_end(8).margin_bottom(6).build();
-        let kyd_btn = gtk::ToggleButton::builder().label("KYD").active(true).tooltip_text("Show amounts in Cayman dollars").build();
-        let usd_btn = gtk::ToggleButton::builder().label("USD").group(&kyd_btn).tooltip_text("Show amounts in US dollars").build();
-        let ccy_box = gtk::Box::builder().css_classes(["linked"]).build();
-        ccy_box.append(&kyd_btn);
-        ccy_box.append(&usd_btn);
+        let display_dd = gtk::DropDown::builder().tooltip_text("Show amounts in this currency").build();
+        let ccy_box = gtk::Box::builder().build();
+        ccy_box.append(&display_dd);
         let range_dd = gtk::DropDown::builder().tooltip_text("Date range").build();
         let menu = gio::Menu::new();
         let s1 = gio::Menu::new();
@@ -190,8 +193,10 @@ impl App {
             refresh_queued: Cell::new(false),
             rows_cache: RefCell::new(None),
             refreshing: Cell::new(false),
-            kyd_btn,
-            usd_btn: usd_btn.clone(),
+            display_dd,
+            display_list: RefCell::new(Vec::new()),
+            display_quiet: Cell::new(false),
+            rates_busy: Cell::new(false),
             watch: RefCell::new(None),
             scope: RefCell::new(Scope::Consolidated(Vec::new())),
             entities: RefCell::new(Vec::new()),
@@ -199,13 +204,8 @@ impl App {
             views: RefCell::new(Vec::new()),
             focus_ids: RefCell::new(None),
         });
-        app.display.set(match app.db.setting("display_currency").as_deref() {
-            Some("USD") => Currency::USD,
-            _ => Currency::KYD,
-        });
-        if app.display.get() == Currency::USD {
-            usd_btn.set_active(true);
-        }
+        app.display.set(app.db.setting("display_currency").and_then(|c| Currency::parse(&c)).unwrap_or(Currency::KYD));
+        app.rebuild_display_list();
 
         // pages, in the order you use them; Accounts follow (see update_sidebar)
         let (o, or) = dashboard::build(&app);
@@ -268,12 +268,16 @@ impl App {
         }
         {
             let w = Rc::downgrade(&app);
-            app.kyd_btn.connect_toggled(move |b| {
-                if let Some(a) = w.upgrade() {
-                    a.display.set(if b.is_active() { Currency::KYD } else { Currency::USD });
-                    let _ = a.db.set_setting("display_currency", a.display.get().code());
-                    a.refresh();
+            app.display_dd.connect_selected_notify(move |dd| {
+                let Some(a) = w.upgrade() else { return };
+                if a.display_quiet.get() {
+                    return;
                 }
+                if let Some(c) = a.display_list.borrow().get(dd.selected() as usize).copied() {
+                    a.display.set(c);
+                    let _ = a.db.set_setting("display_currency", c.code());
+                }
+                a.refresh();
             });
         }
         {
@@ -300,6 +304,8 @@ impl App {
         let last = app.db.prefs().last_page;
         app.show_view(if app.stack.child_by_name(&last).is_some() { &last } else { "overview" });
         app.win.present();
+        // today's rates (and any a statement still lacks), quietly, when downloads are on
+        app.update_rates(false);
         statements::watch(&app);
 
         let shot = cfg!(debug_assertions) && std::env::var_os("FINGRAPH_SHOT").is_some();
@@ -400,6 +406,7 @@ impl App {
         *self.entities.borrow_mut() = ents;
         self.rebuild_workspace_menu();
         self.rebuild_ranges();
+        self.rebuild_display_list();
         self.refresh();
     }
 
@@ -550,10 +557,73 @@ impl App {
     }
 
     pub fn set_display(&self, c: Currency) {
-        match c {
-            Currency::KYD => self.kyd_btn.set_active(true),
-            Currency::USD => self.usd_btn.set_active(true),
+        if !self.display_list.borrow().contains(&c) {
+            self.display.set(c);
+            self.rebuild_display_list();
         }
+        if let Some(i) = self.display_list.borrow().iter().position(|x| *x == c) {
+            self.display_dd.set_selected(i as u32);
+        }
+    }
+
+    /// The header's currency list: KYD, USD, every other currency an account or workspace uses, and the one shown.
+    fn rebuild_display_list(&self) {
+        let mut list = vec![Currency::KYD, Currency::USD];
+        list.extend(self.db.floating_currencies().unwrap_or_default());
+        if !list.contains(&self.display.get()) {
+            list.push(self.display.get());
+        }
+        let codes: Vec<&str> = list.iter().map(|c| c.code()).collect();
+        self.display_quiet.set(true);
+        self.display_dd.set_model(Some(&gtk::StringList::new(&codes)));
+        self.display_dd.set_selected(list.iter().position(|c| *c == self.display.get()).unwrap_or(0) as u32);
+        self.display_dd.set_visible(list.len() > 1);
+        *self.display_list.borrow_mut() = list;
+        self.display_quiet.set(false);
+    }
+
+    /// Download what exchange rates are missing (when switched on in Preferences), off the main thread, then keep
+    /// them and show amounts converted with them. `announce`: say so when there's nothing to do or it fails.
+    pub fn update_rates(self: &Rc<Self>, announce: bool) {
+        if !self.db.prefs().download_rates || self.rates_busy.get() {
+            if announce && !self.db.prefs().download_rates {
+                self.toast("Exchange-rate downloads are off (Preferences → Money)");
+            }
+            return;
+        }
+        let needed = self.db.rates_needed(today()).unwrap_or_default();
+        if needed.is_empty() {
+            if announce {
+                self.toast("Exchange rates are up to date");
+            }
+            return;
+        }
+        self.rates_busy.set(true);
+        let w = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let got = gio::spawn_blocking(move || needed.iter().map(|(cs, from, to)| fingraph_core::rates::download(cs, *from, *to).map_err(|e| e.0)).collect::<Vec<_>>()).await.unwrap_or_default();
+            let Some(a) = w.upgrade() else { return };
+            a.rates_busy.set(false);
+            let (mut stored, mut failed, mut sources) = (0, Vec::new(), Vec::new());
+            for g in got {
+                match g {
+                    Ok(d) => {
+                        stored += a.db.store_rates(&d.rates, d.source).unwrap_or(0);
+                        if !d.rates.is_empty() && !sources.contains(&d.source) {
+                            sources.push(d.source);
+                        }
+                    }
+                    Err(e) => failed.push(e),
+                }
+            }
+            if stored > 0 {
+                a.toast(&format!("Exchange rates updated from {}", sources.join(" and ")));
+                a.rebuild_display_list();
+                a.refresh();
+            } else if announce || !failed.is_empty() {
+                a.toast(&if failed.is_empty() { "No new exchange rates".to_string() } else { format!("Couldn't download exchange rates; amounts use the last ones kept ({})", failed[0]) });
+            }
+        });
     }
 
     pub fn display(&self) -> Currency {

@@ -116,6 +116,8 @@ struct Layout {
     fee_column: bool,
     /// A second account section in another currency follows, opening at the first one's closing.
     two_sections: bool,
+    /// Page 1 doesn't name the currency (only `$` signs, or none): it can't be told, so it's held.
+    currency_unstated: bool,
     per_page: usize,
 }
 
@@ -151,6 +153,7 @@ impl Layout {
             (self.long_desc, "long_desc"),
             (self.fee_column, "fee_column"),
             (self.two_sections, "two_sections"),
+            (self.currency_unstated, "currency_unstated"),
         ] {
             if on {
                 v.push(name.into());
@@ -306,6 +309,7 @@ fn generate(seed: u64) -> Statement {
         long_desc: r.chance(10),
         fee_column: matches!(cols, Cols::DebitCreditBalance) && r.chance(15),
         two_sections: false,
+        currency_unstated: r.chance(15),
         per_page: 12 + r.below(20),
     };
     let mut layout = layout;
@@ -418,7 +422,12 @@ fn generate(seed: u64) -> Statement {
     sh.put(40.0, &format!("{from} {} {to} {}", fmt_date(start, date, true), fmt_date(end, date, true)));
     sh.y += LINE;
     sh.put(40.0, &format!("Account Number: ****{}", 1000 + r.below(8999)));
-    sh.y += LINE * 1.5;
+    sh.y += LINE;
+    // statements name their currency (the generated ones are all in Cayman dollars)
+    if !layout.currency_unstated {
+        sh.put(40.0, ["Currency: KYD", "Account currency: KYD", "All amounts in KYD"][r.below(3)]);
+    }
+    sh.y += LINE * 0.5;
     // card statements always say so (credit limit, minimum payment): it's how a charge's sign is known
     if card && !l.card_unmarked {
         sh.put(40.0, ["Credit Limit:", "Minimum Payment Due:", "Visa Credit Card"][r.below(3)]);
@@ -742,7 +751,7 @@ fn generated_statements() {
         // import the previous statement's closing proves it; there's none here). Day/month-ambiguous dates are
         // provable again: the period settles which reading is a statement
         let no_opening = !s.layout.opening_row && !s.layout.summary_box;
-        if !s.layout.card_unmarked && !no_opening {
+        if !s.layout.card_unmarked && !no_opening && !s.layout.currency_unstated {
             provable += 1;
             provable_exact += (o == Outcome::Exact) as usize;
         }

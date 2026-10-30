@@ -36,6 +36,26 @@ fn switch(app: &Rc<App>, title: &str, subtitle: &str, on: bool, f: impl Fn(&Rc<A
     row
 }
 
+/// Every currency, as pickers list them (`GBP — Pound sterling`), KYD and USD first.
+pub fn currency_labels() -> Vec<String> {
+    Currency::all().map(Currency::label).collect()
+}
+
+/// A picker's position for `c`, and the currency at a picker's position.
+pub fn currency_index(c: Currency) -> u32 {
+    Currency::all().position(|x| x == c).unwrap_or(0) as u32
+}
+
+pub fn currency_at(i: u32) -> Currency {
+    Currency::all().nth(i as usize).unwrap_or(Currency::KYD)
+}
+
+/// A picker of every currency, `c` selected.
+pub fn currency_row(title: &str, c: Currency) -> adw::ComboRow {
+    let labels = currency_labels();
+    adw::ComboRow::builder().title(title).model(&gtk::StringList::new(&labels.iter().map(String::as_str).collect::<Vec<_>>())).selected(currency_index(c)).build()
+}
+
 fn combo(title: &str, subtitle: &str, items: &[String], selected: usize) -> adw::ComboRow {
     adw::ComboRow::builder()
         .title(title)
@@ -138,12 +158,12 @@ fn general(app: &Rc<App>) -> adw::PreferencesPage {
             }
         });
     }
-    let ccy = combo("Display currency", "The KYD | USD switch in the header changes it any time", &["KYD — Cayman Islands dollar".into(), "USD — US dollar".into()], (app.display() == Currency::USD) as usize);
+    let ccy = combo("Display currency", "The currency menu in the header changes it any time", &currency_labels(), currency_index(app.display()) as usize);
     {
         let w = Rc::downgrade(app);
         ccy.connect_selected_notify(move |c| {
             if let Some(a) = w.upgrade() {
-                a.set_display(if c.selected() == 1 { Currency::USD } else { Currency::KYD });
+                a.set_display(currency_at(c.selected()));
             }
         });
     }
@@ -211,6 +231,7 @@ fn money(app: &Rc<App>) -> adw::PreferencesPage {
         },
     ));
     page.add(&g);
+    page.add(&rates_group(app, &p));
     let d = adw::PreferencesGroup::builder().title("How Amounts Look").build();
     d.add(&switch(app, "Currency codes", "KYD 1,250.00 instead of CI$ 1,250.00", p.currency_codes, |_, p, v| p.currency_codes = v));
     d.add(&switch(app, "Brackets for money out", "(CI$ 45.00) instead of -CI$ 45.00", p.brackets, |_, p, v| p.brackets = v));
@@ -497,13 +518,13 @@ fn workspaces(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPa
     for e in &ents {
         let exp = adw::ExpanderRow::builder().title(glib::markup_escape_text(&e.name)).subtitle(format!("{} · {}", if e.kind == EntityKind::Personal { "Personal" } else if e.kind == EntityKind::Business { "Business" } else { "Rental property" }, e.base_currency)).build();
         let name = adw::EntryRow::builder().title("Name").text(&e.name).show_apply_button(true).build();
-        let ccy = combo("Currency", "", &["KYD".into(), "USD".into()], (e.base_currency == Currency::USD) as usize);
+        let ccy = combo("Currency", "", &currency_labels(), currency_index(e.base_currency) as usize);
         let del = adw::ButtonRow::builder().title("Delete Workspace…").css_classes(["destructive-action"]).build();
         {
             let (w, id, ccy) = (Rc::downgrade(app), e.id, ccy.clone());
             name.connect_apply(move |n| {
                 if let Some(a) = w.upgrade() {
-                    let c = if ccy.selected() == 1 { Currency::USD } else { Currency::KYD };
+                    let c = currency_at(ccy.selected());
                     match a.db.update_entity(id, n.text().trim(), c) {
                         Ok(()) => a.reload_entities(),
                         Err(e) => a.toast(&e.to_string()),
@@ -515,7 +536,9 @@ fn workspaces(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPa
             let (w, id, name) = (Rc::downgrade(app), e.id, name.clone());
             ccy.connect_selected_notify(move |c| {
                 if let Some(a) = w.upgrade() {
-                    let _ = a.db.update_entity(id, name.text().trim(), if c.selected() == 1 { Currency::USD } else { Currency::KYD });
+                    let _ = a.db.update_entity(id, name.text().trim(), currency_at(c.selected()));
+                    // a workspace in another currency needs that currency's rates
+                    a.update_rates(false);
                     a.refresh();
                 }
             });
@@ -575,10 +598,12 @@ fn workspaces(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPa
         let name = adw::EntryRow::builder().title("Name").text(&acct.name).show_apply_button(true).build();
         let ws = combo("Workspace", "", &ents.iter().map(|e| e.name.clone()).collect::<Vec<_>>(), ents.iter().position(|e| e.id == acct.entity_id).unwrap_or(0));
         let hide = adw::SwitchRow::builder().title("Closed account").subtitle("Hide it from lists and the balance chart; its history still counts").active(acct.hidden).build();
+        let cur = currency_row("Currency", acct.currency);
+        cur.set_subtitle("What its statements are in (read from them; put it right if a statement didn't say)");
         let bank = adw::EntryRow::builder().title("OFX bank id (routing / transit)").text(&acct.ofx_bank_id).show_apply_button(true).build();
         let bid = adw::EntryRow::builder().title("QuickBooks INTU.BID (3000 works for most)").text(&acct.ofx_intu_bid).show_apply_button(true).build();
         let save = {
-            let (w, acct, name, ws, hide, bank, bid, ents) = (Rc::downgrade(app), acct.clone(), name.clone(), ws.clone(), hide.clone(), bank.clone(), bid.clone(), ents.clone());
+            let (w, acct, name, ws, hide, bank, bid, ents, cur) = (Rc::downgrade(app), acct.clone(), name.clone(), ws.clone(), hide.clone(), bank.clone(), bid.clone(), ents.clone(), cur.clone());
             Rc::new(move || {
                 let Some(a) = w.upgrade() else { return };
                 let mut x = acct.clone();
@@ -587,8 +612,13 @@ fn workspaces(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPa
                 x.hidden = hide.is_active();
                 x.ofx_bank_id = bank.text().trim().to_string();
                 x.ofx_intu_bid = bid.text().trim().to_string();
+                x.currency = currency_at(cur.selected());
                 match a.db.update_account(&x) {
-                    Ok(()) => a.refresh(),
+                    Ok(()) => {
+                        // another currency may need its rates
+                        a.update_rates(false);
+                        a.refresh();
+                    }
                     Err(e) => a.toast(&e.to_string()),
                 }
             })
@@ -605,8 +635,13 @@ fn workspaces(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPa
             let s = save.clone();
             hide.connect_active_notify(move |_| s());
         }
+        {
+            let s = save.clone();
+            cur.connect_selected_notify(move |_| s());
+        }
         exp.add_row(&name);
         exp.add_row(&ws);
+        exp.add_row(&cur);
         exp.add_row(&hide);
         exp.add_row(&bank);
         exp.add_row(&bid);
@@ -785,4 +820,41 @@ fn erase_dialog(app: &Rc<App>, prefs: &adw::PreferencesDialog) {
         }
     });
     d.present(Some(&app.win));
+}
+
+/// Exchange rates for currencies other than KYD and USD: the download switch, what's kept, and Update Now.
+fn rates_group(app: &Rc<App>, p: &fingraph_core::prefs::Prefs) -> adw::PreferencesGroup {
+    let g = adw::PreferencesGroup::builder()
+        .title("Exchange Rates")
+        .description("KYD and USD always convert at the peg, 1 KYD = 1.20 USD. Other currencies convert at each day's rate: from Frankfurter (central-bank rates), or the fawazahmed0 currency API when it's down. Only currency codes and dates are sent; rates are kept, so each day is fetched once.")
+        .build();
+    g.add(&switch(app, "Download exchange rates", "For accounts and workspaces in other currencies (GBP, CAD, JMD…)", p.download_rates, |a, p, v| {
+        p.download_rates = v;
+        if v {
+            let a = a.clone();
+            glib::idle_add_local_once(move || a.update_rates(true));
+        }
+    }));
+    match app.db.rates_status() {
+        Ok(v) if v.is_empty() => g.add(&adw::ActionRow::builder().title("No other currencies in use").subtitle("Every account and workspace is in KYD or USD").build()),
+        Ok(v) => {
+            for (c, last) in v {
+                let sub = match last {
+                    Some((day, src)) => format!("Latest rate {day}, from {src}"),
+                    None => "No rate yet: its amounts count one for one until one is downloaded".into(),
+                };
+                g.add(&adw::ActionRow::builder().title(glib::markup_escape_text(&c.label())).subtitle(glib::markup_escape_text(&sub)).build());
+            }
+        }
+        Err(e) => g.add(&adw::ActionRow::builder().title("Couldn't read the rates kept").subtitle(glib::markup_escape_text(&e.to_string())).build()),
+    }
+    let now = adw::ButtonRow::builder().title("Update Now").build();
+    let w = Rc::downgrade(app);
+    now.connect_activated(move |_| {
+        if let Some(a) = w.upgrade() {
+            a.update_rates(true);
+        }
+    });
+    g.add(&now);
+    g
 }

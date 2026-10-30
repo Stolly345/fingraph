@@ -103,7 +103,7 @@ impl Db {
                 }
                 r.entity_currency = bases.get(&r.entity_id).copied().unwrap_or(t.entity_currency);
                 // same workspace: keep the statement's own exchange rate; another: convert
-                r.amount_entity = if r.entity_id == t.entity_id && !t.amount.is_zero() { round2(t.amount_entity * l.amount / t.amount) } else { db::entity_amount(&fx, l.amount, t.currency, r.entity_currency, None) };
+                r.amount_entity = if r.entity_id == t.entity_id && !t.amount.is_zero() { round2(t.amount_entity * l.amount / t.amount) } else { db::entity_amount(&fx, l.amount, t.currency, r.entity_currency, None, t.posted) };
                 r.category_id = l.category_id;
                 (r.category_name, r.category_kind) = match l.category_id.and_then(|c| cats.get(&c)) {
                     Some((n, k)) => (Some(n.clone()), Some(*k)),

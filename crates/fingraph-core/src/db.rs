@@ -265,6 +265,15 @@ ALTER TABLE documents ADD COLUMN review_hold INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE documents ADD COLUMN review_note TEXT NOT NULL DEFAULT '';
 -- a bank's declared layout (row shape, summary labels, verified account types), JSON
 ALTER TABLE bank_profiles ADD COLUMN layout TEXT NOT NULL DEFAULT '{}';
+"#, r#"
+-- other currencies' daily rates (units per US dollar), downloaded once and kept: past rates never change
+CREATE TABLE fx_daily (
+    day TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    per_usd TEXT NOT NULL,
+    source TEXT NOT NULL,
+    PRIMARY KEY (day, currency)
+);
 "#];
 
 /// (name, kind, children). Missing ones are added to existing ledgers on open; lists are shown A–Z.
@@ -500,6 +509,9 @@ impl ImportPlan {
 }
 
 /// Why a statement waits for review before its transactions count anywhere. Stored as codes.
+/// A floating currency in use, and its latest kept rate's day and source (`None`: none yet).
+pub type RateStatus = (Currency, Option<(NaiveDate, String)>);
+
 /// What approving a held statement did besides letting it count.
 #[derive(Debug, Clone, Default)]
 pub struct Approval {
@@ -1015,7 +1027,93 @@ impl Db {
             Ok(self.conn.query_row("SELECT rate FROM fx_rates WHERE from_currency = ?1 AND to_currency = ?2", [a, b], |r| r.get::<_, String>(0)).optional()?.map(|s| dec(&s)))
         };
         let d = Fx::default();
-        Ok(Fx { kyd_to_usd: get("KYD", "USD")?.unwrap_or(d.kyd_to_usd), usd_to_kyd: get("USD", "KYD")?.unwrap_or(d.usd_to_kyd) })
+        let mut daily: std::collections::BTreeMap<Currency, std::collections::BTreeMap<NaiveDate, Decimal>> = Default::default();
+        let mut st = self.conn.prepare("SELECT day, currency, per_usd FROM fx_daily")?;
+        for row in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))? {
+            let (day, c, rate) = row?;
+            if let (Ok(day), Some(c)) = (NaiveDate::parse_from_str(&day, "%Y-%m-%d"), Currency::parse(&c)) {
+                daily.entry(c).or_default().insert(day, dec(&rate));
+            }
+        }
+        Ok(Fx { kyd_to_usd: get("KYD", "USD")?.unwrap_or(d.kyd_to_usd), usd_to_kyd: get("USD", "KYD")?.unwrap_or(d.usd_to_kyd), daily })
+    }
+
+    /// Currencies in use (accounts' and workspaces') that need downloaded rates: every one but KYD and USD.
+    pub fn floating_currencies(&self) -> Result<Vec<Currency>> {
+        let mut st = self.conn.prepare("SELECT currency FROM accounts UNION SELECT base_currency FROM entities")?;
+        let mut v: Vec<Currency> = st.query_map([], |r| r.get::<_, String>(0))?.filter_map(|c| c.ok().and_then(|c| Currency::parse(&c))).filter(|c| !c.pegged()).collect();
+        v.sort();
+        v.dedup();
+        Ok(v)
+    }
+
+    /// What to download: the floating currencies over each statement period that has no rate stored yet (a
+    /// workspace in a floating currency needs its rate for every statement, an account only for its own), and
+    /// from the day after the latest stored rate up to `today`. Ranges come back merged per currency set.
+    pub fn rates_needed(&self, today: NaiveDate) -> Result<Vec<(Vec<Currency>, NaiveDate, NaiveDate)>> {
+        let floating = self.floating_currencies()?;
+        if floating.is_empty() {
+            return Ok(Vec::new());
+        }
+        let fx = self.fx()?;
+        let mut want: Vec<(Vec<Currency>, NaiveDate, NaiveDate)> = Vec::new();
+        let periods: Vec<(String, String, String, String)> = {
+            let mut st = self.conn.prepare(
+                "SELECT d.period_start, d.period_end, a.currency, e.base_currency FROM documents d JOIN accounts a ON a.id = d.account_id
+                 JOIN entities e ON e.id = a.entity_id WHERE d.period_start IS NOT NULL AND d.period_end IS NOT NULL",
+            )?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        for (s0, e0, acct, base) in periods {
+            let (start, end) = (date(&s0), date(&e0));
+            let cs: Vec<Currency> = [ccy(&acct), ccy(&base)].into_iter().filter(|c| !c.pegged()).collect();
+            // covered: a rate stored within the period (or the four days before it, for a weekend start)
+            let covered = |c: &Currency| fx.daily.get(c).is_some_and(|m| m.range(start - chrono::Duration::days(4)..=end).next().is_some());
+            let missing: Vec<Currency> = cs.into_iter().filter(|c| !covered(c)).collect();
+            if !missing.is_empty() {
+                want.push((missing, start - chrono::Duration::days(4), end.min(today)));
+            }
+        }
+        // and today's: from the day after the latest stored (or the last 7 days, for a currency never fetched)
+        for c in &floating {
+            let from = fx.daily.get(c).and_then(|m| m.keys().next_back().copied()).map_or(today - chrono::Duration::days(7), |d| d + chrono::Duration::days(1));
+            if from <= today - chrono::Duration::days(1) {
+                want.push((vec![*c], from, today));
+            }
+        }
+        // merge overlapping requests for the same currencies
+        want.sort_by_key(|w| (w.0.clone(), w.1));
+        let mut merged: Vec<(Vec<Currency>, NaiveDate, NaiveDate)> = Vec::new();
+        for w in want {
+            match merged.last_mut() {
+                Some(m) if m.0 == w.0 && w.1 <= m.2 + chrono::Duration::days(1) => m.2 = m.2.max(w.2),
+                _ => merged.push(w),
+            }
+        }
+        Ok(merged)
+    }
+
+    /// Keep downloaded rates (units per US dollar), then convert every transaction again at its own day's rate.
+    pub fn store_rates(&self, rates: &[(NaiveDate, Currency, Decimal)], source: &str) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (day, c, r) in rates {
+            tx.execute("INSERT OR REPLACE INTO fx_daily VALUES (?1, ?2, ?3, ?4)", params![day.to_string(), c.code(), r.to_string(), source])?;
+        }
+        tx.commit()?;
+        if !rates.is_empty() {
+            self.revalue(None)?;
+        }
+        Ok(rates.len())
+    }
+
+    /// For Preferences: each floating currency in use, its latest stored rate's day and source (`None`: none yet).
+    pub fn rates_status(&self) -> Result<Vec<RateStatus>> {
+        let mut out = Vec::new();
+        for c in self.floating_currencies()? {
+            let last: Option<(String, String)> = self.conn.query_row("SELECT day, source FROM fx_daily WHERE currency = ?1 ORDER BY day DESC LIMIT 1", [c.code()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            out.push((c, last.map(|(d, s)| (date(&d), s))));
+        }
+        Ok(out)
     }
 
     /// Set the KYD→USD rate (USD→KYD follows) and revalue every cross-currency row.
@@ -1036,16 +1134,16 @@ impl Db {
 
     fn revalue(&self, entity: Option<i64>) -> Result<()> {
         let fx = self.fx()?;
-        let rows: Vec<(i64, String, String, String, String)> = {
+        let rows: Vec<(i64, String, String, String, String, String)> = {
             let mut st = self.conn.prepare(
-                "SELECT t.id, t.amount, t.currency, e.base_currency, t.memo FROM transactions t JOIN accounts a ON a.id = t.account_id
+                "SELECT t.id, t.amount, t.currency, e.base_currency, t.memo, t.posted_date FROM transactions t JOIN accounts a ON a.id = t.account_id
                  JOIN entities e ON e.id = COALESCE(t.business_entity_id, a.entity_id) WHERE (?1 IS NULL OR e.id = ?1 OR a.entity_id = ?1)",
             )?;
-            st.query_map([entity], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect::<rusqlite::Result<_>>()?
+            st.query_map([entity], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?.collect::<rusqlite::Result<_>>()?
         };
         let tx = self.conn.unchecked_transaction()?;
-        for (id, amt, c, base, memo) in rows {
-            let v = entity_amount(&fx, dec(&amt), ccy(&c), ccy(&base), parse_fx_memo(&memo));
+        for (id, amt, c, base, memo, day) in rows {
+            let v = entity_amount(&fx, dec(&amt), ccy(&c), ccy(&base), parse_fx_memo(&memo), date(&day));
             tx.execute("UPDATE transactions SET amount_in_entity_currency = ?2, amount_in_entity_minor = ?3 WHERE id = ?1", params![id, v.to_string(), to_minor(v)])?;
         }
         tx.commit()?;
@@ -1078,10 +1176,15 @@ impl Db {
     }
 
     pub fn update_account(&self, a: &Account) -> Result<()> {
-        self.conn.execute(
-            "UPDATE accounts SET name = ?2, ofx_bank_id = ?3, ofx_intu_bid = ?4, entity_id = ?5, hidden = ?6 WHERE id = ?1",
-            params![a.id, a.name, a.ofx_bank_id, a.ofx_intu_bid, a.entity_id, a.hidden],
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE accounts SET name = ?2, ofx_bank_id = ?3, ofx_intu_bid = ?4, entity_id = ?5, hidden = ?6, currency = ?7 WHERE id = ?1",
+            params![a.id, a.name, a.ofx_bank_id, a.ofx_intu_bid, a.entity_id, a.hidden, a.currency.code()],
         )?;
+        // a statement whose currency was a guess, put right: its statements and rows are in that currency too
+        tx.execute("UPDATE transactions SET currency = ?2 WHERE account_id = ?1", params![a.id, a.currency.code()])?;
+        tx.execute("UPDATE documents SET currency = ?2 WHERE account_id = ?1", params![a.id, a.currency.code()])?;
+        tx.commit()?;
         self.revalue(Some(a.entity_id))
     }
 
@@ -1300,7 +1403,7 @@ impl Db {
                 *n += 1;
                 let stem = rules::merchant_stem(&t.description, &t.memo);
                 let (payee, _) = rules::known_merchant(&stem, &t.description);
-                let ent = entity_amount(&fx, t.amount, s.currency, base, t.fx_original);
+                let ent = entity_amount(&fx, t.amount, s.currency, base, t.fx_original, t.posted);
                 let mut memo = t.memo.clone();
                 if let Some((oc, oa)) = t.fx_original
                     && !memo.contains(&oa.to_string())
@@ -1337,7 +1440,7 @@ impl Db {
                 {
                     let id = tx.last_insert_rowid();
                     let base: String = tx.query_row("SELECT base_currency FROM entities WHERE id = ?1", [b], |r| r.get(0))?;
-                    let v = entity_amount(&fx, t.amount, s.currency, ccy(&base), t.fx_original);
+                    let v = entity_amount(&fx, t.amount, s.currency, ccy(&base), t.fx_original, t.posted);
                     tx.execute("UPDATE transactions SET business_entity_id = ?2, amount_in_entity_currency = ?3, amount_in_entity_minor = ?4 WHERE id = ?1", params![id, b, v.to_string(), to_minor(v)])?;
                 }
                 if n == 0 {
@@ -1956,14 +2059,14 @@ impl Db {
         let fx = self.fx()?;
         let tx = self.conn.unchecked_transaction()?;
         for id in ids {
-            let (amt, cur, memo, home): (String, String, String, i64) = tx.query_row(
-                "SELECT t.amount, t.currency, t.memo, a.entity_id FROM transactions t JOIN accounts a ON a.id = t.account_id WHERE t.id = ?1",
+            let (amt, cur, memo, home, day): (String, String, String, i64, String) = tx.query_row(
+                "SELECT t.amount, t.currency, t.memo, a.entity_id, t.posted_date FROM transactions t JOIN accounts a ON a.id = t.account_id WHERE t.id = ?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
             let target = business.filter(|b| *b != home);
             let base: String = tx.query_row("SELECT base_currency FROM entities WHERE id = ?1", [target.unwrap_or(home)], |r| r.get(0))?;
-            let v = entity_amount(&fx, dec(&amt), ccy(&cur), ccy(&base), parse_fx_memo(&memo));
+            let v = entity_amount(&fx, dec(&amt), ccy(&cur), ccy(&base), parse_fx_memo(&memo), date(&day));
             tx.execute(
                 "UPDATE transactions SET business_entity_id = ?2, amount_in_entity_currency = ?3, amount_in_entity_minor = ?4 WHERE id = ?1",
                 params![id, target, v.to_string(), to_minor(v)],
@@ -1976,7 +2079,7 @@ impl Db {
     pub fn add_manual(&self, account_id: i64, doc_id: Option<i64>, posted: NaiveDate, description: &str, amount: Decimal, memo: &str) -> Result<i64> {
         let (cur, base): (String, String) = self.conn.query_row("SELECT a.currency, e.base_currency FROM accounts a JOIN entities e ON e.id = a.entity_id WHERE a.id = ?1", [account_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         let fx = self.fx()?;
-        let ent = entity_amount(&fx, amount, ccy(&cur), ccy(&base), None);
+        let ent = entity_amount(&fx, amount, ccy(&cur), ccy(&base), None, posted);
         let stem = rules::merchant_stem(description, "");
         let seq: i64 = self.conn.query_row("SELECT COUNT(*) FROM transactions WHERE account_id = ?1 AND posted_date = ?2", params![account_id, posted.to_string()], |r| r.get(0))?;
         self.conn.execute(
@@ -2393,7 +2496,9 @@ fn parse_fx_memo(memo: &str) -> Option<(Currency, Decimal)> {
 
 /// The amount in the workspace's currency: as printed if it already is; the statement's own FX
 /// original if that's in the workspace currency; else the configured rate.
-pub fn entity_amount(fx: &Fx, amount: Decimal, from: Currency, base: Currency, original: Option<(Currency, Decimal)>) -> Decimal {
+/// `amount` (in `from`) in the workspace's `base` currency, at `day`'s rate — or the statement's own conversion
+/// (`original`) when it printed one and that's preferred.
+pub fn entity_amount(fx: &Fx, amount: Decimal, from: Currency, base: Currency, original: Option<(Currency, Decimal)>, day: NaiveDate) -> Decimal {
     if from == base {
         return amount;
     }
@@ -2406,7 +2511,7 @@ pub fn entity_amount(fx: &Fx, amount: Decimal, from: Currency, base: Currency, o
                 v.abs()
             }
         }
-        _ => fx.convert(amount, from, base),
+        _ => fx.convert_on(amount, from, base, Some(day)),
     }
 }
 
@@ -2741,6 +2846,78 @@ mod tests {
         }
     }
 
+    /// A statement from a bank back home, in pounds: recognised as GBP, its days' rates asked for, and once they're
+    /// kept every line counts in the KYD workspace at its own day's rate (through the dollar, then the peg).
+    #[test]
+    fn a_statement_in_pounds_converts_at_each_days_rate() {
+        let db = Db::open_in_memory().unwrap();
+        let ent = db.create_entity("Personal", EntityKind::Personal, Currency::KYD).unwrap();
+        let gbp = Currency::parse("GBP").unwrap();
+        let mut t = Vec::new();
+        let mut y = 40.0;
+        let mut put = |x: f64, y: f64, s: &str| {
+            let mut x = x;
+            for w in s.split_whitespace() {
+                t.push(crate::parser::Token::new(1, x, y, x + 5.0 * w.chars().count() as f64, y + 8.0, w));
+                x += 5.0 * w.chars().count() as f64 + 3.0;
+            }
+        };
+        put(40.0, y, "Albion Bank plc");
+        y += 14.0;
+        put(40.0, y, "Current Account GBP  Sort code 40-11-22  Account Number 12345678");
+        y += 14.0;
+        put(40.0, y, "Statement Period: 01/02/2026 to 28/02/2026");
+        y += 14.0;
+        put(40.0, y, "Opening Balance");
+        put(220.0, y, "£1,000.00");
+        y += 12.0;
+        put(40.0, y, "Closing Balance");
+        put(220.0, y, "£1,700.00");
+        y += 20.0;
+        put(40.0, y, "Date");
+        put(120.0, y, "Description");
+        put(360.0, y, "Paid Out");
+        put(430.0, y, "Paid In");
+        put(500.0, y, "Balance");
+        for (d, desc, out, inn, bal) in [("05/02/2026", "TESCO STORES", "100.00", "", "900.00"), ("20/02/2026", "SALARY ACME UK", "", "800.00", "1,700.00")] {
+            y += 12.0;
+            put(40.0, y, d);
+            put(120.0, y, desc);
+            if !out.is_empty() {
+                put(400.0 - 5.0 * out.len() as f64, y, out);
+            }
+            if !inn.is_empty() {
+                put(470.0 - 5.0 * inn.len() as f64, y, inn);
+            }
+            put(545.0 - 5.0 * bal.len() as f64, y, bal);
+        }
+        let scan = crate::parser::MultiPassScanner::new(&db.profiles().unwrap()).scan_tokens(t).unwrap();
+        assert!(scan.is_reconciled(), "{:?}", scan.sections.iter().map(|s| &s.report).collect::<Vec<_>>());
+        assert_eq!(scan.sections[0].currency, gbp);
+        let rep = db.import_auto(ent, "albion.pdf", "albion", &scan).unwrap();
+        db.approve_document(rep.document_ids[0]).unwrap();
+
+        assert_eq!(db.floating_currencies().unwrap(), vec![gbp]);
+        let today = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let needed = db.rates_needed(today).unwrap();
+        assert!(needed.iter().any(|(cs, from, to)| cs == &vec![gbp] && *from <= NaiveDate::from_ymd_opt(2026, 2, 1).unwrap() && *to >= NaiveDate::from_ymd_opt(2026, 2, 28).unwrap()), "{needed:?}");
+        // no rate yet: one for one
+        let kyd = |db: &Db| {
+            let mut v: Vec<Decimal> = db.transactions(&TxFilter::default()).unwrap().iter().map(|t| t.amount_entity).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(kyd(&db), vec![dec("-100.00"), dec("800.00")]);
+        // a pound bought US$1.25 early in the month and US$1.30 late
+        let d = |day: u32| NaiveDate::from_ymd_opt(2026, 2, day).unwrap();
+        db.store_rates(&[(d(2), gbp, dec("0.80")), (d(16), gbp, dec("0.7692307692"))], "test").unwrap();
+        // -100 GBP on the 5th = -125.00 USD = -104.17 KYD; +800 GBP on the 20th = 1,040.00 USD = 866.67 KYD
+        assert_eq!(kyd(&db), vec![dec("-104.17"), dec("866.67")]);
+        // the statement's period is covered now; only the days since the latest rate (for today's) are still wanted
+        assert!(db.rates_needed(today).unwrap().iter().all(|(_, from, _)| *from > d(16)), "{:?}", db.rates_needed(today).unwrap());
+        assert_eq!(db.rates_status().unwrap()[0].1.as_ref().map(|x| x.0), Some(d(16)));
+    }
+
     #[test]
     fn learning_applies_retroactively() {
         let db = Db::open_in_memory().unwrap();
@@ -2912,7 +3089,8 @@ mod tests {
     #[test]
     fn fx_original_wins_over_the_peg() {
         let fx = Fx::default();
-        assert_eq!(entity_amount(&fx, dec("-72.39"), Currency::USD, Currency::KYD, Some((Currency::KYD, dec("59.14")))), dec("-59.14"));
-        assert_eq!(entity_amount(&fx, dec("-120.00"), Currency::USD, Currency::KYD, None), dec("-100.00"));
+        let day = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+        assert_eq!(entity_amount(&fx, dec("-72.39"), Currency::USD, Currency::KYD, Some((Currency::KYD, dec("59.14"))), day), dec("-59.14"));
+        assert_eq!(entity_amount(&fx, dec("-120.00"), Currency::USD, Currency::KYD, None, day), dec("-100.00"));
     }
 }

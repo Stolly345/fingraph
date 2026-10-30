@@ -362,13 +362,8 @@ fn workspaces(g: &G, app: &Rc<App>) {
     let personal = adw::EntryRow::builder().title("Your household").text(&personal_name).build();
     let biz_on = adw::SwitchRow::builder().title("I also have a business or rental property").active(biz_existing.is_some()).build();
     let biz = adw::EntryRow::builder().title("Its name").text(biz_existing.clone().unwrap_or_else(|| "Business".into())).build();
-    let usd = ents.first().is_some_and(|e| e.base_currency == Currency::USD);
-    let ccy = adw::ComboRow::builder()
-        .title("Show totals in")
-        .subtitle("Statements in the other currency are converted at 1 KYD = 1.20 USD, or at the rate printed on the statement")
-        .model(&gtk::StringList::new(&["KYD — Cayman Islands dollar", "USD — US dollar"]))
-        .selected(usd as u32)
-        .build();
+    let ccy = crate::preferences::currency_row("Show totals in", ents.first().map_or(Currency::KYD, |e| e.base_currency));
+    ccy.set_subtitle("KYD and USD convert at 1 KYD = 1.20 USD; other currencies at each day's rate once exchange-rate downloads are on (Preferences → Money). A rate printed on a statement wins");
     biz_on.bind_property("active", &biz, "visible").sync_create().build();
     for r in [personal.upcast_ref::<gtk::Widget>(), biz_on.upcast_ref(), biz.upcast_ref(), ccy.upcast_ref()] {
         gr.add(r);
@@ -381,7 +376,7 @@ fn workspaces(g: &G, app: &Rc<App>) {
         "Save and Continue",
         Some(Rc::new(move || {
             let Some(a) = w.upgrade() else { return false };
-            let c = if ccy.selected() == 1 { Currency::USD } else { Currency::KYD };
+            let c = crate::preferences::currency_at(ccy.selected());
             let mut want = vec![(personal.text().trim().to_string(), EntityKind::Personal)];
             if biz_on.is_active() {
                 want.push((biz.text().trim().to_string(), EntityKind::Business));

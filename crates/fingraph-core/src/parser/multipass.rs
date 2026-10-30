@@ -369,6 +369,12 @@ fn layout_notes(meta: &Meta, sections: &[Section], diag: &mut Diagnostics) {
             "{n} dated line(s) with amounts sit among the transactions but outside the table that was read: if they're transactions, they're missing (they could cancel out, so the balances wouldn't show it)"
         ));
     }
+    if diag.pass1.currency_unstated {
+        diag.pass3.layout_notes.push(format!(
+            "The statement doesn't name its currency (only `$` or nothing): it was read as {}. If it's another (US$, C$…), set the account's currency in Preferences → Workspaces & Accounts",
+            sections.first().map_or(Currency::KYD, |s| s.currency)
+        ));
+    }
     if diag.pass1.date_order_unproven {
         let read = if meta.ctx.order == Order::MonthFirst { "month first" } else { "day first" };
         diag.pass3.layout_notes.push(format!("Every date could be day/month or month/day (none is past the 12th): they were read {read}, check them against the PDF"));
@@ -685,12 +691,33 @@ pub(crate) fn summary_value(rows: &[&Row], label: &Regex, cols: &[(Currency, f64
     None
 }
 
-fn detect_currency(page1: &str) -> Currency {
+/// The statement's currency from what page 1 names, and whether it names one at all (else it's KYD by default).
+fn detect_currency(page1: &str) -> (Currency, bool) {
     let no_parens = Regex::new(r"\([^)]*\)").unwrap().replace_all(page1, "");
-    let up = no_parens.to_ascii_uppercase();
+    let up = no_parens.to_uppercase();
     let kyd = up.matches("KYD").count() + up.matches("CI$").count() * 2;
     let usd = up.matches("USD").count() + up.matches("US$").count() * 2;
-    if usd > kyd { Currency::USD } else { Currency::KYD }
+    // a statement from a bank back home names its own currency more than either (`GBP`, `£`, `C$`)
+    let named = |c: Currency| -> usize {
+        let code = Regex::new(&format!(r"\b{}\b", c.code())).map_or(0, |r| r.find_iter(&up).count());
+        let sym = c.symbol().to_uppercase();
+        let symbol = if sym == c.code() {
+            0
+        } else {
+            // a `$` symbol counts only on its own (`S$` inside `US$` is the US dollar's)
+            Regex::new(&format!(r"(?:^|[^A-Z]){}", regex::escape(&sym))).map_or(0, |r| r.find_iter(&up).count())
+        };
+        code + 2 * symbol
+    };
+    let best = Currency::all().filter(|c| !c.pegged()).map(|c| (c, named(c))).max_by_key(|x| x.1);
+    if let Some((c, n)) = best
+        && n >= 2
+        && n > kyd.max(usd)
+    {
+        return (c, true);
+    }
+    let said = kyd + usd + best.map_or(0, |b| b.1) > 0;
+    (if usd > kyd { Currency::USD } else { Currency::KYD }, said)
 }
 
 /// Words that state a bank account's kind (cards are told by their own wording in `detect_type`).
@@ -833,7 +860,8 @@ fn pass1<'p>(scanner: &MultiPassScanner<'p>, rows: &[Row], diag: &mut Diagnostic
     diag.pass1.date_order_unproven = order_unproven;
     // said in so many words? ("Savings Bank" in a name doesn't say what this account is)
     diag.pass1.type_unstated = profile.is_none() && account_type != AccountType::CreditCard && !TYPE_STATED.is_match(&page1);
-    let currency = detect_currency(&page1);
+    let (currency, said) = detect_currency(&page1);
+    diag.pass1.currency_unstated = !said && profile.is_none();
     let currency_columns: Vec<(Currency, f64)> = rows
         .iter()
         .find_map(|r| {

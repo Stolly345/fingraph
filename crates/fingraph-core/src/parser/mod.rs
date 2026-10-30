@@ -238,6 +238,9 @@ pub struct Pass1Report {
     /// No bank profile and no date past the 12th: day/month order is a guess.
     #[serde(default)]
     pub date_order_unproven: bool,
+    /// No bank profile and page 1 names no currency (only `$`, or none): KYD is a default, not a reading.
+    #[serde(default)]
+    pub currency_unstated: bool,
     pub currency: Option<Currency>,
     pub currency_columns: Vec<Currency>,
     pub summary_lines: Vec<String>,

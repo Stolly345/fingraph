@@ -388,6 +388,8 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
         }
         let Some(a) = w.upgrade() else { return };
         a.reload_entities();
+        // a statement in another currency needs its days' rates
+        a.update_rates(false);
         if let Some(f) = on_done {
             return f();
         }

@@ -447,7 +447,7 @@ fn item_dialog(app: &Rc<App>, item: Option<ManualItem>, done: crate::Refresh) {
     let g = adw::PreferencesGroup::new();
     let name = adw::EntryRow::builder().title("Name (e.g. House, Car, Pension)").text(&i.name).build();
     let kind = adw::ComboRow::builder().title("It's").model(&gtk::StringList::new(&["Something I own", "Something I owe"])).selected(i.liability as u32).build();
-    let cur = adw::ComboRow::builder().title("Currency").model(&gtk::StringList::new(&["KYD", "USD"])).selected((i.currency == Currency::USD) as u32).build();
+    let cur = crate::preferences::currency_row("Currency", i.currency);
     let apr = adw::EntryRow::builder().title("Interest a year, % (debts)").text(i.apr.map(|a| a.normalize().to_string()).unwrap_or_default()).build();
     let value = adw::EntryRow::builder().title("Value today").text(i.values.last().map(|v| amount_text(v.1)).unwrap_or_default()).build();
     for r in [name.upcast_ref::<gtk::Widget>(), kind.upcast_ref(), cur.upcast_ref(), apr.upcast_ref(), value.upcast_ref()] {
@@ -465,7 +465,7 @@ fn item_dialog(app: &Rc<App>, item: Option<ManualItem>, done: crate::Refresh) {
         let mut n = i.clone();
         n.name = name.text().trim().to_string();
         n.liability = kind.selected() == 1;
-        n.currency = if cur.selected() == 1 { Currency::USD } else { Currency::KYD };
+        n.currency = crate::preferences::currency_at(cur.selected());
         n.apr = parse_user(apr.text().trim_end_matches('%'));
         let Ok(id) = a.db.save_manual_item(&n) else { return };
         if let Some(v) = parse_user(&value.text()) {

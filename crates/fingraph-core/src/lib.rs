@@ -11,6 +11,7 @@ pub mod merchants;
 pub mod money;
 pub mod parser;
 pub mod prefs;
+pub mod rates;
 pub mod rules;
 pub mod workflows;
 pub mod budget;

@@ -476,6 +476,8 @@ fn an_unstated_account_type_is_settled_by_its_lines_or_held() {
         y += 14.0;
         put(40.0, y, "Statement Period: 01/02/2026 to 28/02/2026");
         y += 14.0;
+        put(40.0, y, "Currency: KYD");
+        y += 14.0;
         put(40.0, y, "Opening Balance");
         put(220.0, y, "1,000.00");
         y += 12.0;

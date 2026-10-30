@@ -4,6 +4,7 @@
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
+use chrono::NaiveDate;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -23,34 +24,134 @@ pub fn statement_fx_wins() -> bool {
     STATEMENT_FX.load(Ordering::Relaxed)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum Currency {
-    KYD,
-    USD,
-}
+/// A currency FinGraph keeps accounts in: one of `CURRENCIES` (an index into it, so it's `Copy` and its code
+/// and symbol are `'static`). KYD and USD come first; stored and serialised as the ISO code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Currency(u8);
+
+/// (ISO code, symbol, name). Codes that are also everyday English words are left out (ALL, TOP, CUP, PEN, TRY,
+/// GEL, MAD, BOB…): next to an amount in a description they'd be read as its currency.
+pub const CURRENCIES: &[(&str, &str, &str)] = &[
+    ("KYD", "CI$", "Cayman Islands dollar"),
+    ("USD", "US$", "US dollar"),
+    ("EUR", "€", "Euro"),
+    ("GBP", "£", "Pound sterling"),
+    ("CAD", "C$", "Canadian dollar"),
+    ("JMD", "J$", "Jamaican dollar"),
+    ("TTD", "TT$", "Trinidad and Tobago dollar"),
+    ("BBD", "Bds$", "Barbadian dollar"),
+    ("BSD", "B$", "Bahamian dollar"),
+    ("BMD", "BD$", "Bermudian dollar"),
+    ("XCD", "EC$", "East Caribbean dollar"),
+    ("BZD", "BZ$", "Belize dollar"),
+    ("GYD", "G$", "Guyanese dollar"),
+    ("HNL", "HNL", "Honduran lempira"),
+    ("GTQ", "GTQ", "Guatemalan quetzal"),
+    ("NIO", "C$N", "Nicaraguan córdoba"),
+    ("CRC", "₡", "Costa Rican colón"),
+    ("PAB", "PAB", "Panamanian balboa"),
+    ("DOP", "RD$", "Dominican peso"),
+    ("HTG", "HTG", "Haitian gourde"),
+    ("MXN", "MX$", "Mexican peso"),
+    ("COP", "COP", "Colombian peso"),
+    ("BRL", "R$", "Brazilian real"),
+    ("ARS", "ARS", "Argentine peso"),
+    ("CLP", "CLP", "Chilean peso"),
+    ("UYU", "UYU", "Uruguayan peso"),
+    ("AUD", "A$", "Australian dollar"),
+    ("NZD", "NZ$", "New Zealand dollar"),
+    ("CHF", "CHF", "Swiss franc"),
+    ("SEK", "SEK", "Swedish krona"),
+    ("NOK", "NOK", "Norwegian krone"),
+    ("DKK", "DKK", "Danish krone"),
+    ("ISK", "ISK", "Icelandic króna"),
+    ("PLN", "PLN", "Polish złoty"),
+    ("CZK", "CZK", "Czech koruna"),
+    ("HUF", "HUF", "Hungarian forint"),
+    ("RON", "RON", "Romanian leu"),
+    ("BGN", "BGN", "Bulgarian lev"),
+    ("UAH", "UAH", "Ukrainian hryvnia"),
+    ("JPY", "JPY", "Japanese yen"),
+    ("CNY", "CNY", "Chinese yuan"),
+    ("HKD", "HK$", "Hong Kong dollar"),
+    ("SGD", "S$", "Singapore dollar"),
+    ("KRW", "₩", "South Korean won"),
+    ("THB", "฿", "Thai baht"),
+    ("MYR", "RM", "Malaysian ringgit"),
+    ("IDR", "IDR", "Indonesian rupiah"),
+    ("PHP", "₱", "Philippine peso"),
+    ("VND", "₫", "Vietnamese đồng"),
+    ("INR", "₹", "Indian rupee"),
+    ("PKR", "PKR", "Pakistani rupee"),
+    ("LKR", "LKR", "Sri Lankan rupee"),
+    ("BDT", "৳", "Bangladeshi taka"),
+    ("NPR", "NPR", "Nepalese rupee"),
+    ("AED", "AED", "UAE dirham"),
+    ("SAR", "SAR", "Saudi riyal"),
+    ("QAR", "QAR", "Qatari riyal"),
+    ("ILS", "₪", "Israeli shekel"),
+    ("EGP", "EGP", "Egyptian pound"),
+    ("NGN", "₦", "Nigerian naira"),
+    ("GHS", "GH₵", "Ghanaian cedi"),
+    ("KES", "KSh", "Kenyan shilling"),
+    ("ZAR", "ZAR", "South African rand"),
+    ("ZWG", "ZWG", "Zimbabwe gold"),
+];
+
+/// Symbols and old spellings that name a currency (codes are matched as they are).
+const ALIASES: &[(&str, &str)] = &[
+    ("CI$", "KYD"), ("CI", "KYD"), ("KY$", "KYD"), ("CID", "KYD"),
+    ("US$", "USD"), ("US", "USD"),
+    ("€", "EUR"), ("£", "GBP"), ("C$", "CAD"), ("CA$", "CAD"), ("J$", "JMD"), ("TT$", "TTD"), ("BDS$", "BBD"),
+    ("B$", "BSD"), ("BD$", "BMD"), ("EC$", "XCD"), ("BZ$", "BZD"), ("G$", "GYD"), ("RD$", "DOP"), ("MX$", "MXN"),
+    ("R$", "BRL"), ("A$", "AUD"), ("AU$", "AUD"), ("NZ$", "NZD"), ("HK$", "HKD"), ("S$", "SGD"), ("₱", "PHP"),
+    ("₹", "INR"), ("₦", "NGN"), ("₪", "ILS"), ("₩", "KRW"), ("฿", "THB"), ("₡", "CRC"), ("₫", "VND"), ("৳", "BDT"),
+    ("GH₵", "GHS"), ("KSH", "KES"),
+];
 
 impl Currency {
-    pub const ALL: [Currency; 2] = [Currency::KYD, Currency::USD];
+    pub const KYD: Currency = Currency(0);
+    pub const USD: Currency = Currency(1);
 
+    /// Every currency FinGraph knows, KYD and USD first.
+    pub fn all() -> impl Iterator<Item = Currency> {
+        (0..CURRENCIES.len() as u8).map(Currency)
+    }
     pub fn code(self) -> &'static str {
-        match self {
-            Self::KYD => "KYD",
-            Self::USD => "USD",
-        }
+        CURRENCIES[self.0 as usize].0
     }
     pub fn symbol(self) -> &'static str {
-        match self {
-            Self::KYD => "CI$",
-            Self::USD => "US$",
-        }
+        CURRENCIES[self.0 as usize].1
     }
-    /// `KYD`, `CI$`, `CI`, `KY$`, `USD`, `US$`, `US` (any case).
+    pub fn name(self) -> &'static str {
+        CURRENCIES[self.0 as usize].2
+    }
+    /// `KYD — Cayman Islands dollar`, for pickers.
+    pub fn label(self) -> String {
+        format!("{} — {}", self.code(), self.name())
+    }
+    /// A currency's code or symbol (`GBP`, `£`, `CI$`, `US`, any case).
     pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().trim_end_matches(['(', ')', ',', ':']).to_ascii_uppercase().as_str() {
-            "KYD" | "CI$" | "CI" | "KY$" | "CID" => Some(Self::KYD),
-            "USD" | "US$" | "US" => Some(Self::USD),
-            _ => None,
-        }
+        let t = s.trim().trim_end_matches(['(', ')', ',', ':']).to_uppercase();
+        let code = ALIASES.iter().find(|(a, _)| *a == t).map_or(t.as_str(), |(_, c)| c);
+        CURRENCIES.iter().position(|(c, _, _)| *c == code).map(|i| Currency(i as u8))
+    }
+    /// Pegged to the US dollar at a fixed rate (no market rate needed).
+    pub fn pegged(self) -> bool {
+        self == Currency::KYD || self == Currency::USD
+    }
+}
+
+impl Serialize for Currency {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(self.code())
+    }
+}
+
+impl<'de> Deserialize<'de> for Currency {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Currency::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("unknown currency {s}")))
     }
 }
 
@@ -60,36 +161,70 @@ impl std::fmt::Display for Currency {
     }
 }
 
-/// Exchange rates, seeded with the Cayman peg (1 KYD = 1.20 USD).
+/// Exchange rates: the Cayman peg (1 KYD = 1.20 USD) and, for other currencies, how many units of each buy one
+/// US dollar on each day (downloaded and kept in the ledger). Every conversion goes through the US dollar.
 #[derive(Debug, Clone)]
 pub struct Fx {
     pub kyd_to_usd: Decimal,
     pub usd_to_kyd: Decimal,
+    /// Units of a currency per US dollar, by day.
+    pub daily: std::collections::BTreeMap<Currency, std::collections::BTreeMap<NaiveDate, Decimal>>,
 }
 
 impl Default for Fx {
     fn default() -> Self {
-        Fx {
-            kyd_to_usd: Decimal::new(120, 2),
-            usd_to_kyd: Decimal::new(83333333, 8),
-        }
+        Fx { kyd_to_usd: Decimal::new(120, 2), usd_to_kyd: Decimal::new(83333333, 8), daily: Default::default() }
     }
 }
 
 impl Fx {
-    pub fn rate(&self, from: Currency, to: Currency) -> Decimal {
-        match (from, to) {
-            (Currency::KYD, Currency::USD) => self.kyd_to_usd,
-            (Currency::USD, Currency::KYD) => self.usd_to_kyd,
-            _ => Decimal::ONE,
+    /// Units of `c` per US dollar on `day` (the latest known on or before it; or the earliest known, for a day
+    /// before any), or today (`None`: the latest). `None` when nothing is known for `c`.
+    pub fn per_usd(&self, c: Currency, day: Option<NaiveDate>) -> Option<Decimal> {
+        match c {
+            Currency::USD => Some(Decimal::ONE),
+            Currency::KYD => Some(self.usd_to_kyd),
+            _ => {
+                let rates = self.daily.get(&c)?;
+                match day {
+                    Some(d) => rates.range(..=d).next_back().or_else(|| rates.iter().next()).map(|(_, r)| *r),
+                    None => rates.values().next_back().copied(),
+                }
+            }
         }
     }
-    /// Converted and rounded to cents (banker's rounding is *not* used: statements round half up).
+    /// Whether any rate is known for `c` (always, for the pegged ones).
+    pub fn knows(&self, c: Currency) -> bool {
+        self.per_usd(c, None).is_some()
+    }
+    /// How many units of `to` one unit of `from` buys on `day` (`None`: today). `None` when either is unknown.
+    pub fn rate_on(&self, from: Currency, to: Currency, day: Option<NaiveDate>) -> Option<Decimal> {
+        if from == to {
+            return Some(Decimal::ONE);
+        }
+        match (from, to) {
+            (Currency::KYD, Currency::USD) => Some(self.kyd_to_usd),
+            (Currency::USD, Currency::KYD) => Some(self.usd_to_kyd),
+            _ => {
+                let (f, t) = (self.per_usd(from, day)?, self.per_usd(to, day)?);
+                (!f.is_zero()).then(|| t / f)
+            }
+        }
+    }
+    /// Today's rate; 1 when a currency's rate isn't known yet (the amount stays as printed until it is).
+    pub fn rate(&self, from: Currency, to: Currency) -> Decimal {
+        self.rate_on(from, to, None).unwrap_or(Decimal::ONE)
+    }
+    /// Converted at today's rate and rounded to cents (half up, as statements round).
     pub fn convert(&self, amount: Decimal, from: Currency, to: Currency) -> Decimal {
+        self.convert_on(amount, from, to, None)
+    }
+    /// Converted at `day`'s rate (the latest known on or before it) and rounded to cents.
+    pub fn convert_on(&self, amount: Decimal, from: Currency, to: Currency, day: Option<NaiveDate>) -> Decimal {
         if from == to {
             return amount;
         }
-        round2(amount * self.rate(from, to))
+        round2(amount * self.rate_on(from, to, day).unwrap_or(Decimal::ONE))
     }
 }
 
@@ -293,6 +428,37 @@ pub fn parse_user(text: &str) -> Option<Decimal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Codes, symbols and old spellings all name their currency; words that happen to be currency codes elsewhere
+    /// (TOP, ALL) aren't currencies here; the code is what's stored, as it always was.
+    #[test]
+    fn currencies_by_code_and_symbol() {
+        let c = |s: &str| Currency::parse(s).map(Currency::code);
+        assert_eq!((c("KYD"), c("CI$"), c("us$"), c("USD")), (Some("KYD"), Some("KYD"), Some("USD"), Some("USD")));
+        assert_eq!((c("GBP"), c("£"), c("C$"), c("J$"), c("₱"), c("gbp")), (Some("GBP"), Some("GBP"), Some("CAD"), Some("JMD"), Some("PHP"), Some("GBP")));
+        assert_eq!((c("TOP"), c("ALL"), c("PEN"), c("XYZ")), (None, None, None, None));
+        assert_eq!(serde_json::to_string(&Currency::KYD).unwrap(), "\"KYD\"");
+        assert_eq!(serde_json::from_str::<Currency>("\"GBP\"").unwrap().code(), "GBP");
+        assert!(Currency::KYD < Currency::USD && Currency::all().next() == Some(Currency::KYD));
+    }
+
+    /// Other currencies go through the US dollar at the day's rate (the latest kept on or before it); KYD↔USD stays
+    /// on the peg; a currency with no rate converts one for one.
+    #[test]
+    fn dated_rates_through_the_dollar() {
+        let gbp = Currency::parse("GBP").unwrap();
+        let day = |m: u32, d: u32| NaiveDate::from_ymd_opt(2026, m, d).unwrap();
+        let mut fx = Fx::default();
+        fx.daily.entry(gbp).or_default().insert(day(3, 2), d("0.80"));
+        fx.daily.entry(gbp).or_default().insert(day(3, 9), d("0.75"));
+        assert_eq!(fx.convert_on(d("100.00"), gbp, Currency::USD, Some(day(3, 5))), d("125.00"), "the 2nd's rate, on the 5th");
+        assert_eq!(fx.convert_on(d("100.00"), gbp, Currency::USD, Some(day(3, 9))), d("133.33"));
+        assert_eq!(fx.convert_on(d("100.00"), gbp, Currency::KYD, Some(day(3, 5))), d("104.17"), "via the dollar, then the peg");
+        assert_eq!(fx.convert_on(d("100.00"), gbp, Currency::USD, Some(day(1, 1))), d("125.00"), "before any rate: the earliest");
+        assert_eq!(fx.convert(d("120.00"), Currency::USD, Currency::KYD), d("100.00"));
+        let cad = Currency::parse("CAD").unwrap();
+        assert!(!fx.knows(cad) && fx.convert(d("50.00"), cad, Currency::KYD) == d("50.00"));
+    }
 
     #[test]
     fn typed_amounts_are_bounded() {

@@ -98,7 +98,7 @@ fn online_samples() {
             let read = serde_json::json!({
                 "bank": r.profile_slug, "identifiers": r.diagnostics.pass1.identifiers, "notes": r.diagnostics.pass3.layout_notes,
                 "sections": r.sections.iter().map(|s| serde_json::json!({
-                    "reconciliation": format!("{:?}", s.reconciliation), "opening": s.opening, "closing": s.closing,
+                    "reconciliation": format!("{:?}", s.reconciliation), "opening": s.opening, "closing": s.closing, "currency": s.currency,
                     "transactions": s.transactions.iter().map(|t| serde_json::json!({"date": t.posted.to_string(), "amount": t.amount, "balance": t.balance, "description": t.description})).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>(),
             });

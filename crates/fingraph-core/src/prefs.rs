@@ -26,6 +26,8 @@ pub struct Prefs {
     pub currency_codes: bool,
     /// `(CI$ 12.00)` instead of `-CI$ 12.00`.
     pub brackets: bool,
+    /// Download exchange rates for currencies other than KYD and USD (Frankfurter, then the fawazahmed0 API).
+    pub download_rates: bool,
 
     // Import & scanning
     /// Where imported PDFs are kept; `None` = `~/.local/share/fingraph/statements`.
@@ -77,6 +79,7 @@ impl Default for Prefs {
             statement_fx_wins: true,
             currency_codes: false,
             brackets: false,
+            download_rates: false,
             statements_dir: None,
             watch_enabled: false,
             watch_folder: None,
