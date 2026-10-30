@@ -12,6 +12,11 @@ use std::rc::Rc;
 use crate::charts::{self, Chart, Data, LineSeries, Series};
 use crate::{App, heading, info_caption, today, with_info};
 
+/// The last day of `d`'s month.
+fn end_of(d: NaiveDate) -> NaiveDate {
+    insights::add_months(insights::month_start(d), 1) - Duration::days(1)
+}
+
 fn f(d: Decimal) -> f64 {
     d.to_f64().unwrap_or(0.0)
 }
@@ -49,19 +54,51 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let demo_btn = gtk::Button::builder().label("Load Demo Data").halign(gtk::Align::Center).css_classes(["pill", "suggested-action"]).action_name("win.demo").build();
     empty.set_child(Some(&demo_btn));
 
-    // KPI ribbon
-    let ribbon = gtk::Box::builder().spacing(12).homogeneous(true).build();
+    // KPI ribbon: two rows of five
+    let ribbon = gtk::Grid::builder().column_spacing(12).row_spacing(12).column_homogeneous(true).build();
     // what needs an answer from you, shown only while something does
     let review = adw::Banner::builder().button_label("Review").revealed(false).build();
     review.set_action_name(Some("win.show-review"));
 
-    let (c1, k_net) = kpi_card(
-        "Net Cash Flow",
-        "Money in minus money out over the date range at the top. Transfers between your own accounts don't count as either. Green: more came in than went out. Red: you spent more than came in. The percentage compares it with the same length of time just before.",
+    // net cash flow per year, month and fortnight, each with its own way of measuring it
+    let flow_card = |title: &str, key: &'static str| {
+        let (c, k) = kpi_card(
+            title,
+            "Money in minus money out, transfers between your own accounts left out. Green: more came in than went out. Red: you spent more than came in. The menu picks how it's measured: Average takes your last 12 months of statements and scales them to this period, Range scales the range picked at the top, and Actual is the real period (this year so far, the last full month, or the last 14 days of statements).",
+        );
+        let dd = gtk::DropDown::from_strings(&["Average", "Range", "Actual"]);
+        dd.set_css_classes(&["flat", "caption"]);
+        dd.set_halign(gtk::Align::Start);
+        dd.set_tooltip_text(Some("How this is measured"));
+        dd.set_selected(app.db.setting(key).and_then(|v| v.parse().ok()).unwrap_or(0));
+        let w = Rc::downgrade(app);
+        dd.connect_selected_notify(move |d| {
+            if let Some(a) = w.upgrade() {
+                let _ = a.db.set_setting(key, &d.selected().to_string());
+                a.refresh();
+            }
+        });
+        c.append(&dd);
+        (c, k, dd)
+    };
+    let (c_year, k_year, d_year) = flow_card("Net Cash Flow · Year", "overview_flow_year");
+    let (c_month, k_month, d_month) = flow_card("Net Cash Flow · Month", "overview_flow_month");
+    let (c_fort, k_fort, d_fort) = flow_card("Net Cash Flow · Fortnight", "overview_flow_fortnight");
+    let (c_left, k_left) = kpi_card(
+        "Left to Spend This Month",
+        "What's left this month in the categories you've budgeted: their budgets (with rollovers and money moved) minus what your statements show spent in them so far. Statements arrive after the month ends, so early in the month this looks high. Red means you're over.",
     );
     let (c2, k_rate) = kpi_card(
         "Savings / Operating Margin",
         "The share of your income you kept: (income − expenses) ÷ income. 20% means you kept 20 cents of every dollar that came in. For a business it's the operating margin. Below zero means you spent more than you earned.",
+    );
+    let (c_bill, k_bill) = kpi_card(
+        "Next Big Bill",
+        "The soonest of your big yearly bills (insurance, HOA fees, licences), when it's due, and how much of it has been set aside so far. Add or change them in Budget → Edit Plan.",
+    );
+    let (c_run, k_run) = kpi_card(
+        "Cash Runway",
+        "How many months the money in your bank accounts would last at your usual spending if no money came in. Cash is the latest balance on each account that isn't a card or loan; usual spending is the average month over your last 12 months of statements. 3 to 6 months is a common safety net.",
     );
     let (c3, k_subs) = kpi_card(
         "Active Subscription Burn",
@@ -75,8 +112,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         "Age of Money",
         "How many days money sits between arriving and being spent. Each purchase spends the oldest money still in your accounts. Under 30 days means you're spending this month's pay as it arrives; over 30 means you're living on last month's money, which is the goal.",
     );
-    for c in [&c1, &c2, &c3, &c4, &c5] {
-        ribbon.append(c);
+    for (i, c) in [&c_year, &c_month, &c_fort, &c_left, &c2, &c_bill, &c_run, &c5, &c3, &c4].into_iter().enumerate() {
+        ribbon.attach(c, i as i32 % 5, i as i32 / 5, 1, 1);
     }
     body.append(&ribbon);
     // what each business owes you for spending you paid personally
@@ -184,20 +221,89 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             crate::budget::fill_overview(&a, &budget_box);
             crate::budget::fill_big_bills(&a, &bills_box);
             let k = insights::kpis(&rows, &docs, from, to, ccy, &fx, today());
-            k_net.value.set_label(&money(k.net));
-            k_net.value.set_css_classes(&["value", "tnum", if k.net.is_sign_negative() { "amount-out" } else { "amount-in" }]);
-            k_net.sub.set_label(&format!(
-                "Income {} · Expenses {}{}",
-                money(k.income),
-                money(k.expenses),
-                k.net_delta_pct.map(|p| format!(" · {}{p:.0}% vs prior period", if p >= 0.0 { "+" } else { "" })).unwrap_or_default()
-            ));
+            // net cash flow: (income, expenses) over a window, scaled to the card's period
+            let data_end = insights::data_span(&rows).map_or(end_of(today()), |s| s.1.min(today()));
+            let data_start = insights::data_span(&rows).map_or(data_end, |s| s.0);
+            for (k, dd, per) in [(&k_year, &d_year, 0), (&k_month, &d_month, 1), (&k_fort, &d_fort, 2)] {
+                let days_in = [Decimal::from(365), Decimal::from(365) / Decimal::from(12), Decimal::from(14)][per];
+                let (wf, wt, scale, what) = match dd.selected() {
+                    // last 12 months of statements, or all of them when there are fewer
+                    0 => {
+                        let wf = (data_end - Duration::days(364)).max(data_start);
+                        (wf, data_end, true, format!("Average of {} to {}", wf.format("%b %Y"), data_end.format("%b %Y")))
+                    }
+                    1 => (from, to.min(data_end), true, format!("Scaled from {} – {}", from.format("%d %b %Y"), to.min(data_end).format("%d %b %Y"))),
+                    _ => match per {
+                        0 => {
+                            let wf = NaiveDate::from_ymd_opt(data_end.year(), 1, 1).unwrap_or(data_end);
+                            (wf, data_end, false, format!("{} so far, to {}", data_end.year(), data_end.format("%d %b")))
+                        }
+                        1 => {
+                            // the last month the statements cover in full
+                            let m = insights::month_start(data_end + Duration::days(1)) - Duration::days(1);
+                            let wf = insights::month_start(m);
+                            (wf, m, false, wf.format("%B %Y").to_string())
+                        }
+                        _ => (data_end - Duration::days(13), data_end, false, format!("{} – {}", (data_end - Duration::days(13)).format("%d %b"), data_end.format("%d %b"))),
+                    },
+                };
+                let (inc, exp) = insights::flows(&rows, wf, wt, ccy, &fx);
+                let span = Decimal::from((wt - wf).num_days().max(0) + 1);
+                let r = if scale { days_in / span } else { Decimal::ONE };
+                let (inc, exp) = ((inc * r).round_dp(2), (exp * r).round_dp(2));
+                let net = inc - exp;
+                k.value.set_label(&money(net));
+                k.value.set_css_classes(&["value", "tnum", if net.is_sign_negative() { "amount-out" } else { "amount-in" }]);
+                k.sub.set_label(&format!("In {} · Out {}\n{what}", money(inc), money(exp)));
+            }
+            match crate::budget::left_this_month(&a) {
+                Some((funded, spent)) => {
+                    let left = funded - spent;
+                    k_left.value.set_label(&money(left));
+                    k_left.value.set_css_classes(&["value", "tnum", if left.is_sign_negative() { "amount-out" } else { "amount-in" }]);
+                    k_left.sub.set_label(&format!("{} spent of {} budgeted", money(spent), money(funded)));
+                }
+                None => {
+                    k_left.value.set_label("—");
+                    k_left.value.set_css_classes(&["value", "tnum"]);
+                    k_left.sub.set_label("Set up a budget on the Budget page");
+                }
+            }
+            match crate::budget::next_big_bill(&a) {
+                Some((name, due, amount, aside)) => {
+                    k_bill.value.set_label(&money(amount));
+                    k_bill.sub.set_label(&format!("{name} · due {}\n{} set aside so far", due.format("%d %b %Y"), money(aside)));
+                }
+                None => {
+                    k_bill.value.set_label("—");
+                    k_bill.sub.set_label("No big bills planned · Budget → Edit Plan");
+                }
+            }
+            {
+                // cash: the latest balance of every visible account that isn't a card or loan
+                let accts = fingraph_core::wealth::account_balances(&all_rows, &docs);
+                let cash: Decimal = accts
+                    .iter()
+                    .filter(|(id, b)| !b.liability && !hidden_accounts.contains(id))
+                    .filter_map(|(_, b)| b.points.last().map(|p| fx.convert(p.1, b.currency, ccy)))
+                    .sum();
+                let wf = (data_end - Duration::days(364)).max(data_start);
+                let (_, spent) = insights::flows(&rows, wf, data_end, ccy, &fx);
+                let monthly = spent * Decimal::from(365) / Decimal::from(12) / Decimal::from((data_end - wf).num_days() + 1);
+                if monthly.is_zero() || cash.is_sign_negative() {
+                    k_run.value.set_label("—");
+                    k_run.sub.set_label("Needs account balances and spending");
+                } else {
+                    k_run.value.set_label(&format!("{:.1} months", f(cash / monthly)));
+                    k_run.sub.set_label(&format!("{} cash ÷ {} a month usual spending", money(cash.round_dp(2)), money(monthly.round_dp(2))));
+                }
+            }
             k_rate.value.set_label(&k.savings_rate_pct.map_or("—".into(), |p| format!("{p:.1}%")));
             k_rate.sub.set_label("(Income − Expenses) ÷ Income, transfers excluded");
             k_subs.value.set_label(&format!("{}/mo", money(k.subs_monthly)));
             k_subs.sub.set_label(&format!("{} a year across KYD & USD", money(k.subs_annual)));
-            k_rec.value.set_label(&format!("{}/{} Reconciled", k.reconciled, k.statements));
-            k_rec.sub.set_label(&format!("{} statements verified to the cent · {} uncategorized", k.reconciled, k.uncategorized));
+            k_rec.value.set_label(&format!("{}/{}", k.reconciled, k.statements));
+            k_rec.sub.set_label(&format!("statements reconciled to the cent · {} uncategorized", k.uncategorized));
             // split lines add up to their charge, so they age money the same way
             match fingraph_core::outlook::age_of_money(&all_rows, &docs, ccy, &fx) {
                 Some(x) => {

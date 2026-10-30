@@ -143,6 +143,28 @@ pub fn alerts(app: &App) -> Vec<(String, Decimal, Decimal, Alert)> {
     out
 }
 
+/// This month's budget for Overview: (funded, spent) in budgeted categories, None without a budget.
+pub fn left_this_month(app: &App) -> Option<(Decimal, Decimal)> {
+    let s = snap(app);
+    let m = month_start(today());
+    let end = add_months(m, 1).pred_opt().unwrap_or(m);
+    let env = envs(app, &s, m);
+    let rolls = app.db.rollovers(&s.scope);
+    let now: BTreeMap<String, Decimal> = by_category(&s.rows, m, end, s.ccy, &s.fx, &s.parents).into_iter().collect();
+    let budgeted: Vec<&Category> = s.cats.iter().filter(|c| env.get(&c.id).is_some_and(|e| !e.budget.is_zero()) || rolls.contains_key(&c.id)).collect();
+    let funded: Decimal = budgeted.iter().filter_map(|c| env.get(&c.id)).map(Envelope::funded).sum();
+    let spent: Decimal = budgeted.iter().filter_map(|c| now.get(&c.name)).copied().sum();
+    (!funded.is_zero()).then_some((funded, spent))
+}
+
+/// The soonest big bill: (name, due, amount, set aside so far) in the display currency.
+pub fn next_big_bill(app: &App) -> Option<(String, NaiveDate, Decimal, Decimal)> {
+    let s = snap(app);
+    let t = today();
+    let fd = s.funds.iter().min_by_key(|f| f.due(t))?;
+    Some((fd.name.clone(), fd.due(t), s.fx.convert(fd.amount, fd.currency, s.ccy), s.fx.convert(fd.set_aside(t), fd.currency, s.ccy)))
+}
+
 fn alert_text(a: &(String, Decimal, Decimal, Alert), ccy: Currency, through: NaiveDate) -> String {
     match a.3 {
         Alert::Over => format!("{} over by {}", a.0, fmt_money(a.1 - a.2, ccy)),

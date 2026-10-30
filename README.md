@@ -22,7 +22,7 @@ never a real ledger.*
 ```sh
 sudo apt install poppler-utils tesseract-ocr libgtk-4-dev libadwaita-1-dev
 cargo deb -p fingraph
-sudo apt install ./target/debian/fingraph_0.2.7-1_amd64.deb
+sudo apt install ./target/debian/fingraph_0.2.8-1_amd64.deb
 ```
 
 Or run it from source with `cargo run -p fingraph --release`.
@@ -67,7 +67,7 @@ personal and a property-business workspace, across all five banks, in KYD and US
 
 | Page | Ctrl+ | What it shows |
 |---|---|---|
-| Overview | 1 | Five headline numbers, **Big Bills Coming Up** and **Big Bills Over the Next 12 Months**, and six charts; a **Review** banner while merchants wait for an answer |
+| Overview | 1 | Ten headline cards in two rows (net cash flow for a year, a month and a fortnight, each measured as a 12-month average, the date range or the actual period; left to spend this month; savings rate; next big bill; cash runway; Age of Money; subscriptions; reconciliation), **Big Bills Coming Up** and **Big Bills Over the Next 12 Months**, and six charts; a **Review** banner while merchants wait for an answer |
 | Net Worth | 2 | What you own and owe over time, goals, and debt payoff |
 | Budget | 3 | This month against your plan, rollovers, non-monthly bills, watchlists, and where the money went |
 | Outlook | 4 | Balances until the next statement, safe to spend, the month's bills, and Age of Money |

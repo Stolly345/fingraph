@@ -112,7 +112,7 @@ pub struct Kpis {
     pub uncategorized: usize,
 }
 
-fn flows(rows: &[TxRow], from: NaiveDate, to: NaiveDate, ccy: Currency, fx: &Fx) -> (Decimal, Decimal) {
+pub fn flows(rows: &[TxRow], from: NaiveDate, to: NaiveDate, ccy: Currency, fx: &Fx) -> (Decimal, Decimal) {
     let (mut inc, mut exp) = (Decimal::ZERO, Decimal::ZERO);
     for t in rows.iter().filter(|t| in_range(t, from, to) && counts(t)) {
         let v = value(t, ccy, fx);
