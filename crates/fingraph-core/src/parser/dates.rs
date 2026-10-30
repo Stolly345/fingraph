@@ -50,11 +50,11 @@ const MONTHS: &[(&str, u32)] = &[
 static DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
         r"(?ix)
-        \b(?P<iy>\d{{4}})-(?P<im>\d{{2}})-(?P<id>\d{{2}})\b
-      | \b(?P<bm>{MON})(?:\.\s*|\s+)(?P<bd>\d{{1,2}})(?:st|nd|rd|th)?\b(?:,?\s+(?P<by>\d{{4}})\b)?
-      | \b(?P<ad>\d{{1,2}})(?:st|nd|rd|th)?[\s\-]?(?P<am>{MON})(?:\.?[\s\-,]+(?P<ay4>\d{{4}})\b|\.?-?(?P<ay2>\d{{2}})\b|\.\s(?P<ay2d>\d{{2}})(?:\s|$)|\.?\b)
-      | \b(?P<na>\d{{1,2}})[/.\-](?P<nb>\d{{1,2}})[/.\-](?P<ny>\d{{4}}|\d{{2}})\b
-      | \b(?P<sa>\d{{1,2}})/(?P<sb>\d{{1,2}})\b"
+        (?-u:\b)(?P<iy>[0-9]{{4}})-(?P<im>[0-9]{{2}})-(?P<id>[0-9]{{2}})(?-u:\b)
+      | (?-u:\b)(?P<bm>{MON})(?:\.\s*|\s+)(?P<bd>[0-9]{{1,2}})(?:st|nd|rd|th)?(?-u:\b)(?:,?\s+(?P<by>[0-9]{{4}})(?-u:\b))?
+      | (?-u:\b)(?P<ad>[0-9]{{1,2}})(?:st|nd|rd|th)?[\s\-]?(?P<am>{MON})(?:\.?[\s\-,]+(?P<ay4>[0-9]{{4}})(?-u:\b)|\.?-?(?P<ay2>[0-9]{{2}})(?-u:\b)|\.\s(?P<ay2d>[0-9]{{2}})(?:\s|$)|\.?(?-u:\b))
+      | (?-u:\b)(?P<na>[0-9]{{1,2}})[/.\-](?P<nb>[0-9]{{1,2}})[/.\-](?P<ny>[0-9]{{4}}|[0-9]{{2}})(?-u:\b)
+      | (?-u:\b)(?P<sa>[0-9]{{1,2}})/(?P<sb>[0-9]{{1,2}})(?-u:\b)"
     ))
     .expect("date regex")
 });
@@ -73,9 +73,15 @@ fn month_num(s: &str) -> u32 {
     MONTHS.iter().find(|(p, _)| s.starts_with(p)).map_or(12, |m| m.1)
 }
 
+/// `26` is 2026; a two-digit year more than five years ahead is last century's (`97` is 1997).
 fn year_of(s: &str) -> i32 {
     let y: i32 = s.parse().unwrap_or(0);
-    if s.len() == 2 { 2000 + y } else { y }
+    let soon = chrono::Local::now().year() % 100 + 5;
+    match s.len() {
+        2 if y > soon => 1900 + y,
+        2 => 2000 + y,
+        _ => y,
+    }
 }
 
 /// Every date-looking thing in `text`, left to right, with where it was.

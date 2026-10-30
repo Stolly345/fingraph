@@ -783,3 +783,16 @@ fn generated_statements() {
         assert!(provable_exact * 1000 >= 940 * provable, "exact reads of provable statements fell to {provable_exact}/{provable}");
     }
 }
+
+/// Statements the generator once found read wrong yet Reconciled with nothing to look at, kept so they stay
+/// caught: seed 77 #1847 (a misplaced balance; the read recovered the deposit only because it was worth what
+/// was missing, and let the arithmetic set five of six signs).
+#[test]
+fn once_wrong_and_reconciled() {
+    let once: &[(u64, u64)] = &[(77, 1847)];
+    for &(seed, k) in once {
+        let s = generate(seed * 1_000_003 + k);
+        let (o, why) = judge(&s);
+        assert_ne!(o, Outcome::WrongReconciled, "seed {seed} #{k}: {why}");
+    }
+}
