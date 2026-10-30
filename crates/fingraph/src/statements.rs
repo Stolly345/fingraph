@@ -8,6 +8,7 @@ use fingraph_core::money::{fmt_money, parse_user};
 use fingraph_core::parser::{MultiPassScanner, ScanResult};
 use fingraph_core::{Currency, Decimal, Reconciliation};
 use gtk::{gdk, gio, glib};
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -128,7 +129,7 @@ fn doc_row(app: &Rc<App>, d: &DocumentRow) -> adw::ActionRow {
             dlg.add_responses(&[("cancel", "Cancel"), ("del", "Remove")]);
             dlg.set_response_appearance("del", adw::ResponseAppearance::Destructive);
             let w = Rc::downgrade(&a);
-            dlg.connect_response(None, move |_, r| {
+            dlg.connect_response(None, move |_, r| crate::shielded(|| {
                 if let (Some(a), "del") = (w.upgrade(), r) {
                     match a.db.delete_document(id) {
                         Ok(()) => a.toast("Statement removed"),
@@ -136,7 +137,7 @@ fn doc_row(app: &Rc<App>, d: &DocumentRow) -> adw::ActionRow {
                     }
                     a.reload_entities();
                 }
-            });
+            }));
             dlg.present(Some(&a.win));
         });
     }
@@ -155,7 +156,7 @@ fn approve_dialog(app: &Rc<App>, id: i64, name: &str, why: &[Review], n: i64) {
     dlg.add_responses(&[("cancel", "Cancel"), ("report", "Scan Pass Report"), ("ok", "Approve")]);
     dlg.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
     let w = Rc::downgrade(app);
-    dlg.connect_response(None, move |_, r| {
+    dlg.connect_response(None, move |_, r| crate::shielded(|| {
         let Some(a) = w.upgrade() else { return };
         match r {
             "report" => report_dialog(&a, id),
@@ -178,7 +179,7 @@ fn approve_dialog(app: &Rc<App>, id: i64, name: &str, why: &[Review], n: i64) {
             }
             _ => {}
         }
-    });
+    }));
     dlg.present(Some(&app.win));
 }
 
@@ -315,7 +316,7 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
     };
     let profiles = app.db.profiles().unwrap_or_default();
     let w = Rc::downgrade(app);
-    glib::spawn_future_local(async move {
+    crate::spawn_guarded(w.clone(), async move {
         let (mut inserted, mut files, mut reconciled, mut held) = (0, 0, 0, 0);
         for p in paths {
             let profiles = profiles.clone();
@@ -407,7 +408,7 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
                 a.toast(&msg);
                 crate::wizard::triage(&a);
             } else if waiting {
-                a.toast_action(&msg, "Triage", Rc::new(crate::wizard::triage));
+                a.toast_action(&msg, "Categorize", Rc::new(crate::wizard::triage));
             } else {
                 a.toast(&msg);
             }
@@ -432,26 +433,50 @@ pub fn watch(app: &Rc<App>) {
         if matches!(ev, gio::FileMonitorEvent::ChangesDoneHint | gio::FileMonitorEvent::MovedIn | gio::FileMonitorEvent::Renamed)
             && let Some(p) = file.path()
         {
-            check(&a, vec![p]);
+            // a folder moved in is walked; a file is checked
+            if p.is_dir() { sweep(&a, &p) } else { check(&a, vec![p]) }
         }
     });
     *app.watch.borrow_mut() = Some(mon);
 }
 
-fn sweep(app: &Rc<App>, dir: &std::path::Path) {
-    check(app, pdfs_in(dir));
+/// Walk the watched folder again. The monitor sees only the folder itself, so this runs whenever the window
+/// comes back into focus, for statements saved into its subfolders meanwhile.
+// ponytail: re-walk on focus; one monitor per subfolder if that ever proves too slow to notice
+pub fn resweep(app: &Rc<App>) {
+    let p = app.db.prefs();
+    if let Some(dir) = p.watch_folder.filter(|_| p.watch_enabled) {
+        sweep(app, &dir);
+    }
 }
 
-/// Every PDF in a folder and the folders inside it (people file statements by bank or by year).
+/// Walk the folder off the main thread (Downloads can be big), then check what's new.
+fn sweep(app: &Rc<App>, dir: &std::path::Path) {
+    let (w, dir) = (Rc::downgrade(app), dir.to_path_buf());
+    crate::spawn_guarded(w.clone(), async move {
+        let found = gio::spawn_blocking(move || pdfs_in(&dir)).await.unwrap_or_default();
+        if let Some(a) = w.upgrade() {
+            check(&a, found);
+        }
+    });
+}
+
+/// Every PDF in a folder and the folders inside it (people file statements by bank or by year). Links
+/// aren't followed (a link to a parent would loop), and it stops 8 folders down or at 5,000 PDFs.
 pub fn pdfs_in(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let mut todo = vec![dir.to_path_buf()];
-    while let Some(d) = todo.pop() {
-        for p in std::fs::read_dir(&d).into_iter().flatten().flatten().map(|e| e.path()) {
-            if p.is_dir() {
-                todo.push(p);
-            } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
+    let mut todo = vec![(dir.to_path_buf(), 0)];
+    while let Some((d, depth)) = todo.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let (p, Ok(t)) = (e.path(), e.file_type()) else { continue };
+            if t.is_dir() && depth < 8 {
+                todo.push((p, depth + 1));
+            } else if t.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
                 out.push(p);
+                if out.len() >= 5000 {
+                    todo.clear();
+                    break;
+                }
             }
         }
     }
@@ -471,63 +496,100 @@ pub fn remember_seen(app: &App, paths: &[PathBuf]) {
     let _ = app.db.set_setting("watch_seen", &seen.iter().map(|s| format!("{s}\n")).collect::<String>());
 }
 
-/// Seen before (by path, size and time) → skip; otherwise scan, and import only real statements.
+thread_local! {
+    /// Files the watcher is reading right now, so a second sweep doesn't read them again alongside.
+    static CHECKING: RefCell<std::collections::HashSet<PathBuf>> = RefCell::default();
+}
+
+/// Seen before (by path, size and time) → skip; otherwise scan, and import only real statements. A file
+/// that couldn't be read or imported says so; it's remembered only when trying again can't change the answer.
 fn check(app: &Rc<App>, paths: Vec<PathBuf>) {
-    let key = |p: &std::path::Path| seen_key(p);
     let seen: std::collections::HashSet<String> = app.db.setting("watch_seen").and_then(|j| serde_json_lite(&j)).unwrap_or_default();
-    let todo: Vec<(PathBuf, String)> = paths.into_iter().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))).filter_map(|p| Some((p.clone(), key(&p)?))).filter(|(_, k)| !seen.contains(k)).collect();
+    let todo: Vec<(PathBuf, String)> = paths
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")))
+        .filter_map(|p| Some((p.clone(), seen_key(&p)?)))
+        .filter(|(p, k)| !seen.contains(k) && CHECKING.with(|c| c.borrow_mut().insert(p.clone())))
+        .collect();
     if todo.is_empty() {
         return;
     }
     let profiles = app.db.profiles().unwrap_or_default();
     let w = Rc::downgrade(app);
-    glib::spawn_future_local(async move {
+    crate::spawn_guarded(w.clone(), async move {
         for (p, k) in todo {
             let (profiles, p2) = (profiles.clone(), p.clone());
-            let r = gio::spawn_blocking(move || -> Option<(ScanResult, String)> {
-                let sha = db::file_sha256(&p2).ok()?;
-                let scan = MultiPassScanner::new(&profiles).scan_pdf(&p2).ok()?;
-                Some((scan, sha))
+            let r = gio::spawn_blocking(move || -> Result<(ScanResult, String), String> {
+                let sha = db::file_sha256(&p2).map_err(|e| e.to_string())?;
+                let scan = MultiPassScanner::new(&profiles).scan_pdf(&p2).map_err(|e| e.to_string())?;
+                Ok((scan, sha))
             })
             .await
-            .ok()
-            .flatten();
+            .unwrap_or_else(|_| Err("the scanner crashed".into()));
+            CHECKING.with(|c| c.borrow_mut().remove(&p));
             let Some(a) = w.upgrade() else { return };
-            let seen_now = |a: &Rc<App>| {
-                let mut seen: std::collections::HashSet<String> = a.db.setting("watch_seen").and_then(|j| serde_json_lite(&j)).unwrap_or_default();
-                seen.insert(k.clone());
-                let _ = a.db.set_setting("watch_seen", &seen.iter().map(|s| format!("{s}\n")).collect::<String>());
-            };
-            let Some((scan, sha)) = r.filter(|(s, _)| s.profile_slug.is_some() && !s.sections.is_empty()) else {
-                seen_now(&a);
-                continue;
-            };
-            let Some(entity) = a.import_entity() else { continue };
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let Ok(plan) = a.db.plan_import(&sha, &scan) else { continue };
-            if plan.already_imported || plan.no_transactions {
-                seen_now(&a);
-                continue;
-            }
-            // a new account, an unreadable account number or a period already imported needs a person:
-            // nothing is imported, and until it's decided the file is offered again each time
-            let Some(targets) = plan.automatic() else {
-                let p2 = p.clone();
-                a.toast_action(&format!("{name} in your watched folder needs a decision before it's imported"), "Review", Rc::new(move |a: &Rc<App>| import_paths(a, vec![p2.clone()])));
-                continue;
-            };
-            seen_now(&a);
-            if let Ok(rep) = a.db.import_scan(entity, &name, &sha, &scan, &targets) {
-                let _ = a.db.keep_pdf(&p, &sha);
-                a.reload_entities();
-                if rep.held > 0 {
-                    a.toast_action(&format!("{name} from your watched folder is waiting for review"), "Review", Rc::new(|a: &Rc<App>| a.show_view("statements")));
-                } else {
-                    a.toast_action(&format!("Imported {name} from your watched folder · {} transactions", rep.inserted), "Triage", Rc::new(crate::wizard::triage));
-                }
-            }
+            crate::guard(&a, || watched_file(&a, &p, &k, r));
         }
     });
+}
+
+/// What to do with one scanned file from the watched folder.
+fn watched_file(a: &Rc<App>, p: &std::path::Path, k: &str, r: Result<(ScanResult, String), String>) {
+    let seen_now = || {
+        let mut seen: std::collections::HashSet<String> = a.db.setting("watch_seen").and_then(|j| serde_json_lite(&j)).unwrap_or_default();
+        seen.insert(k.to_string());
+        let _ = a.db.set_setting("watch_seen", &seen.iter().map(|s| format!("{s}\n")).collect::<String>());
+    };
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // the toast offers the file to Import, which asks or explains
+    let offer = |msg: String| {
+        let p2 = p.to_path_buf();
+        a.toast_action(&msg, "Import…", Rc::new(move |a: &Rc<App>| import_paths(a, vec![p2.clone()])));
+    };
+    let (scan, sha) = match r {
+        Ok(x) => x,
+        Err(e) => {
+            // the same file reads the same way next time, unless a missing tool gets installed
+            if !e.contains("install") {
+                seen_now();
+            }
+            return offer(format!("{name} in your watched folder couldn't be read: {e}"));
+        }
+    };
+    if scan.profile_slug.is_none() || scan.sections.is_empty() {
+        // not from a known bank (or not a statement): left for Import
+        return seen_now();
+    }
+    let Some(entity) = a.import_entity() else {
+        return offer(format!("{name} in your watched folder needs a workspace first"));
+    };
+    let plan = match a.db.plan_import(&sha, &scan) {
+        Ok(plan) => plan,
+        Err(e) => return offer(format!("{name} in your watched folder couldn't be imported: {e}")),
+    };
+    if plan.already_imported || plan.no_transactions {
+        return seen_now();
+    }
+    // a new account, an unreadable account number or a period already imported needs a person:
+    // nothing is imported, and until it's decided the file is offered again each time
+    let Some(targets) = plan.automatic() else {
+        return offer(format!("{name} in your watched folder needs a decision before it's imported"));
+    };
+    match a.db.import_scan(entity, &name, &sha, &scan, &targets) {
+        Ok(rep) => {
+            seen_now();
+            if let Err(e) = a.db.keep_pdf(p, &sha) {
+                a.toast(&format!("{name}: couldn't keep a copy for rescanning ({e})"));
+            }
+            a.reload_entities();
+            if rep.held > 0 {
+                a.toast_action(&format!("{name} from your watched folder is waiting for review"), "Review", Rc::new(|a: &Rc<App>| a.show_view("statements")));
+            } else {
+                a.toast_action(&format!("Imported {name} from your watched folder · {} transactions", rep.inserted), "Categorize", Rc::new(crate::wizard::triage));
+            }
+        }
+        Err(e) => offer(format!("{name} in your watched folder couldn't be imported: {e}")),
+    }
 }
 
 /// The seen-list is stored one entry per line.
@@ -537,14 +599,16 @@ fn serde_json_lite(s: &str) -> Option<std::collections::HashSet<String>> {
 
 /// Re-read every statement with the current scanner and profiles, after asking.
 pub fn rescan_all(app: &Rc<App>) {
-    let d = adw::AlertDialog::new(
-        Some("Rescan All Statements?"),
-        Some("Every statement is read again with the current scanner and bank profiles. Learned rules are re-applied, but categories you set by hand on single transactions are lost."),
-    );
+    let kept = if app.db.prefs().rescan_keeps_edits {
+        "Learned rules are re-applied; what you set by hand on single transactions (category, tag, business, splits) is kept."
+    } else {
+        "Learned rules are re-applied, but categories you set by hand on single transactions are lost (“Rescan keeps my changes” in Preferences → Triage keeps them)."
+    };
+    let d = adw::AlertDialog::new(Some("Rescan All Statements?"), Some(&format!("Every statement is read again with the current scanner and bank profiles. {kept}")));
     d.add_responses(&[("cancel", "Cancel"), ("go", "Rescan")]);
     d.set_response_appearance("go", adw::ResponseAppearance::Suggested);
     let w = Rc::downgrade(app);
-    d.connect_response(None, move |_, r| {
+    d.connect_response(None, move |_, r| crate::shielded(|| {
         let Some(a) = w.upgrade() else { return };
         if r != "go" {
             return;
@@ -552,8 +616,23 @@ pub fn rescan_all(app: &Rc<App>) {
         let _ = a.db.auto_backup("before-rescan");
         let files = a.db.statement_files().unwrap_or_default();
         let profiles = a.db.profiles().unwrap_or_default();
+        // one rescan at a time: Rescan All is off until this one ends (however it ends)
+        struct Enable(Option<gio::SimpleAction>);
+        impl Drop for Enable {
+            fn drop(&mut self) {
+                if let Some(act) = &self.0 {
+                    act.set_enabled(true);
+                }
+            }
+        }
+        let enable = Enable(a.win.lookup_action("rescan").and_downcast::<gio::SimpleAction>());
+        if let Some(act) = &enable.0 {
+            act.set_enabled(false);
+        }
+        a.toast(&format!("Rescanning {} statements…", files.len()));
         let w = Rc::downgrade(&a);
-        glib::spawn_future_local(async move {
+        crate::spawn_guarded(w.clone(), async move {
+            let _enable = enable;
             let (mut n, mut txs, mut missing) = (0, 0, Vec::new());
             for (sha, name, entity) in files {
                 let Some(path) = a.db.stored_pdf(&sha, &name) else {
@@ -579,7 +658,7 @@ pub fn rescan_all(app: &Rc<App>) {
             }
             a.toast(&msg);
         });
-    });
+    }));
     d.present(Some(&app.win));
 }
 
@@ -743,7 +822,7 @@ fn convert_dialog(app: &Rc<App>, d: &DocumentRow, index: usize, line: &fingraph_
     dlg.add_responses(&[("cancel", "Cancel"), ("ok", "Add to Ledger")]);
     dlg.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
     let (w, doc, from) = (Rc::downgrade(app), d.id, from.clone());
-    dlg.connect_response(None, move |_, r| {
+    dlg.connect_response(None, move |_, r| crate::shielded(|| {
         let Some(a) = w.upgrade() else { return };
         if r != "ok" {
             return;
@@ -762,6 +841,25 @@ fn convert_dialog(app: &Rc<App>, d: &DocumentRow, index: usize, line: &fingraph_
             }
             Err(e) => a.toast(&e.to_string()),
         }
-    });
+    }));
     dlg.present(Some(&app.win));
+}
+
+#[cfg(test)]
+mod tests {
+    /// Links to a parent folder don't loop; PDFs in subfolders are found once.
+    #[test]
+    fn walk_skips_links_and_finds_subfolders() {
+        let dir = std::env::temp_dir().join(format!("fingraph-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cnb/2026")).unwrap();
+        std::fs::write(dir.join("top.pdf"), "x").unwrap();
+        std::fs::write(dir.join("cnb/2026/oct.PDF"), "x").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("cnb/up")).unwrap();
+        let found = super::pdfs_in(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(found, vec![dir.join("cnb/2026/oct.PDF"), dir.join("top.pdf")]);
+    }
 }

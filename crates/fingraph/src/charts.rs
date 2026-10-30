@@ -2,7 +2,7 @@
 //! the element; clicking reports its index (the donut uses it to drill into merchants).
 //! Values arrive as f64 for geometry only; every number a person reads comes pre-formatted from Decimal.
 
-use gtk::cairo;
+use gtk::{cairo, gdk, glib};
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::f64::consts::PI;
@@ -164,6 +164,38 @@ impl Chart {
             });
         }
         c.widget.add_controller(click);
+        // the keyboard does what the mouse does: Tab in, ←/→ pick a bar or slice, Enter opens it
+        let keys = gtk::EventControllerKey::new();
+        {
+            let c2 = c.clone();
+            keys.connect_key_pressed(move |_, key, _, _| {
+                let mut ids: Vec<usize> = c2.hits.borrow().iter().map(|h| h.index).collect();
+                ids.sort_unstable();
+                ids.dedup();
+                let (Some(&first), Some(&last)) = (ids.first(), ids.last()) else { return glib::Propagation::Proceed };
+                let now = c2.hover.get();
+                let pick = match key {
+                    gdk::Key::Right | gdk::Key::Down => Some(now.and_then(|n| ids.iter().copied().find(|i| *i > n)).unwrap_or(if now.is_some() { last } else { first })),
+                    gdk::Key::Left | gdk::Key::Up => Some(now.and_then(|n| ids.iter().copied().rev().find(|i| *i < n)).unwrap_or(first)),
+                    gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::space => {
+                        let f = c2.click.borrow().clone();
+                        if let (Some(f), Some(n)) = (f, now) {
+                            f(n);
+                        }
+                        return glib::Propagation::Stop;
+                    }
+                    _ => None,
+                };
+                let Some(i) = pick else { return glib::Propagation::Proceed };
+                c2.hover.set(Some(i));
+                let tip = c2.hits.borrow().iter().find(|h| h.index == i).map(|h| h.tip.clone()).unwrap_or_default();
+                c2.widget.set_tooltip_text(Some(&tip));
+                c2.widget.update_property(&[gtk::accessible::Property::Description(&tip)]);
+                c2.widget.queue_draw();
+                glib::Propagation::Stop
+            });
+        }
+        c.widget.add_controller(keys);
         c
     }
 
@@ -193,6 +225,8 @@ impl Chart {
     pub fn on_click(&self, f: impl Fn(usize) + 'static) {
         *self.click.borrow_mut() = Some(Rc::new(f));
         self.widget.set_cursor_from_name(Some("pointer"));
+        self.widget.set_focusable(true);
+        self.widget.set_focus_on_click(false);
     }
 }
 

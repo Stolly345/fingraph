@@ -64,6 +64,11 @@ pub struct App {
     content_title: adw::WindowTitle,
     workspace_btn: gtk::MenuButton,
     range_dd: gtk::DropDown,
+    /// The date range and its "change the custom dates" button.
+    range_box: gtk::Box,
+    range_edit: gtk::Button,
+    /// True while the range list is rebuilt: its selection changes aren't the user's.
+    range_quiet: Cell<bool>,
     range_items: RefCell<Vec<Range>>,
     custom_range: Cell<Option<(NaiveDate, NaiveDate)>>,
     side_list: gtk::ListBox,
@@ -96,6 +101,22 @@ pub struct App {
     pub focus_ids: RefCell<Option<Vec<i64>>>,
 }
 
+/// Sets a "this change isn't the user's" flag until dropped, so a panic halfway can't leave it stuck on.
+pub struct Quiet<'a>(&'a Cell<bool>);
+
+impl<'a> Quiet<'a> {
+    pub fn on(c: &'a Cell<bool>) -> Self {
+        c.set(true);
+        Quiet(c)
+    }
+}
+
+impl Drop for Quiet<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
 pub fn today() -> NaiveDate {
     Local::now().date_naive()
 }
@@ -122,6 +143,10 @@ impl App {
         let ccy_box = gtk::Box::builder().build();
         ccy_box.append(&display_dd);
         let range_dd = gtk::DropDown::builder().tooltip_text("Date range").build();
+        let range_edit = gtk::Button::builder().icon_name("document-edit-symbolic").tooltip_text("Change the custom dates").visible(false).build();
+        let range_box = gtk::Box::builder().css_classes(["linked"]).build();
+        range_box.append(&range_dd);
+        range_box.append(&range_edit);
         let menu = gio::Menu::new();
         let s1 = gio::Menu::new();
         s1.append(Some("Import Statements…"), Some("win.import"));
@@ -141,7 +166,7 @@ impl App {
 
         let content_header = adw::HeaderBar::builder().title_widget(&content_title).build();
         content_header.pack_start(&ccy_box);
-        content_header.pack_start(&range_dd);
+        content_header.pack_start(&range_box);
         content_header.pack_end(&menu_btn);
         let content_tv = adw::ToolbarView::new();
         content_tv.add_top_bar(&content_header);
@@ -183,6 +208,9 @@ impl App {
             content_title,
             workspace_btn,
             range_dd,
+            range_box,
+            range_edit,
+            range_quiet: Cell::new(false),
             range_items: RefCell::new(Vec::new()),
             custom_range: Cell::new(None),
             side_list: side_list.clone(),
@@ -204,6 +232,7 @@ impl App {
             views: RefCell::new(Vec::new()),
             focus_ids: RefCell::new(None),
         });
+        APP.with(|w| *w.borrow_mut() = Rc::downgrade(&app));
         app.display.set(app.db.setting("display_currency").and_then(|c| Currency::parse(&c)).unwrap_or(Currency::KYD));
         app.rebuild_display_list();
 
@@ -275,7 +304,7 @@ impl App {
                 }
                 if let Some(c) = a.display_list.borrow().get(dd.selected() as usize).copied() {
                     a.display.set(c);
-                    let _ = a.db.set_setting("display_currency", c.code());
+                    a.saved(a.db.set_setting("display_currency", c.code()));
                 }
                 a.refresh();
             });
@@ -284,11 +313,21 @@ impl App {
             let w = Rc::downgrade(&app);
             app.range_dd.connect_selected_notify(move |dd| {
                 let Some(a) = w.upgrade() else { return };
-                let items = a.range_items.borrow().clone();
-                match items.get(dd.selected() as usize) {
-                    Some(Range::Custom(..)) => a.ask_custom_range(),
-                    Some(_) => a.refresh(),
-                    None => {}
+                let custom = matches!(a.range_items.borrow().get(dd.selected() as usize), Some(Range::Custom(..)));
+                a.range_edit.set_visible(custom);
+                if a.range_quiet.get() {
+                    return;
+                }
+                if custom {
+                    a.ask_custom_range();
+                } else {
+                    a.refresh();
+                }
+            });
+            let w = Rc::downgrade(&app);
+            app.range_edit.connect_clicked(move |_| {
+                if let Some(a) = w.upgrade() {
+                    a.ask_custom_range();
                 }
             });
         }
@@ -307,6 +346,14 @@ impl App {
         // today's rates (and any a statement still lacks), quietly, when downloads are on
         app.update_rates(false);
         statements::watch(&app);
+        {
+            let w = Rc::downgrade(&app);
+            app.win.connect_is_active_notify(move |win| {
+                if let (true, Some(a)) = (win.is_active(), w.upgrade()) {
+                    statements::resweep(&a);
+                }
+            });
+        }
 
         let shot = cfg!(debug_assertions) && std::env::var_os("FINGRAPH_SHOT").is_some();
         if !shot && app.db.setting("onboarded").is_none() {
@@ -323,7 +370,7 @@ impl App {
             let w = Rc::downgrade(self);
             act.connect_activate(move |_, _| {
                 if let Some(a) = w.upgrade() {
-                    f(&a);
+                    guard(&a, || f(&a));
                 }
             });
             self.win.add_action(&act);
@@ -333,9 +380,10 @@ impl App {
             "demo",
             Rc::new(|a| match a.db.load_demo() {
                 Ok(n) => {
-                    let _ = a.db.set_setting("onboarded", "1");
+                    a.saved(a.db.set_setting("onboarded", "1"));
                     a.reload_entities();
-                    a.toast_action(&format!("Loaded {n} demo transactions from 84 simulated statements"), "Start Triage", Rc::new(wizard::triage));
+                    let docs = a.db.documents_all(&[]).map_or(0, |d| d.len());
+                    a.toast_action(&format!("Loaded {n} demo transactions from {docs} simulated statements"), "Categorize", Rc::new(wizard::triage));
                 }
                 Err(e) => a.toast(&e.to_string()),
             }),
@@ -359,7 +407,7 @@ impl App {
                     .application_name("FinGraph")
                     .application_icon(APP_ID)
                     .version(env!("CARGO_PKG_VERSION"))
-                    .comments("Local-first ledger and 5-pass statement scanner for Cayman bank statements. Nothing leaves this computer.")
+                    .comments("Local-first ledger and 5-pass statement scanner for bank statements. Your statements and ledger never leave this computer; with exchange-rate downloads on, only currency codes and dates are sent.")
                     .license_type(gtk::License::MitX11)
                     .build();
                 d.present(Some(&a.win));
@@ -410,6 +458,15 @@ impl App {
         self.refresh();
     }
 
+    fn workspace_label(&self) -> String {
+        let ents = self.entities.borrow();
+        match &*self.scope.borrow() {
+            Scope::One(id) => ents.iter().find(|e| e.id == *id).map_or("Workspace".into(), |e| e.name.clone()),
+            Scope::Consolidated(v) if v.len() == ents.len() => "Consolidated Overview".into(),
+            Scope::Consolidated(v) => format!("Consolidated ({})", v.len()),
+        }
+    }
+
     fn rebuild_workspace_menu(self: &Rc<Self>) {
         let ents = self.entities.borrow().clone();
         let scope = self.scope.borrow().clone();
@@ -420,12 +477,7 @@ impl App {
             Scope::Consolidated(_) => "consolidated".into(),
         };
         let _ = self.db.save_prefs(&p);
-        let label = match &scope {
-            Scope::One(id) => ents.iter().find(|e| e.id == *id).map_or("Workspace".into(), |e| e.name.clone()),
-            Scope::Consolidated(v) if v.len() == ents.len() => "Consolidated Overview".into(),
-            Scope::Consolidated(v) => format!("Consolidated ({})", v.len()),
-        };
-        self.workspace_btn.set_label(&label);
+        self.workspace_btn.set_label(&self.workspace_label());
         let pop = gtk::Popover::new();
         let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).margin_top(6).margin_bottom(6).margin_start(6).margin_end(6).build();
         let mut group: Option<gtk::CheckButton> = None;
@@ -455,12 +507,18 @@ impl App {
             let (w, id) = (Rc::downgrade(self), e.id);
             cb.connect_toggled(move |cb| {
                 let Some(a) = w.upgrade() else { return };
+                // the last one stays: consolidating nothing isn't a view
+                let last = matches!(&*a.scope.borrow(), Scope::Consolidated(v) if v.as_slice() == [id]);
+                if last && !cb.is_active() {
+                    return cb.set_active(true);
+                }
                 if let Scope::Consolidated(v) = &mut *a.scope.borrow_mut() {
                     v.retain(|x| *x != id);
                     if cb.is_active() {
                         v.push(id);
                     }
                 }
+                a.workspace_btn.set_label(&a.workspace_label());
                 a.refresh();
             });
             inc.append(&cb);
@@ -512,8 +570,10 @@ impl App {
             })
         });
         let pick = prev.and_then(|p| items.iter().position(|x| std::mem::discriminant(x) == std::mem::discriminant(&p) && (!matches!(p, Range::Year(_)) || *x == p))).unwrap_or(items.iter().position(|r| *r == Range::Year(this_year)).unwrap_or(3));
+        let _q = Quiet::on(&self.range_quiet);
         self.range_dd.set_model(Some(&model));
         self.range_dd.set_selected(pick as u32);
+        self.range_edit.set_visible(matches!(items.get(pick), Some(Range::Custom(..))));
     }
 
     fn ask_custom_range(self: &Rc<Self>) {
@@ -528,16 +588,17 @@ impl App {
         d.add_responses(&[("cancel", "Cancel"), ("ok", "Apply")]);
         d.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
         let w = Rc::downgrade(self);
-        d.connect_response(None, move |_, r| {
+        d.connect_response(None, move |_, r| crate::shielded(|| {
             let Some(a) = w.upgrade() else { return };
             let p = |e: &adw::EntryRow| NaiveDate::parse_from_str(e.text().trim(), "%Y-%m-%d").ok();
-            if r == "ok"
-                && let (Some(f), Some(t)) = (p(&from), p(&to))
-            {
-                a.custom_range.set(Some((f.min(t), f.max(t))));
+            if r == "ok" {
+                match (p(&from), p(&to)) {
+                    (Some(f), Some(t)) => a.custom_range.set(Some((f.min(t), f.max(t)))),
+                    _ => a.toast("Those dates weren't understood (use YYYY-MM-DD, e.g. 2026-10-31); the range is unchanged"),
+                }
             }
             a.refresh();
-        });
+        }));
         d.present(Some(&self.win));
     }
 
@@ -556,14 +617,13 @@ impl App {
         }
     }
 
-    pub fn set_display(&self, c: Currency) {
-        if !self.display_list.borrow().contains(&c) {
-            self.display.set(c);
-            self.rebuild_display_list();
-        }
-        if let Some(i) = self.display_list.borrow().iter().position(|x| *x == c) {
-            self.display_dd.set_selected(i as u32);
-        }
+    /// Show amounts in `c` from now on: remembered, picked in the header, and every page redrawn.
+    pub fn set_display(self: &Rc<Self>, c: Currency) {
+        self.display.set(c);
+        self.saved(self.db.set_setting("display_currency", c.code()));
+        // selects `c` quietly (adding it when no account uses it)
+        self.rebuild_display_list();
+        self.refresh();
     }
 
     /// The header's currency list: KYD, USD, every other currency an account or workspace uses, and the one shown.
@@ -574,20 +634,19 @@ impl App {
             list.push(self.display.get());
         }
         let codes: Vec<&str> = list.iter().map(|c| c.code()).collect();
-        self.display_quiet.set(true);
+        let _q = Quiet::on(&self.display_quiet);
+        *self.display_list.borrow_mut() = list.clone();
         self.display_dd.set_model(Some(&gtk::StringList::new(&codes)));
         self.display_dd.set_selected(list.iter().position(|c| *c == self.display.get()).unwrap_or(0) as u32);
         self.display_dd.set_visible(list.len() > 1);
-        *self.display_list.borrow_mut() = list;
-        self.display_quiet.set(false);
     }
 
     /// Download what exchange rates are missing (when switched on in Preferences), off the main thread, then keep
     /// them and show amounts converted with them. `announce`: say so when there's nothing to do or it fails.
     pub fn update_rates(self: &Rc<Self>, announce: bool) {
         if !self.db.prefs().download_rates || self.rates_busy.get() {
-            if announce && !self.db.prefs().download_rates {
-                self.toast("Exchange-rate downloads are off (Preferences → Money)");
+            if announce {
+                self.toast(if self.rates_busy.get() { "Already updating exchange rates…" } else { "Exchange-rate downloads are off (Preferences → Money)" });
             }
             return;
         }
@@ -600,7 +659,7 @@ impl App {
         }
         self.rates_busy.set(true);
         let w = Rc::downgrade(self);
-        glib::spawn_future_local(async move {
+        crate::spawn_guarded(w.clone(), async move {
             let got = gio::spawn_blocking(move || needed.iter().map(|(cs, from, to)| fingraph_core::rates::download(cs, *from, *to).map_err(|e| e.0)).collect::<Vec<_>>()).await.unwrap_or_default();
             let Some(a) = w.upgrade() else { return };
             a.rates_busy.set(false);
@@ -679,7 +738,7 @@ impl App {
             self.side_list.unselect_all();
         }
         // the header shows only what this page uses
-        self.range_dd.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "export" | "account"));
+        self.range_box.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "export" | "account"));
         self.ccy_box.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "budget" | "subscriptions" | "export" | "outlook" | "networth"));
         if MAIN_PAGES.contains(&name) {
             let mut p = self.db.prefs();
@@ -772,7 +831,7 @@ impl App {
             return;
         }
         *self.accounts_key.borrow_mut() = key;
-        self.quiet.set(true);
+        let _q = Quiet::on(&self.quiet);
         let selected = self.side_list.selected_row().map(|r| r.widget_name().to_string());
         let mut i = 0;
         while let Some(r) = self.side_list.row_at_index(i) {
@@ -798,7 +857,6 @@ impl App {
             }
         }
         self.side_list.invalidate_headers();
-        self.quiet.set(false);
     }
 
     /// Re-read the ledger into the visible view and the header, once, just before the next frame:
@@ -836,7 +894,7 @@ impl App {
         self.refreshing.set(true);
         *self.rows_cache.borrow_mut() = None;
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.update_sidebar()));
-        self.content_title.set_subtitle(&if self.range_dd.is_visible() { self.range_label() } else { String::new() });
+        self.content_title.set_subtitle(&if self.range_box.is_visible() { self.range_label() } else { String::new() });
         let visible = self.stack.visible_child_name().unwrap_or_default();
         let f = self.views.borrow().iter().find(|(n, _)| *n == visible.as_str()).map(|v| v.1.clone());
         if let Some(f) = f {
@@ -852,6 +910,11 @@ impl App {
     pub fn show_transactions(self: &Rc<Self>, ids: Vec<i64>) {
         *self.focus_ids.borrow_mut() = Some(ids);
         self.show_view("transactions");
+    }
+
+    /// Whether a change was saved; when it wasn't, says why.
+    pub fn saved<T>(&self, r: fingraph_core::Result<T>) -> bool {
+        r.map_err(|e| self.toast(&format!("Couldn't save that: {e}"))).is_ok()
     }
 
     pub fn toast(&self, msg: &str) {
@@ -882,7 +945,7 @@ impl App {
         d.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
         let w = Rc::downgrade(self);
         let then = Rc::new(then);
-        d.connect_response(None, move |_, r| {
+        d.connect_response(None, move |_, r| crate::shielded(|| {
             let Some(a) = w.upgrade() else { return };
             if r != "ok" {
                 return cancelled(&a);
@@ -901,7 +964,7 @@ impl App {
                 biz[pick.selected() as usize].id
             };
             then(&a, id);
-        });
+        }));
         d.present(Some(&self.win));
     }
 
@@ -914,7 +977,7 @@ impl App {
         let w = Rc::downgrade(self);
         t.connect_button_clicked(move |_| {
             if let Some(a) = w.upgrade() {
-                f(&a);
+                guard(&a, || f(&a));
             }
         });
         self.toasts.add_toast(t);
@@ -930,7 +993,7 @@ impl App {
         d.add_responses(&[("cancel", "Cancel"), ("ok", "Save")]);
         d.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
         let w = Rc::downgrade(self);
-        d.connect_response(None, move |_, r| {
+        d.connect_response(None, move |_, r| crate::shielded(|| {
             let Some(a) = w.upgrade() else { return };
             if r != "ok" {
                 return;
@@ -942,9 +1005,45 @@ impl App {
                 }
                 Err(e) => a.toast(&format!("Couldn't save the rate: {e}")),
             }
-        });
+        }));
         d.present(Some(&self.win));
     }
+}
+
+/// Run a callback so a bug in it shows a message instead of closing the app: a panic in a GTK callback
+/// aborts. The panic hook has already written crash.log.
+pub fn guard(a: &App, f: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
+        a.toast("Something went wrong. Details are in crash.log in the data folder.");
+    }
+}
+
+thread_local! {
+    /// The window's app, for `shielded` (dialog callbacks that don't carry it).
+    static APP: RefCell<std::rc::Weak<App>> = RefCell::default();
+}
+
+/// `guard` for callbacks without the app at hand (dialog responses).
+pub fn shielded(f: impl FnOnce()) {
+    if let Some(a) = APP.with(|w| w.borrow().upgrade()) {
+        guard(&a, f);
+    } else {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    }
+}
+
+/// `glib::spawn_future_local`, but a panic inside shows a message instead of closing the app.
+pub fn spawn_guarded(w: std::rc::Weak<App>, f: impl std::future::Future<Output = ()> + 'static) {
+    let mut f = Box::pin(f);
+    glib::spawn_future_local(std::future::poll_fn(move |cx| match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f.as_mut().poll(cx))) {
+        Ok(p) => p,
+        Err(_) => {
+            if let Some(a) = w.upgrade() {
+                a.toast("Something went wrong. Details are in crash.log in the data folder.");
+            }
+            std::task::Poll::Ready(())
+        }
+    }));
 }
 
 /// Small helpers shared by the views.

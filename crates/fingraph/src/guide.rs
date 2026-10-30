@@ -71,8 +71,9 @@ struct Guide {
     step: Cell<usize>,
     /// What Next does on this step (set by each step as it's drawn).
     on_next: RefCell<Option<Rc<dyn Fn()>>>,
-    /// Statements being read right now.
+    /// Statements being read right now, and that read's progress and results (shown again on coming back).
     reading: Cell<bool>,
+    read_view: RefCell<Option<gtk::Box>>,
     /// Merchants skipped on the Sort step this time.
     skipped: RefCell<HashSet<String>>,
     answered: Rc<Cell<usize>>,
@@ -184,6 +185,7 @@ pub fn open_at(app: &Rc<App>, at: usize) {
         step: Cell::new(at),
         on_next: RefCell::default(),
         reading: Cell::new(false),
+        read_view: RefCell::new(None),
         skipped: RefCell::default(),
         answered: Rc::default(),
     });
@@ -223,7 +225,7 @@ pub fn open_at(app: &Rc<App>, at: usize) {
         let w = Rc::downgrade(app);
         dlg.connect_closed(move |_| {
             if let Some(a) = w.upgrade() {
-                let _ = a.db.set_setting("onboarded", "1");
+                a.saved(a.db.set_setting("onboarded", "1"));
                 a.refresh();
             }
         });
@@ -258,7 +260,7 @@ fn mark(g: &Guide, app: &App) {
 fn show(g: &G, i: usize) {
     let Some(app) = g.app.upgrade() else { return };
     g.step.set(i);
-    let _ = app.db.set_setting("guide_step", &i.to_string());
+    app.saved(app.db.set_setting("guide_step", &i.to_string()));
     clear(&g.body);
     g.scroller.vadjustment().set_value(0.0);
     g.back.set_visible(i > 0);
@@ -333,7 +335,7 @@ fn welcome(g: &G, app: &Rc<App>) {
                 Ok(n) => {
                     a.reload_entities();
                     a.toast(&format!("Loaded {n} demo transactions"));
-                    let _ = a.db.set_setting("onboarded", "1");
+                    a.saved(a.db.set_setting("onboarded", "1"));
                     g.dlg.close();
                     a.show_view("overview");
                 }
@@ -394,7 +396,6 @@ fn workspaces(g: &G, app: &Rc<App>) {
                 };
             }
             a.reload_entities();
-            let _ = a.db.set_setting("display_currency", c.code());
             a.set_display(c);
             true
         })),
@@ -427,7 +428,7 @@ fn download(g: &G, app: &Rc<App>) {
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
             let on: Vec<String> = toggles.borrow().iter().filter(|t| t.1.is_active()).map(|t| t.0.clone()).collect();
-            let _ = a.db.set_setting("guide_banks", &on.join(","));
+            a.saved(a.db.set_setting("guide_banks", &on.join(",")));
             clear(&where_box);
             if on.is_empty() {
                 return;
@@ -573,7 +574,7 @@ fn choose_folder(g: &G, app: &Rc<App>) {
             }
             let mut p = a.db.prefs();
             p.watch_folder = Some(dir);
-            let _ = a.db.save_prefs(&p);
+            a.saved(a.db.save_prefs(&p));
             make.remove_css_class("suggested-action");
             refresh();
         })
@@ -620,7 +621,7 @@ fn choose_folder(g: &G, app: &Rc<App>) {
             let Some(a) = w.upgrade() else { return false };
             let mut p = a.db.prefs();
             p.watch_enabled = watch.is_active();
-            let _ = a.db.save_prefs(&p);
+            a.saved(a.db.save_prefs(&p));
             true
         })),
     );
@@ -635,13 +636,26 @@ fn read(g: &G, app: &Rc<App>) {
         next_to(g, "Continue", None);
         return;
     };
+    // still reading from an earlier visit: that read's own progress, not a summary of half of it
+    if g.reading.get() {
+        if let Some(v) = &*g.read_view.borrow() {
+            g.body.append(v);
+        }
+        next_to(g, "Continue", None);
+        g.next.set_sensitive(false);
+        g.note.set_label("Still reading… this takes a few seconds a statement");
+        return;
+    }
     let todo = unread(app, &dir);
     let progress = gtk::ProgressBar::builder().show_text(true).build();
     let results = list();
     let summary = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).build();
-    g.body.append(&progress);
-    g.body.append(&summary);
-    g.body.append(&results);
+    let view = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).build();
+    view.append(&progress);
+    view.append(&summary);
+    view.append(&results);
+    g.body.append(&view);
+    *g.read_view.borrow_mut() = Some(view);
     results.set_visible(false);
 
     let finish: Rc<dyn Fn()> = {
@@ -651,13 +665,16 @@ fn read(g: &G, app: &Rc<App>) {
             g.reading.set(false);
             progress.set_visible(false);
             read_summary(&g, &a, &summary);
-            g.next.set_sensitive(a.db.documents_all(&a.entity_ids()).is_ok_and(|d| !d.is_empty()));
-            g.note.set_label("");
+            // the buttons are this step's only while it's showing
+            if STEPS[g.step.get()] == Step::Read {
+                g.next.set_sensitive(a.db.documents_all(&a.entity_ids()).is_ok_and(|d| !d.is_empty()));
+                g.note.set_label("");
+            }
             mark(&g, &a);
         })
     };
     next_to(g, "Continue", None);
-    if todo.is_empty() || g.reading.get() {
+    if todo.is_empty() {
         progress.set_visible(false);
         finish();
         return;
@@ -1009,7 +1026,7 @@ fn monthly(g: &G, app: &Rc<App>) {
     let (w, g2) = (Rc::downgrade(app), Rc::downgrade(g));
     *g.on_next.borrow_mut() = Some(Rc::new(move || {
         let (Some(a), Some(g)) = (w.upgrade(), g2.upgrade()) else { return };
-        let _ = a.db.set_setting("onboarded", "1");
+        a.saved(a.db.set_setting("onboarded", "1"));
         g.dlg.close();
         crate::statements::watch(&a);
         a.show_view("overview");

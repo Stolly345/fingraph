@@ -117,7 +117,7 @@ fn run_scan(app: &Rc<App>, path: PathBuf, only: Option<BankProfile>, then: impl 
         None => app.db.profiles().unwrap_or_default(),
     };
     let w = Rc::downgrade(app);
-    glib::spawn_future_local(async move {
+    crate::spawn_guarded(w.clone(), async move {
         let r = gio::spawn_blocking(move || MultiPassScanner::new(&profiles).scan_pdf(&path).map_err(|e| e.to_string())).await.unwrap_or_else(|_| Err("scanner crashed".into()));
         let Some(a) = w.upgrade() else { return };
         match r {
@@ -162,11 +162,11 @@ fn test_result(app: &Rc<App>, r: &ScanResult, against: Option<&BankProfile>, pat
     let d = adw::AlertDialog::new(Some("Profile Test"), Some(&lines.join("\n")));
     d.add_responses(&[("sample", "Save Layout Sample…"), ("ok", "Close")]);
     let w = Rc::downgrade(app);
-    d.connect_response(Some("sample"), move |_, _| {
+    d.connect_response(Some("sample"), move |_, _| crate::shielded(|| {
         if let Some(a) = w.upgrade() {
             save_layout_sample(&a, path.clone());
         }
-    });
+    }));
     d.present(Some(&app.win));
 }
 
@@ -181,7 +181,7 @@ fn save_layout_sample(app: &Rc<App>, path: PathBuf) {
         let Some(out) = f.path() else { return };
         let profiles = a.db.profiles().unwrap_or_default();
         let w = Rc::downgrade(&a);
-        glib::spawn_future_local(async move {
+        crate::spawn_guarded(w.clone(), async move {
             let r = gio::spawn_blocking(move || fingraph_core::parser::layout_sample_json(&path, &profiles).map_err(|e| e.to_string()).and_then(|j| std::fs::write(&out, j).map_err(|e| e.to_string())))
                 .await
                 .unwrap_or_else(|_| Err("crashed".into()));
@@ -352,7 +352,7 @@ fn editor(app: &Rc<App>, p: BankProfile) {
         let (w, id, dlg) = (Rc::downgrade(app), p.id, dlg.clone());
         reset.connect_clicked(move |_| {
             if let Some(a) = w.upgrade() {
-                let _ = a.db.delete_or_reset_profile(id);
+                a.saved(a.db.delete_or_reset_profile(id));
                 dlg.close();
                 a.refresh();
             }

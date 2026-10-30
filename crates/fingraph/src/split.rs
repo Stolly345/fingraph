@@ -138,8 +138,9 @@ pub fn dialog(app: &Rc<App>, tx_id: i64) {
         let (w, dlg) = (Rc::downgrade(app), dlg.clone());
         unsplit.connect_clicked(move |_| {
             if let Some(a) = w.upgrade() {
-                let _ = a.db.set_splits(tx_id, &[]);
-                a.toast("Split removed");
+                if a.saved(a.db.set_splits(tx_id, &[])) {
+                    a.toast("Split removed");
+                }
                 dlg.close();
                 a.refresh();
             }
@@ -198,7 +199,7 @@ pub fn open_attachments(app: &Rc<App>, tx_id: i64, anchor: &gtk::Widget) {
             del.connect_clicked(move |_| {
                 pop.popdown();
                 if let Some(a) = w.upgrade() {
-                    let _ = a.db.detach(id);
+                    a.saved(a.db.detach(id));
                     a.refresh();
                 }
             });

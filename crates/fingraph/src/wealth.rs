@@ -243,7 +243,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     let (w, id, r) = (Rc::downgrade(&a), i.id, redraw.clone());
                     rm.connect_clicked(move |_| {
                         if let Some(a) = w.upgrade() {
-                            let _ = a.db.delete_manual_item(id);
+                            a.saved(a.db.delete_manual_item(id));
                             r();
                         }
                     });
@@ -288,7 +288,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     let (w, id, r) = (Rc::downgrade(&a), g.id, redraw.clone());
                     rm.connect_clicked(move |_| {
                         if let Some(a) = w.upgrade() {
-                            let _ = a.db.delete_goal(id);
+                            a.saved(a.db.delete_goal(id));
                             r();
                         }
                     });
@@ -372,12 +372,12 @@ fn payoff_section(app: &Rc<App>, s: &Snap, into: &gtk::Box, redraw: crate::Refre
             let v = parse_user(e.text().trim_end_matches('%'));
             match &src {
                 Ok(id) => {
-                    let _ = a.db.set_setting(&format!("apr:{id}"), &v.map(|v| v.to_string()).unwrap_or_default());
+                    a.saved(a.db.set_setting(&format!("apr:{id}"), &v.map(|v| v.to_string()).unwrap_or_default()));
                 }
                 Err(item) => {
                     let mut i = item.clone();
                     i.apr = v;
-                    let _ = a.db.save_manual_item(&i);
+                    a.saved(a.db.save_manual_item(&i));
                 }
             }
             r2();
@@ -398,7 +398,7 @@ fn payoff_section(app: &Rc<App>, s: &Snap, into: &gtk::Box, redraw: crate::Refre
         let (w, r2) = (Rc::downgrade(app), redraw.clone());
         amount.connect_apply(move |e| {
             if let Some(a) = w.upgrade() {
-                let _ = a.db.set_setting(&key, &parse_user(&e.text()).map(|v| v.abs().to_string()).unwrap_or_default());
+                a.saved(a.db.set_setting(&key, &parse_user(&e.text()).map(|v| v.abs().to_string()).unwrap_or_default()));
                 r2();
             }
         });
@@ -457,7 +457,7 @@ fn item_dialog(app: &Rc<App>, item: Option<ManualItem>, done: crate::Refresh) {
     dlg.add_responses(&[("cancel", "Cancel"), ("save", "Save")]);
     dlg.set_response_appearance("save", adw::ResponseAppearance::Suggested);
     let w = Rc::downgrade(app);
-    dlg.connect_response(Some("save"), move |_, _| {
+    dlg.connect_response(Some("save"), move |_, _| crate::shielded(|| {
         let Some(a) = w.upgrade() else { return };
         if name.text().trim().is_empty() {
             return a.toast("Give it a name");
@@ -471,11 +471,11 @@ fn item_dialog(app: &Rc<App>, item: Option<ManualItem>, done: crate::Refresh) {
         if let Some(v) = parse_user(&value.text()) {
             let unchanged = i.values.last().is_some_and(|l| l.1 == v.abs());
             if !unchanged {
-                let _ = a.db.set_manual_value(id, today(), v);
+                a.saved(a.db.set_manual_value(id, today(), v));
             }
         }
         done();
-    });
+    }));
     dlg.present(Some(&app.win));
 }
 
@@ -490,12 +490,12 @@ fn value_dialog(app: &Rc<App>, i: &ManualItem, done: crate::Refresh) {
     dlg.add_responses(&[("cancel", "Cancel"), ("save", "Save")]);
     dlg.set_response_appearance("save", adw::ResponseAppearance::Suggested);
     let (w, id) = (Rc::downgrade(app), i.id);
-    dlg.connect_response(Some("save"), move |_, _| {
+    dlg.connect_response(Some("save"), move |_, _| crate::shielded(|| {
         let Some(a) = w.upgrade() else { return };
         let (Some(v), Some(d)) = (parse_user(&value.text()), parse_date(&when.text())) else { return a.toast("Type the value, and the date like 27 Oct 2026") };
-        let _ = a.db.set_manual_value(id, d, v);
+        a.saved(a.db.set_manual_value(id, d, v));
         done();
-    });
+    }));
     dlg.present(Some(&app.win));
 }
 
@@ -521,7 +521,7 @@ fn goal_dialog(app: &Rc<App>, goal: Option<Goal>, done: crate::Refresh) {
     dlg.add_responses(&[("cancel", "Cancel"), ("save", "Save")]);
     dlg.set_response_appearance("save", adw::ResponseAppearance::Suggested);
     let w = Rc::downgrade(app);
-    dlg.connect_response(Some("save"), move |_, _| {
+    dlg.connect_response(Some("save"), move |_, _| crate::shielded(|| {
         let Some(a) = w.upgrade() else { return };
         let s = snap(&a);
         let mut n = g0.clone();
@@ -548,9 +548,9 @@ fn goal_dialog(app: &Rc<App>, goal: Option<Goal>, done: crate::Refresh) {
         if n.name.is_empty() || n.target.is_zero() {
             return a.toast("Give the goal a name and an amount");
         }
-        let _ = a.db.save_goal(&s.scope, &n);
+        a.saved(a.db.save_goal(&s.scope, &n));
         done();
-    });
+    }));
     dlg.present(Some(&app.win));
 }
 
@@ -572,7 +572,7 @@ pub fn fill_close_goals(app: &Rc<App>, m: NaiveDate, b: &gtk::Box, redo: crate::
             let (w, id, redo) = (Rc::downgrade(app), g.id, redo.clone());
             e.connect_activate(move |e| {
                 if let Some(a) = w.upgrade() {
-                    let _ = a.db.set_goal_entry(id, m, parse_user(&e.text()).map(|v| v.abs()));
+                    a.saved(a.db.set_goal_entry(id, m, parse_user(&e.text()).map(|v| v.abs())));
                     redo();
                 }
             });

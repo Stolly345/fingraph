@@ -22,13 +22,15 @@ FinGraph reads PDF bank statements from the Cayman banks (Butterfield, Scotiaban
 Cayman National, RBC and the CICSA Credit Union) with a five-pass scanner that \
 proves every statement against its own running and closing balances, learns your \
 merchants through Smart Triage, and charts income, spending, subscriptions and \
-bank fees across personal and business workspaces in KYD and USD. Everything \
-stays in ~/.local/share/fingraph; nothing is sent anywhere."""
+bank fees across personal and business workspaces in any currency. Statements and \
+the ledger stay in ~/.local/share/fingraph. The one optional network use, off until \
+switched on, downloads daily exchange rates (only currency codes and dates are sent)."""
 section = "utils"
 priority = "optional"
 # pdftotext -bbox gives the scanner every word with its position
 depends = "$auto, poppler-utils"
-recommends = "tesseract-ocr"
+# tesseract reads scanned statements; curl downloads exchange rates (when switched on)
+recommends = "tesseract-ocr, curl"
 assets = [
     ["target/release/fingraph", "usr/bin/", "755"],
     ["../../packaging/dev.fingraph.FinGraph.desktop", "usr/share/applications/", "644"],

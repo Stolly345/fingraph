@@ -680,13 +680,19 @@ remembers the step you were on (`guide_step`); closing it early is fine.
 4. **One Folder** — use `~/Documents/Bank Statements` (created) or choose any folder; shows how
    many PDFs it holds and how many are new; Open in Files and Look Again; how to drag files over
    from Downloads; **Check this folder for new statements** (the watched folder; subfolders are
-   read too, now that `pdfs_in` is recursive). Continue needs at least one PDF (or statements already).
+   read too: `pdfs_in` walks 8 folders down, at most 5,000 PDFs, and doesn't follow links, so a link
+   to a parent can't loop. The walk runs off the main thread. The folder monitor sees new files at
+   the top level; subfolders are walked again whenever the window comes back into focus). A watched
+   file that can't be read or imported says so in a toast with **Import…**; it's remembered only when
+   trying again can't change the answer (a missing tool, a database error and a needed decision are
+   offered again). Continue needs at least one PDF (or statements already).
 5. **Read Them** — reads every file not read before (by path, size and time) with a progress bar
    and one row per file (bank, accounts, period, transactions, Adds up / Off by / Couldn't read),
    then: statements · accounts · transactions and the date span; money in and out with a monthly
    average (transfers between your own accounts left out); statements that didn't add up and how to
    fix them (Scan Pass Report → Convert); months covered per account (● ◐ ○) and what to do about
-   gaps; Read Again. Files read here are remembered so the watcher doesn't scan them again, and the
+   gaps; Read Again. Leaving the step mid-read and coming back shows the same read's progress (Continue
+   waits for it). Files read here are remembered so the watcher doesn't scan them again, and the
    usual post-import triage jump is skipped (`import_paths_with(.., on_done)`).
 6. **Sort Transactions** — how many were sorted automatically, how many are moves between your own
    accounts (never income or spending), how many wait; then the To Review cards inline, one at a
@@ -715,7 +721,7 @@ Fixes found while testing the guide on the owner's real statements:
 
 - `cargo deb -p fingraph` → `target/debian/fingraph_0.2.13-1_amd64.deb` (binary, desktop entry with
   PDF "Open With", icon, README; depends on poppler-utils, GTK 4, libadwaita; recommends
-  tesseract-ocr for picture-only statements).
+  tesseract-ocr for picture-only statements and curl for exchange-rate downloads).
 - Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.13-1_amd64.deb`. The
   version is bumped for every change to the app: apt skips a same-version `.deb` unless given
   `--reinstall`, and once that made a fix look missing. A docs-only rebuild keeps the version and
@@ -741,7 +747,7 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 11. Quality
 
-- `cargo test --workspace`: 70 tests (0.2.7: a bill picked by its due month lands on the next one; 0.2.3–0.2.4 added the real CNB layout and OCR, multi-line
+- `cargo test --workspace`: 85 tests (review fixes: the watched-folder walk skips links and finds subfolders; 0.2.7: a bill picked by its due month lands on the next one; 0.2.3–0.2.4 added the real CNB layout and OCR, multi-line
   rows, a layout mismatch that still reconciles, anonymised layout samples, import plans and holds,
   FITID re-keying and the one-time profile refresh; the guide release added whole-month suggestions and salary-with-a-bonus; 0.2.0 added rollovers/moves/history, non-monthly bills,
   watchlists and closes, Age of Money incl. a hand-checked FIFO case, the bills checklist incl.
@@ -752,6 +758,9 @@ Fixes found while testing the guide on the owner's real statements:
   attachments, coverage, directory and keywords, insights, subscriptions, exports. Plus `-- --ignored real` re-scanning the owner's
   statements, and `-- --ignored private` for layout samples in `tests/fixtures/private/`.
 - `cargo clippy --workspace --all-targets` clean; `cargo build --release` clean.
+- A bug in any action, toast button, dialog response, page refresh or background import shows "Something
+  went wrong" and writes `crash.log` instead of closing the app (`guard`, `shielded`, `spawn_guarded`);
+  "this change isn't the user's" flags are reset by a drop guard (`Quiet`), so a panic can't leave them on.
 - UI checked page by page with the screenshot hooks against the demo and a copy of the real ledger.
   The hooks can't hover or open popovers, so the ⓘ text and menu items are checked by hand.
 
@@ -802,6 +811,7 @@ Fixes found while testing the guide on the owner's real statements:
 | Big yearly bills (0.2.7) | Owner: "does the software ask what are your once a year costs?" It didn't. Non-monthly bills existed only on the Budget page, and suggestions need two charges a year apart from the same payee. The budget setup gains step 3, **Big Yearly Bills**: 9 common ones (car / home insurance, HOA or strata, vehicle licence, health insurance if self-paid, school fees per term, memberships, travel, Christmas & birthdays) plus bills already planned and ones found in the statements, each with amount, how often (yearly, 6, 4 termly, 3 months, 2 years) and the month it's due. The set-aside comes out of "left to save", and is treated as fixed when trimming variable spending to reach the goal. An emptied row deletes that bill. Overview gains **Big Bills Coming Up** (next five, set aside so far) and **Big Bills Over the Next 12 Months** (what lands each month), or an Add Big Bills… card when none are planned. Getting Started's budget step lists the five steps and what's planned or found |
 | Overview KPI cards (0.2.8) | Owner: "2 rows of 5 … net cash flow, annually, monthly and fortnightly", with a toggle on each. The date-range Net Cash Flow card is replaced by three: **Year / Month / Fortnight**, each with its own menu (saved as `overview_flow_year|month|fortnight`): **Average** = last 12 months of statements (fewer if that's all there is) scaled by days (365, 365/12, 14), **Range** = the picked date range scaled the same way, **Actual** = this year so far, the last month the statements fully cover, and the last 14 days of statements. Added **Left to Spend This Month** (same sum as the Budget page's Left: funded − spent in budgeted categories, `budget::left_this_month`), **Next Big Bill** (soonest fund, amount, set aside, `budget::next_big_bill`) and **Cash Runway** (latest balance of visible non-card/loan accounts ÷ average monthly spending over the last 12 months). Layout: a 5-column homogeneous grid; the menus sit under the numbers so the row fits beside the sidebar |
 
+| Whole-app review: desktop app (2026-10-30) | Display currency picked in Preferences is saved and redraws the pages (it was neither when the currency wasn't in the header list yet). The date range no longer opens the Custom dialog by itself after an import; ✎ beside it changes the custom dates, and dates it can't read say so. Overview's reconciliation tile counts statements waiting for review ("83/84 · 1 waiting for review"). Watched folder: read and import errors are toasted with Import…, subfolders are re-walked on focus, links aren't followed, the walk is off the main thread. Saves that fail say why, and "closed"/"removed"-style toasts only follow a save that worked; typed-but-unapplied payee/tag/memo is kept when the editor closes. Panics in actions, dialogs and imports are caught (see §11). Getting Started's Read Them step can be left and re-entered mid-read. Rescan All's warning follows "Rescan keeps my changes", and Rescan All is off while one runs. Consolidated: the label follows the ticks and the last workspace can't be unticked. The category drill-down's Back button has its label and always uses the current data. Charts that open something on click can be used from the keyboard (Tab, ←/→, Enter). Toasts say Categorize (not Triage); About, Preferences → Data and the package description no longer claim nothing is ever sent; `.deb` recommends curl |
 | Layout learning (0.2.9) | Owner: make sure it learns new statements out of the box, e.g. if Scotiabank changes its layout. It read unknown banks already, but renamed column headings collapsed a chequing read (3 of 28 rows) and a rebranded letterhead was taken for CNB; the only fix was editing Bank Profiles. Now: page-1 fingerprint, re-reads proven by the balances (including columns from the amounts alone), learn-on-Approve with undo, and a hold when a statement looks different from the account's last one (§6.4) |
 ---
 
