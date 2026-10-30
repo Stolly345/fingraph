@@ -3,7 +3,7 @@
 
 use adw::prelude::*;
 use fingraph_core::parser::profiles::{BankProfile, HeaderAnchors, LayoutKind, LayoutRules, RowShape};
-use fingraph_core::parser::{ColumnRole, MultiPassScanner, ScanResult};
+use fingraph_core::parser::{MultiPassScanner, ScanResult};
 use gtk::{gio, glib};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -59,6 +59,26 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 r.add_prefix(&pill(&p.short_name, "bank"));
                 if p.is_builtin {
                     r.add_suffix(&pill("Built-in", "meh"));
+                }
+                // approving a statement in a changed layout taught this profile something: offer it back
+                if a.db.layout_changes(p.id) > 0 {
+                    let undo = gtk::Button::builder()
+                        .label("Undo Learned Layout")
+                        .tooltip_text("Put this bank's layout back the way it was before the last approved statement taught it new headings or labels")
+                        .valign(gtk::Align::Center)
+                        .css_classes(["flat"])
+                        .build();
+                    let (w, id, name) = (Rc::downgrade(&a), p.id, p.short_name.clone());
+                    undo.connect_clicked(move |_| {
+                        let Some(a) = w.upgrade() else { return };
+                        match a.db.undo_layout_change(id) {
+                            Ok(true) => a.toast(&format!("{name}'s layout is back to how it was before the last approval")),
+                            Ok(false) => {}
+                            Err(e) => a.toast(&e.to_string()),
+                        }
+                        a.refresh();
+                    });
+                    r.add_suffix(&undo);
                 }
                 r.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
                 let (w, p) = (Rc::downgrade(&a), p.clone());
@@ -175,49 +195,14 @@ fn save_layout_sample(app: &Rc<App>, path: PathBuf) {
     });
 }
 
-/// The column-mapping helper: a new profile pre-filled from what the scanner saw in the sample.
+/// The column-mapping helper: a new profile pre-filled from what the scanner saw in the sample. When page 1
+/// names no bank, its first two lines stand in as fingerprints for you to edit.
 fn profile_from_sample(r: &ScanResult) -> BankProfile {
-    let p1 = &r.diagnostics.pass1;
-    let name = p1.letterhead.first().cloned().unwrap_or_else(|| "My Bank".into());
-    let mut anchors = HeaderAnchors::default();
-    if let Some(pg) = r.diagnostics.pages.iter().find(|p| !p.header_words.is_empty()) {
-        for (role, words) in &pg.header_words {
-            let w = words.to_lowercase();
-            match role {
-                ColumnRole::Date => anchors.date.push(w),
-                ColumnRole::PostDate => anchors.posting_date.push(w),
-                ColumnRole::Description => anchors.description.push(w),
-                ColumnRole::Reference => anchors.reference.push(w),
-                ColumnRole::Debit => anchors.debit.push(w),
-                ColumnRole::Credit => anchors.credit.push(w),
-                ColumnRole::Amount => anchors.amount.push(w),
-                ColumnRole::Balance => anchors.balance.push(w),
-            }
-        }
+    let mut p = BankProfile::from_statement(&r.diagnostics);
+    if p.routing_identifiers.is_empty() {
+        p.routing_identifiers = r.diagnostics.pass1.letterhead.iter().take(2).cloned().collect();
     }
-    let layout = if !anchors.debit.is_empty() && !anchors.balance.is_empty() {
-        LayoutKind::DebitCreditWithBalance
-    } else if !anchors.debit.is_empty() {
-        LayoutKind::SeparateDebitCredit
-    } else if p1.account_type == Some(fingraph_core::AccountType::CreditCard) {
-        LayoutKind::CreditCardDRCR
-    } else {
-        LayoutKind::SignedSingleAmount
-    };
-    BankProfile {
-        id: 0,
-        slug: name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>().trim_matches('_').chars().take(24).collect(),
-        short_name: name.split_whitespace().next().unwrap_or("Bank").to_string(),
-        display_name: name,
-        routing_identifiers: p1.letterhead.iter().take(2).cloned().collect(),
-        default_date_format: "DD/MM/YYYY".into(),
-        column_layout_kind: layout,
-        header_anchors: anchors,
-        noise_patterns: Vec::new(),
-        fx_note_regex: r"(?i)(?P<ccy>USD|KYD|US\$|CI\$)\s*(?P<amt>\d[\d,]*\.\d{2})\s*(?:@|at)\s*(?P<rate>\d+\.\d+)".into(),
-        is_builtin: false,
-        layout: Default::default(),
-    }
+    p
 }
 
 fn list_row(title: &str, v: &[String]) -> adw::EntryRow {

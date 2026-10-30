@@ -161,7 +161,17 @@ fn approve_dialog(app: &Rc<App>, id: i64, name: &str, why: &[Review], n: i64) {
             "report" => report_dialog(&a, id),
             "ok" => {
                 match a.db.approve_document(id) {
-                    Ok(()) => a.toast("Approved: its transactions now count"),
+                    Ok(ap) if ap.created.is_some() => a.toast(&format!(
+                        "Approved: {} is set up as a bank now, so its next statements are recognised{}",
+                        ap.created.as_deref().unwrap_or_default(),
+                        if ap.rereads > 0 { format!(" ({} other held statement{} re-read)", ap.rereads, if ap.rereads == 1 { "" } else { "s" }) } else { String::new() }
+                    )),
+                    Ok(ap) if ap.unnamed => a.toast("Approved. Its first page doesn't name the bank, so FinGraph can't recognise its next statements: set it up in Bank Profiles → New from Sample"),
+                    Ok(ap) => a.toast(&match (&ap.learned, ap.rereads) {
+                        (Some(bank), 0) => format!("Approved: its transactions now count, and {bank}'s saved layout learned from it"),
+                        (Some(bank), n) => format!("Approved: {bank}'s saved layout learned from it, and {n} other held statement{} re-read", if n == 1 { " was" } else { "s were" }),
+                        (None, _) => "Approved: its transactions now count".into(),
+                    }),
                     Err(e) => a.toast(&e.to_string()),
                 }
                 a.reload_entities();

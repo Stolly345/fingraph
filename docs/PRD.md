@@ -1,7 +1,7 @@
 # FinGraph — PRD / System Reference
 
-**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.7 `.deb`
-**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Updated:** 2026-10-28 for 0.2.7 · **Status:** in daily personal use; not published
+**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.9 `.deb`
+**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Updated:** 2026-10-30 for 0.2.9 · **Status:** in daily personal use; not published
 
 > Single source of truth for what FinGraph is, how it's built, and why it behaves the way it does.
 > It replaces the Python/Flet prototype in `~/Projects/FinGraph` (left untouched; its
@@ -229,6 +229,118 @@ What to look for, from what's known so far:
   liabilities (a payment lowers the balance); member number vs account numbers decides account matching.
 
 ---
+
+### 6.4 When a bank changes its layout (learning)
+
+Nothing about a layout has to be coded for a statement to be read: with no profile at all, the scanner
+reads and reconciles all of the owner's statements. What a profile adds is knowing when a read is *right*,
+and a bank that changes its statements breaks that. Four parts keep it working without code changes:
+
+1. **The bank is named on page 1** (`profiles::fingerprint` needs a page-1 hit): a letterhead that names no
+   known bank is an unknown bank, not whichever bank a transfer line mentions (a rebranded Scotiabank
+   statement had been taken for CNB).
+2. **Try, then prove** (`MultiPassScanner::scan_tokens`): a read that doesn't reconcile or is off its declared
+   layout is read again, ignoring the profile's headings, labels and row shape; with day and month swapped;
+   and **from the amounts alone** (`data_layout`: rows that open with a date, money columns where the
+   amounts' right edges line up, each debit/credit/balance assignment tried). The read that reconciles
+   with the most rows wins; one that doesn't reconcile never replaces the saved layout's read. The winner is
+   still held: its Scan Pass Report says what the saved layout got wrong and how it was read instead.
+   Guards: dates count only where most dates start (memo lines that open with a date don't move the
+   column); a summary box above the table is never part of it; an undated total line (`Deposits & Other
+   Credits`) is never recovered as a missing transaction, even when its amount fits (found on the demo).
+3. **Learn on Approve** (`Db::approve_document` → `BankProfile::learn`): approving a held statement that
+   reconciles teaches its bank profile the headings over each column, the opening/closing balance words,
+   the row shape and the date order it showed. Only adds headings and labels, so older statements keep
+   reading. The previous profile is kept (`layout_history:<id>` setting, last ten): **Bank Profiles → Undo
+   Learned Layout**. The bank's other statements held for their layout are re-read with what was learned,
+   and an anonymised layout sample is kept in `<data dir>/layout_samples/` (checked by
+   `private_layout_samples` with the ledger's profiles).
+4. **Changed since last month** (`ObservedLayout` in each statement's diagnostics): each import is
+   compared with the account's last approved statement before it. Different headings, money columns, row
+   shape or date order hold it as *the bank changed how its statements look*, with the changes listed.
+
+Checked by `tests/drift_probe.rs` (ignored; your statements): renamed headings and labels, another date
+format, no currency symbols, `DR` for minus, a moved page, a rebrand and an unknown bank all read the same
+dates, amounts and descriptions as the unchanged statement; after one approval the changed statement
+reads with no note and the unchanged one still does; a fresh import of every statement holds none; Rescan
+All on a copy of the owner's ledger (34 files) holds nothing new. `a_changed_layout_is_held_once_then_learned`
+covers the ledger side on demo data.
+
+**Third-party samples** (`tests/online_samples.rs`, ignored, `FINGRAPH_SAMPLES=<dir>`; synthetic PDFs from public
+test sets, read with no profile and imported only into an in-memory ledger): 6 of 8 read in full and reconcile —
+three Indian accounts (AyonPal/bank-statement-pdf-parser, every date and amount matches its published answer),
+and from the Bankstatemently benchmark a Singapore savings account, a US card (MM/DD dates, `0.00` detail
+lines, a diagonal watermark) and a bilingual Hong Kong statement with two accounts in one PDF. With their
+headings renamed, five read the same rows; the card (no balances, and the rename removed its summary
+labels) reads the same rows unverified, one row a day off (which date column posts can't be told without
+headings). Fixes this found: sign-heals ranked (swapped debit/credit columns add up one flipped sign at a
+time when every row has a balance), summary labels above their amount in a side box, explicit closing labels
+before "carried forward", day/month order from the dates for unknown banks, undated `0.00` lines are detail,
+`HKD Current Account — …` starts a section, in-table `Total Deposit Amount` lines are that section's totals,
+watermark letters dropped, a lone-amount-column assignment, and a read with no rows is replaced by the
+re-read with the most.
+
+**Owner-supplied samples (2026-10-30):** TemplateLab forms 1/2/4 (placeholder `mm/dd/yyyy` dates), SampleTemplates'
+Dummy Bank Statement, an LP1 training PDF (statement + a farm ledger + a balance sheet) and a scanned sample
+(transactions listed again by type on page 2). All three with real data read exactly (12/12, 8/8, 21/21) and
+reconcile; the templates are refused ("amounts but no dates … a blank template?"). Found and fixed:
+- **False "Reconciled"**: without a closing total, all balance checks passing was enough even when rows came
+  after the last printed balance (29 ledger rows passed). Now the checks must reach the last row (a first row
+  printing its own balance may go unchecked when no opening is found); a read of no rows with amounts left
+  over is Unverified.
+- **A lost first row**: a balance printed before the first transaction replaced the printed opening, so a first
+  row whose amount was unreadable vanished and the rest still added up. The printed opening now comes first and
+  the balance line is checked against it.
+- Rows after the closing balance with no balances of their own (a re-listing by type, another document's table)
+  are set aside when the statement then adds up to that closing balance; an in-table `Ending Balance` line is
+  the closing balance.
+- A dated line whose amount is unreadable but whose balance printed (OCR `-26` for `.26`) is worked out from the
+  balances and held (**Review::Derived**). The demo's garbled row prints no balance, so it still shows the inspector.
+- Dashes standing for empty amounts aren't description; words spilling into the date column go back to the
+  description; `Detail` is a description heading.
+
+**23 Word templates (owner's `~/Desktop/fakes`, converted to PDF with LibreOffice; answer keys written by hand
+from each PDF):** read exactly and reconciled: 07 (30 rows, Naira, two date columns), 22 (Westpac 1997, 20), 25
+(item numbers glued to amounts, 7), 27 (94 pages, table split between p1 and p93, 23). Every row right but held
+because the template's own arithmetic is wrong: 09 (11/11), 26 (10/11, a page of activity missing). Not read
+(held or refused, nothing imported): 08, 12, 17, 18 (decimals printed as spaces), 21 (year `20XX`), 30, and
+partly 04, 19, 23 (newest first), 13 (a textbook chapter), 06 (a fee invoice). Found and fixed: a line printing
+both a debit and a credit was netted into one transaction and still "reconciled" against the totals — it's two
+transactions now, with a hold; dates without a year and no readable period took the current year silently —
+noted and held; `Jan.1, 2013` reads as a date.
+
+**Statement engine without a model (2026-10-30).** The scanner reads any layout by trying the readings a table
+allows and keeping the one its own balances prove, measured by a generator (`tests/fuzz_layouts.rs`): statements
+with random column orders and roles, English/unusual/French/Spanish/no headings, eight date formats, point/comma/
+space-grouped amounts, minus/trailing-minus/parentheses/CR-DR signs, newest-first lists, wrapped descriptions,
+summary boxes or balance lines, watermarks, margin lettering, page breaks and a re-listing after the statement,
+each with its answer. Baseline before this work: 31–40% read exactly and proven; now 95–97% (4,000 statements,
+two seeds), and none wrong yet marked Reconciled — the test fails on one, and on the default set falling under
+94%. What changed:
+- Amounts: each document's decimal style is found from its unambiguous amounts (`money::infer_decimals`) and the
+  whole read uses it (`with_decimals`); thousands written with spaces are joined (`join_thousands`); `€ £`.
+- Dates: French, Spanish, Dutch, German month names (not Portuguese/Italian `out`/`set`, which would read
+  "Money Out 12.50" as a date); `02 janv. 25`. French/Spanish headings and balance labels.
+- Newest-first sections are found from their dates and checked bottom-up (`mirror`); positions are put back.
+- Anything after the printed closing balance — a re-listing, another document's table — is set aside where the
+  running balance prints the closing, or with no running balance at a break in the page where opening + the rows
+  above = closing; kept only if the statement then adds up.
+- Safety found by the generator: the printed opening and closing come before balance lines (a first row whose
+  amount strayed had become the opening, its deposit lost); an amount is worked out from the balances only when
+  an unreadable amount is visibly on the line (a re-listing's figures had been turned into four invented rows);
+  without an opening balance the first row is unproven unless its column gives its direction and the balances
+  confirmed that reading everywhere else (3+ checks, no sign corrected) — a lone unsigned column had let a first
+  withdrawal "reconcile" as a deposit.
+- A card read as a chequing account flips every sign and still adds up: the arithmetic can't tell, so the account
+  type from the letterhead (credit limit, minimum payment…) is what decides. Real card statements always print it.
+
+**Profiles for unknown banks (Approve):** approving a reconciled statement from a bank with no profile makes one
+(`BankProfile::from_statement`): named and fingerprinted by what the letterhead says (`bank_identifiers`: a
+proper name with Bank/Trust/Credit Union…, and the bank's web address — never an email domain or a merchant's
+domain from a transaction line), with the layout it was read with and that account type verified. The account
+is linked and renamed from `Bank …`; the bank's other held statements are re-read. A letterhead that names no
+bank makes nothing ("set it up in Bank Profiles → New from Sample"). Fingerprints count triple only in page 1's
+letterhead and footer: a page-1 transfer line saying "Credit Union" had made a statement CICSA's.
 
 ## 7. Categorisation pipeline
 
@@ -495,10 +607,10 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 10. Packaging & operations
 
-- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.7-1_amd64.deb` (binary, desktop entry with
+- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.9-1_amd64.deb` (binary, desktop entry with
   PDF "Open With", icon, README; depends on poppler-utils, GTK 4, libadwaita; recommends
   tesseract-ocr for picture-only statements).
-- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.7-1_amd64.deb`. The
+- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.9-1_amd64.deb`. The
   version is bumped for every change to the app: apt skips a same-version `.deb` unless given
   `--reinstall`, and once that made a fix look missing. A docs-only rebuild keeps the version and
   is installed with `--reinstall`.
@@ -582,13 +694,21 @@ Fixes found while testing the guide on the owner's real statements:
 | Sidebar order (0.2.6) | Owner's order: Overview, Net Worth, Budget, Outlook, Transactions, Combined Statement, Statements, What Changed, then Subscriptions (not named, put last); Ctrl+1–9 follow it. Also in this round: Reports & Export moved from the sidebar to the main menu, and Load Demo Data left the menu (it stays on the empty Overview and in the guide). Versions now bump on every `.deb`: a same-version rebuild was once installed over without `--reinstall` and the change looked missing |
 | README screenshots (0.2.6, docs only) | Owner asked for pictures of the app in the README with none of their data: nine pages shot from the demo in a scratch ledger (see §10); past releases tagged at the owner's request |
 | Big yearly bills (0.2.7) | Owner: "does the software ask what are your once a year costs?" It didn't. Non-monthly bills existed only on the Budget page, and suggestions need two charges a year apart from the same payee. The budget setup gains step 3, **Big Yearly Bills**: 9 common ones (car / home insurance, HOA or strata, vehicle licence, health insurance if self-paid, school fees per term, memberships, travel, Christmas & birthdays) plus bills already planned and ones found in the statements, each with amount, how often (yearly, 6, 4 termly, 3 months, 2 years) and the month it's due. The set-aside comes out of "left to save", and is treated as fixed when trimming variable spending to reach the goal. An emptied row deletes that bill. Overview gains **Big Bills Coming Up** (next five, set aside so far) and **Big Bills Over the Next 12 Months** (what lands each month), or an Add Big Bills… card when none are planned. Getting Started's budget step lists the five steps and what's planned or found |
+| Overview KPI cards (0.2.8) | Owner: "2 rows of 5 … net cash flow, annually, monthly and fortnightly", with a toggle on each. The date-range Net Cash Flow card is replaced by three: **Year / Month / Fortnight**, each with its own menu (saved as `overview_flow_year|month|fortnight`): **Average** = last 12 months of statements (fewer if that's all there is) scaled by days (365, 365/12, 14), **Range** = the picked date range scaled the same way, **Actual** = this year so far, the last month the statements fully cover, and the last 14 days of statements. Added **Left to Spend This Month** (same sum as the Budget page's Left: funded − spent in budgeted categories, `budget::left_this_month`), **Next Big Bill** (soonest fund, amount, set aside, `budget::next_big_bill`) and **Cash Runway** (latest balance of visible non-card/loan accounts ÷ average monthly spending over the last 12 months). Layout: a 5-column homogeneous grid; the menus sit under the numbers so the row fits beside the sidebar |
 
+| Layout learning (0.2.9) | Owner: make sure it learns new statements out of the box, e.g. if Scotiabank changes its layout. It read unknown banks already, but renamed column headings collapsed a chequing read (3 of 28 rows) and a rebranded letterhead was taken for CNB; the only fix was editing Bank Profiles. Now: page-1 fingerprint, re-reads proven by the balances (including columns from the amounts alone), learn-on-Approve with undo, and a hold when a statement looks different from the account's last one (§6.4) |
 ---
 
 ## 13. Outstanding / known limits
 
 - **Three of five banks unverified on real PDFs** (Butterfield, RBC, CICSA): follow §6.3. Until then
-  every statement from them is held for review on import.
+  every statement from them is held for review on import; the first approval of each teaches its profile (§6.4).
+- Not read (out of scope for KYD/USD Cayman statements): decimal-comma amounts (`15.320,00 €`, `10 750,00 $`),
+  Dutch/French month names (`1 mei`, `1 janvier`); other currencies (HKD, INR, EUR…) are read but filed as the
+  account's KYD/USD. An unknown bank's approved statement teaches nothing until it has a profile (New from Sample).
+- Layout learning (§6.4) is proven on simulated changes to real Scotiabank statements, not on a real
+  layout change yet. Columns from the amounts alone need two or more amounts per column; a statement with
+  no balance column and no headings the scanner knows still needs the inspector.
 - Ledgers from before 0.2.4 may hold rows counted twice where one statement was imported from two
   files (the owner's: 7 Amex USD rows, US$919.61); Rescan All removes them. Nothing is deleted on upgrade.
 - The import questions (new account, which account, same period), the ⓘ popovers and the main menu

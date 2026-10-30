@@ -239,6 +239,9 @@ pub struct Pass1Report {
     /// The first lines of page 1 (letterhead), for building a new profile.
     #[serde(default)]
     pub letterhead: Vec<String>,
+    /// What on page 1 could recognise this bank's statements: its name and web/email domain.
+    #[serde(default)]
+    pub identifiers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -253,6 +256,70 @@ pub struct Pass3Report {
     /// Where this statement didn't match its bank's declared layout, in plain words.
     #[serde(default)]
     pub layout_notes: Vec<String>,
+    /// Not read with the saved layout: how it was read instead (`with generic column headings`).
+    #[serde(default)]
+    pub read_as: Option<String>,
+    /// Transactions whose date has no year (taken from the statement period, else assumed).
+    #[serde(default)]
+    pub yearless_dates: usize,
+    /// Lines that printed both a debit and a credit (read as two transactions).
+    #[serde(default)]
+    pub debit_and_credit_lines: usize,
+    /// Listed newest first (read bottom-up; transaction pages and positions are mirrored).
+    #[serde(default)]
+    pub newest_first: bool,
+}
+
+/// What a read found out about a statement's layout. Approving a held statement teaches its bank profile
+/// these (`Db::approve_document`), and each import is compared with the account's last approved one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ObservedLayout {
+    /// The heading over each column, lower case.
+    pub headings: Vec<(ColumnRole, String)>,
+    /// The money columns, left to right.
+    pub money_columns: Vec<ColumnRole>,
+    pub row_shape: profiles::RowShape,
+    pub month_first: bool,
+    /// The words on the opening and closing balance lines (`balance brought forward`).
+    pub opening: Option<String>,
+    pub closing: Option<String>,
+}
+
+impl ObservedLayout {
+    pub fn is_empty(&self) -> bool {
+        self.headings.is_empty() && self.money_columns.is_empty()
+    }
+
+    /// How `self` (a new statement) looks different from `before` (the account's last approved one), in
+    /// plain words; empty when either wasn't recorded.
+    pub fn changes_from(&self, before: &ObservedLayout) -> Vec<String> {
+        if self.is_empty() || before.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let words = |o: &ObservedLayout| {
+            let mut v: Vec<String> = o.headings.iter().map(|h| h.1.clone()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let (now, was) = (words(self), words(before));
+        if now != was {
+            out.push(format!("column headings are now {} (were {})", now.join(", "), was.join(", ")));
+        }
+        if self.money_columns != before.money_columns {
+            let names = |v: &[ColumnRole]| v.iter().map(|r| format!("{r:?}").to_lowercase()).collect::<Vec<_>>().join(", ");
+            out.push(format!("amount columns are now {} (were {})", names(&self.money_columns), names(&before.money_columns)));
+        }
+        if self.row_shape != before.row_shape && self.row_shape != profiles::RowShape::Auto && before.row_shape != profiles::RowShape::Auto {
+            out.push("amounts moved to a different line of each transaction".into());
+        }
+        if self.month_first != before.month_first {
+            out.push("dates are written the other way round (day and month)".into());
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -273,6 +340,9 @@ pub struct SkippedLine {
     pub date: Option<NaiveDate>,
     pub amount: Option<Decimal>,
     pub reason: String,
+    /// The balance printed on the line, when its amount couldn't be read (Pass 5 works the amount out from it).
+    #[serde(default)]
+    pub balance: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -305,6 +375,8 @@ pub struct Diagnostics {
     pub pass1: Pass1Report,
     pub pages: Vec<PageGeometry>,
     pub pass3: Pass3Report,
+    #[serde(default)]
+    pub observed: ObservedLayout,
 }
 
 /// One extracted transaction, signed for the ledger (negative = money out of the account holder's pocket).

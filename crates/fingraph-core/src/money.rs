@@ -144,14 +144,67 @@ pub struct Printed {
     pub currency: Option<Currency>,
 }
 
+/// How a document writes its decimals: `1,234.56` (point) or `1.234,56` (comma).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Decimals {
+    #[default]
+    Point,
+    Comma,
+}
+
+thread_local! {
+    // ponytail: the document being scanned sets this for its amounts (`with_decimals`) instead of every
+    // amount helper taking a format argument; it's per thread and put back afterwards
+    static DECIMALS: std::cell::Cell<Decimals> = const { std::cell::Cell::new(Decimals::Point) };
+}
+
+/// Run `f` reading amounts the way `d` says.
+pub fn with_decimals<T>(d: Decimals, f: impl FnOnce() -> T) -> T {
+    let old = DECIMALS.replace(d);
+    let out = f();
+    DECIMALS.set(old);
+    out
+}
+
+/// `1.234,56` → `1,234.56` when the document uses decimal commas: then one parser serves both.
+fn as_point(s: &str) -> std::borrow::Cow<'_, str> {
+    if DECIMALS.get() == Decimals::Comma {
+        s.chars().map(|c| match c { '.' => ',', ',' => '.', c => c }).collect::<String>().into()
+    } else {
+        s.into()
+    }
+}
+
+/// Which decimal style a document's amounts use, from the ones that can't be anything else: three or more
+/// digits before the separator, or a thousands group (`15.320,00`, `1,200.00`).
+pub fn infer_decimals<'a>(words: impl Iterator<Item = &'a str>) -> Decimals {
+    let (mut point, mut comma) = (0, 0);
+    for w in words {
+        let w = w.trim_matches(|c: char| !c.is_ascii_digit());
+        let Some(i) = w.rfind(['.', ',']) else { continue };
+        let (int, frac) = (&w[..i], &w[i + 1..]);
+        if frac.len() != 2 || !frac.bytes().all(|b| b.is_ascii_digit()) || !int.bytes().all(|b| b.is_ascii_digit() || b == b'.' || b == b',') {
+            continue;
+        }
+        let digits = int.bytes().filter(u8::is_ascii_digit).count();
+        let grouped = int.contains(['.', ',']);
+        if digits < 3 && !grouped {
+            continue;
+        }
+        if w.as_bytes()[i] == b',' { comma += 1 } else { point += 1 }
+    }
+    if comma > point { Decimals::Comma } else { Decimals::Point }
+}
+
 /// Is this one word the numeric core of an amount (`1,234.56`, `$-3,000.00`, `(12.00)`, `5.00CR`)?
 pub fn is_amount_core(word: &str) -> bool {
+    let word = as_point(word);
     let w = word.trim_start_matches(['(', '-', '+']);
-    let w = w.strip_prefix("CI$").or_else(|| w.strip_prefix("US$")).or_else(|| w.strip_prefix('$')).unwrap_or(w);
+    let w = w.strip_prefix("CI$").or_else(|| w.strip_prefix("US$")).or_else(|| w.strip_prefix('$')).or_else(|| w.strip_prefix('€')).or_else(|| w.strip_prefix('£')).unwrap_or(w);
     let w = w.trim_start_matches(['-', '+']);
     let w = w.trim_end_matches(')');
     let w = w.strip_suffix("CR").or_else(|| w.strip_suffix("DR")).or_else(|| w.strip_suffix("Cr")).or_else(|| w.strip_suffix("Dr")).unwrap_or(w);
-    let w = w.trim_end_matches(['-', '+', ')']);
+    let w = w.trim_end_matches(['-', '+', ')', '€', '£', '$']);
     let Some((int, frac)) = w.split_once('.') else { return false };
     if frac.len() != 2 || !frac.bytes().all(|b| b.is_ascii_digit()) || int.is_empty() {
         return false;
@@ -165,12 +218,13 @@ pub fn is_amount_core(word: &str) -> bool {
 
 /// Words that may sit next to an amount's core and belong to it.
 pub fn is_amount_affix(word: &str) -> bool {
-    matches!(word, "-" | "+" | "(" | ")" | "CR" | "DR" | "Cr" | "Dr" | "cr" | "dr" | "$") || Currency::parse(word).is_some()
+    matches!(word, "-" | "+" | "(" | ")" | "CR" | "DR" | "Cr" | "Dr" | "cr" | "dr" | "$" | "€" | "£") || Currency::parse(word).is_some()
 }
 
 /// Parse an amount from its words joined by spaces (`CI$ 1,685.00 -`).
 pub fn parse_printed(text: &str) -> Option<Printed> {
-    let t = text.trim();
+    let t = as_point(text);
+    let t = t.trim();
     let mut negative = None;
     let mut credit_marker = None;
     let mut currency = None;

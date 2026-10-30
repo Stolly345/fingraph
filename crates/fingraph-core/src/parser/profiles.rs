@@ -4,7 +4,10 @@
 use serde::{Deserialize, Serialize};
 
 use super::dates::Order;
-use super::Token;
+use regex::Regex;
+use std::sync::LazyLock;
+
+use super::{ColumnRole, Diagnostics, ObservedLayout, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayoutKind {
@@ -100,6 +103,89 @@ pub struct BankProfile {
 impl BankProfile {
     pub fn date_order(&self) -> Order {
         if self.default_date_format.to_ascii_uppercase().starts_with("MM") { Order::MonthFirst } else { Order::DayFirst }
+    }
+
+    /// A new profile from one statement of a bank nobody set up: named and recognised by what page 1 says
+    /// (`Pass1Report::identifiers`; empty when it names no bank), laid out the way the statement was read.
+    pub fn from_statement(d: &Diagnostics) -> BankProfile {
+        let p1 = &d.pass1;
+        let ids = p1.identifiers.clone();
+        let display_name = ids.first().cloned().or_else(|| p1.letterhead.first().cloned()).unwrap_or_else(|| "My Bank".into());
+        // the badge: the name without its legal tail, or the domain without its ending
+        let short_name = if display_name.contains('.') && !display_name.contains(' ') {
+            display_name.split('.').next().unwrap_or("Bank").to_string()
+        } else {
+            let keep: Vec<&str> = display_name.split_whitespace().filter(|w| !matches!(w.to_lowercase().trim_matches('.'), "ltd" | "limited" | "inc" | "plc" | "n.a" | "na" | "co" | "corp")).take(3).collect();
+            keep.join(" ")
+        };
+        let headings: Vec<ColumnRole> = d.observed.money_columns.clone();
+        let column_layout_kind = if headings.contains(&ColumnRole::Debit) && headings.contains(&ColumnRole::Balance) {
+            LayoutKind::DebitCreditWithBalance
+        } else if headings.contains(&ColumnRole::Debit) {
+            LayoutKind::SeparateDebitCredit
+        } else if p1.account_type == Some(crate::AccountType::CreditCard) {
+            LayoutKind::CreditCardDRCR
+        } else {
+            LayoutKind::SignedSingleAmount
+        };
+        let mut p = BankProfile {
+            id: 0,
+            slug: display_name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>().trim_matches('_').chars().take(24).collect(),
+            short_name,
+            display_name,
+            routing_identifiers: ids,
+            default_date_format: "DD/MM/YYYY".into(),
+            column_layout_kind,
+            header_anchors: HeaderAnchors::default(),
+            noise_patterns: Vec::new(),
+            fx_note_regex: GENERIC_FX.into(),
+            is_builtin: false,
+            layout: LayoutRules::default(),
+        };
+        p.learn(&d.observed);
+        p
+    }
+
+    /// Learn what an approved statement showed about this bank's layout: its column headings, balance
+    /// labels, row shape and date order. Only adds headings and labels (older statements keep reading);
+    /// returns whether anything changed.
+    pub fn learn(&mut self, o: &ObservedLayout) -> bool {
+        let before = self.clone();
+        for (role, word) in &o.headings {
+            let w = word.trim().to_lowercase();
+            // the generic words already name it: nothing to learn
+            if w.is_empty() || super::multipass::classify_header(&w, None) == Some(*role) {
+                continue;
+            }
+            let a = &mut self.header_anchors;
+            let list = match role {
+                ColumnRole::Date => &mut a.date,
+                ColumnRole::PostDate => &mut a.posting_date,
+                ColumnRole::Description => &mut a.description,
+                ColumnRole::Reference => &mut a.reference,
+                ColumnRole::Debit => &mut a.debit,
+                ColumnRole::Credit => &mut a.credit,
+                ColumnRole::Amount => &mut a.amount,
+                ColumnRole::Balance => &mut a.balance,
+            };
+            if !list.contains(&w) {
+                list.push(w);
+            }
+        }
+        for (label, list) in [(&o.opening, &mut self.layout.opening), (&o.closing, &mut self.layout.closing)] {
+            if let Some(l) = label.as_ref().map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty() && l.split_whitespace().count() <= 5)
+                && !list.contains(&l)
+            {
+                list.push(l);
+            }
+        }
+        if o.row_shape != RowShape::Auto {
+            self.layout.row_shape = o.row_shape;
+        }
+        if o.month_first != (self.date_order() == Order::MonthFirst) {
+            self.default_date_format = if o.month_first { "MM/DD/YYYY" } else { "DD/MM/YYYY" }.into();
+        }
+        *self != before
     }
 }
 
@@ -222,6 +308,71 @@ pub fn builtins() -> Vec<BankProfile> {
     ]
 }
 
+static DOMAIN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:www\.)?([a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:com|net|org|bank|ky|co|uk|ca|us|biz|info|io)(?:\.[a-z]{2})?)\b").unwrap());
+static BANK_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:bank|trust|credit union|building society|bancorp|banco|banque)\b").unwrap());
+/// Domains that say nothing about the bank: mail providers and the placeholders templates use.
+const NOT_A_BANK: &[&str] = &["gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "aol.com", "mail.com", "email.com", "domain.com", "example.com", "company.com", "website.com", "yourwebsite.com", "sampletemplates.com", "templatelab.com", "tidyforms.com"];
+/// Words that make a phrase about banking rather than a bank's name.
+const NOT_A_NAME: &[&str] = &[
+    "statement", "account", "acct", "name", "address", "branch", "transfer", "deposit", "payment", "balance", "information", "reconciliation", "fund",
+    "online", "telephone", "mobile", "internet", "thank", "call", "contact", "details", "division", "savings", "checking", "your", "our", "int",
+];
+
+/// What could recognise a bank's statements later, from its letterhead (page 1 above the first transaction,
+/// cells two spaces apart): its name — a proper name with Bank, Trust, Credit Union… in it, without a label
+/// before it (`Bank Name: People's Trust Bank`) — and its web address. Never an email address (the
+/// customer's, or a template's placeholder) or a merchant's domain from a transaction line.
+pub fn bank_identifiers(letterhead: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in letterhead.lines() {
+        for cell in line.split("  ").map(str::trim).filter(|c| !c.is_empty()) {
+            let cell = cell.rsplit_once(':').map_or(cell, |(label, rest)| if rest.trim().is_empty() { label } else { rest }).trim();
+            let name = cell.trim_matches(|c: char| !c.is_alphanumeric() && c != ')' && c != '.');
+            let words: Vec<&str> = name.split_whitespace().collect();
+            // Title Case or capitals throughout, small joining words aside: `Bank of Butterfield`, `JPMORGAN CHASE BANK, N.A.`
+            let proper = words.iter().all(|w| {
+                let w = w.trim_matches(|c: char| !c.is_alphanumeric());
+                w.is_empty() || matches!(w, "of" | "and" | "the" | "de" | "du" | "la" | "&") || w.chars().next().is_some_and(|c| c.is_uppercase() || c.is_ascii_digit())
+            });
+            let lower = name.to_lowercase();
+            if BANK_WORD.is_match(name)
+                && (2..=7).contains(&words.len())
+                && proper
+                && !name.chars().any(|c| c.is_ascii_digit() || matches!(c, '@' | '[' | '<' | '/' | '?'))
+                && !lower.split(|c: char| !c.is_alphanumeric()).any(|w| NOT_A_NAME.contains(&w) || w.strip_suffix('s').is_some_and(|w| NOT_A_NAME.contains(&w)))
+                && !names.iter().any(|n| n.eq_ignore_ascii_case(name))
+            {
+                names.push(name.to_string());
+            }
+        }
+    }
+    let mut domains: Vec<String> = DOMAIN
+        .captures_iter(letterhead)
+        .filter(|c| c.get(0).is_some_and(|m| !letterhead[..m.start()].ends_with('@')) && !c[1].contains('@'))
+        .map(|c| c[1].to_lowercase())
+        .filter(|d| !NOT_A_BANK.contains(&d.as_str()))
+        .collect();
+    // an email's domain isn't a web address: drop domains that only appear after an `@`
+    domains.retain(|d| !letterhead.to_lowercase().contains(&format!("@{d}")) || letterhead.to_lowercase().contains(&format!("www.{d}")));
+    // a bank's own address: written as one (`www.`), or about banking, or it is the name or its initials
+    // (`lnb.com` for Liberty National Bank); a shop's domain in the letterhead text is none of these
+    let lower = letterhead.to_lowercase();
+    domains.retain(|d| {
+        // the name without its ending (`ky.harbourbank` of `ky.harbourbank.com`)
+        let stem = d.rsplit_once('.').map_or(d.as_str(), |(s, _)| s);
+        lower.contains(&format!("www.{d}"))
+            || ["bank", "trust", "credit", "cu"].iter().any(|w| stem.contains(w))
+            || names.iter().any(|n| {
+                let words: Vec<String> = n.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()).filter(|w| !w.is_empty()).collect();
+                let initials: String = words.iter().filter_map(|w| w.chars().next()).collect();
+                words.iter().any(|w| w.len() >= 4 && stem.contains(w.as_str())) || stem.split('.').any(|label| label.len() >= 3 && initials.starts_with(label))
+            })
+    });
+    domains.dedup();
+    names.into_iter().take(2).chain(domains.into_iter().take(2)).collect()
+}
+
 /// A short identifier (`CNB`) must match as a whole word; longer ones as substrings.
 fn id_matches(hay_lower: &str, id: &str) -> bool {
     let id = id.to_lowercase();
@@ -237,9 +388,14 @@ fn id_matches(hay_lower: &str, id: &str) -> bool {
 
 /// Score every profile against the document: each distinct identifier counts 3 when it appears
 /// on page 1 (the letterhead) and 1 when only seen later, so a "TRF TO: BANK OF BUTTERFIELD" line in
-/// a Scotiabank statement can't outvote Scotiabank's own letterhead.
-pub fn fingerprint<'a>(profiles: &'a [BankProfile], tokens: &[Token]) -> (Option<&'a BankProfile>, Vec<(String, u32)>) {
-    let page1: String = tokens.iter().filter(|t| t.page == 1).map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ").to_lowercase();
+/// a Scotiabank statement can't outvote Scotiabank's own letterhead. A bank is only picked when it's named
+/// on page 1: a statement whose letterhead names no known bank (a rebrand, a new bank) is from an unknown
+/// bank, not from whichever bank one of its transfer lines mentions.
+///
+/// `head` is page 1 outside its transactions (letterhead and footer): a transfer line on page 1 that says
+/// "Credit Union" is part of the transactions, and counts only once.
+pub fn fingerprint<'a>(profiles: &'a [BankProfile], head: &str, tokens: &[Token]) -> (Option<&'a BankProfile>, Vec<(String, u32)>) {
+    let page1 = head.to_lowercase();
     let all: String = tokens.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ").to_lowercase();
     let mut scores: Vec<(String, u32)> = profiles
         .iter()
@@ -252,7 +408,7 @@ pub fn fingerprint<'a>(profiles: &'a [BankProfile], tokens: &[Token]) -> (Option
             (p.slug.clone(), score)
         })
         .collect();
-    let best = scores.iter().enumerate().filter(|(_, (_, s))| *s > 0).max_by_key(|(i, (_, s))| (*s, usize::MAX - i)).map(|(i, _)| &profiles[i]);
+    let best = scores.iter().enumerate().filter(|(_, (_, s))| *s >= 3).max_by_key(|(i, (_, s))| (*s, usize::MAX - i)).map(|(i, _)| &profiles[i]);
     scores.sort_by_key(|x| std::cmp::Reverse(x.1));
     (best, scores)
 }

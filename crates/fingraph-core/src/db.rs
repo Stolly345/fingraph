@@ -469,7 +469,20 @@ pub struct ImportPlan {
 
 /// A quiet month (no transactions, balances printed) is still a statement; this is neither.
 fn nothing_read(scan: &ScanResult) -> bool {
-    scan.sections.iter().all(|s| s.transactions.is_empty() && s.opening.is_none() && s.closing.is_none())
+    scan.sections.iter().all(|s| s.transactions.is_empty() && s.opening.is_none() && s.closing.is_none()) || undated_only(scan)
+}
+
+/// No transactions, but lines with amounts and no date: a blank template (`mm/dd/yyyy`), not a statement.
+fn undated_only(scan: &ScanResult) -> bool {
+    scan.sections.iter().all(|s| s.transactions.is_empty()) && scan.sections.iter().flat_map(|s| &s.report.skipped).any(|l| l.amount.is_some() && l.date.is_none() && l.reason != crate::parser::reconcile::SUMMARY_LINE)
+}
+
+fn nothing_read_reason(scan: &ScanResult) -> &'static str {
+    if undated_only(scan) {
+        "its transaction lines have amounts but no dates FinGraph can read (a blank template?)"
+    } else {
+        "no transactions or balances were found in this statement"
+    }
 }
 
 impl ImportPlan {
@@ -487,6 +500,21 @@ impl ImportPlan {
 }
 
 /// Why a statement waits for review before its transactions count anywhere. Stored as codes.
+/// What approving a held statement did besides letting it count.
+#[derive(Debug, Clone, Default)]
+pub struct Approval {
+    /// The bank whose saved layout learned from it (short name).
+    pub learned: Option<String>,
+    /// Other held statements from that bank read again with what was learned.
+    pub rereads: usize,
+    /// The anonymised layout sample kept of it.
+    pub sample: Option<std::path::PathBuf>,
+    /// A bank nobody had set up got its profile from this statement (short name).
+    pub created: Option<String>,
+    /// A bank nobody had set up, whose statement doesn't say who it is on page 1: no profile was made.
+    pub unnamed: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Review {
     /// The rows don't add up to the printed balances.
@@ -499,10 +527,14 @@ pub enum Review {
     NewLayout,
     /// It departs from the bank's declared layout: it can add up and still have wrong names or dates.
     OffLayout,
+    /// It looks different from the account's previous statement: the bank changed its layout.
+    LayoutChanged,
+    /// An amount couldn't be read and was worked out from the balances around it.
+    Derived,
 }
 
 impl Review {
-    pub const ALL: [Review; 5] = [Review::Mismatch, Review::NoBalances, Review::Ocr, Review::NewLayout, Review::OffLayout];
+    pub const ALL: [Review; 7] = [Review::Mismatch, Review::NoBalances, Review::Ocr, Review::NewLayout, Review::OffLayout, Review::LayoutChanged, Review::Derived];
     pub fn code(self) -> &'static str {
         match self {
             Review::Mismatch => "mismatch",
@@ -510,6 +542,8 @@ impl Review {
             Review::Ocr => "ocr",
             Review::NewLayout => "newlayout",
             Review::OffLayout => "offlayout",
+            Review::LayoutChanged => "layoutchanged",
+            Review::Derived => "derived",
         }
     }
     pub fn text(self) -> &'static str {
@@ -519,6 +553,8 @@ impl Review {
             Review::Ocr => "it was read by OCR, so names may have typos",
             Review::NewLayout => "it's the first statement of this kind from this bank: check the dates, amounts and descriptions once",
             Review::OffLayout => "it doesn't match this bank's declared layout (see the notes in its Scan Pass Report), so names or dates may be off",
+            Review::LayoutChanged => "the bank changed how its statements look since this account's last one (see its Scan Pass Report): check it once, and approving it teaches FinGraph the new layout",
+            Review::Derived => "an amount on it couldn't be read, so it was worked out from the balances before and after it (see Recovered in its Scan Pass Report): check that line against the PDF",
         }
     }
     pub fn parse_list(s: &str) -> Vec<Review> {
@@ -1131,6 +1167,9 @@ impl Db {
         if !scan.diagnostics.pass3.layout_notes.is_empty() {
             v.push(Review::OffLayout);
         }
+        if s.report.recovered.iter().any(|r| r.contains(crate::parser::reconcile::DERIVED)) {
+            v.push(Review::Derived);
+        }
         v
     }
 
@@ -1143,7 +1182,7 @@ impl Db {
     /// `approved`: sections (by index) already approved before a rescan, which only a new mismatch holds again.
     fn import_scan_reviewed(&self, entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult, targets: &[Target], approved: &[usize]) -> Result<ImportReport> {
         if nothing_read(scan) {
-            return Err(Error("no transactions or balances were found in this statement".into()));
+            return Err(Error(nothing_read_reason(scan).into()));
         }
         let mut rep = ImportReport::default();
         // OCR'd statements say so wherever their name shows, so nobody takes the names as exact
@@ -1171,13 +1210,21 @@ impl Db {
                 // approved before: only what this read found wrong holds it again
                 why.retain(|r| matches!(r, Review::Mismatch | Review::NoBalances | Review::OffLayout));
             }
+            // the bank changed its layout: this one looks different from the account's statement before it
+            let mut diagnostics = std::borrow::Cow::Borrowed(&scan.diagnostics);
+            let changes = self.previous_layout(account_id, scan.period.map(|p| p.1))?.map(|o| scan.diagnostics.observed.changes_from(&o)).unwrap_or_default();
+            if !changes.is_empty() && !approved.contains(&si) {
+                why.push(Review::LayoutChanged);
+                let notes = &mut diagnostics.to_mut().pass3.layout_notes;
+                notes.extend(changes.iter().map(|c| format!("Since this account's previous statement: {c}")));
+            }
             rep.held += !why.is_empty() as usize;
             #[derive(serde::Serialize)]
             struct Stored<'a> {
                 diagnostics: &'a Diagnostics,
                 report: &'a SectionReport,
             }
-            let diag = serde_json::to_string(&Stored { diagnostics: &scan.diagnostics, report: &s.report })?;
+            let diag = serde_json::to_string(&Stored { diagnostics: &diagnostics, report: &s.report })?;
             let sum = s.extracted_sum();
             tx.execute(
                 "INSERT INTO documents (account_id, bank_profile_id, filename, sha256_hash, section_index, period_start, period_end, statement_opening_balance, statement_closing_balance,
@@ -1546,16 +1593,21 @@ impl Db {
     /// Re-run the statement equation for a document from what's now in the ledger.
     /// Let a held statement count: its transactions join every view. Approving the first statement of a
     /// kind confirms that bank's layout for that account type, which also releases the others held only
-    /// for that reason.
-    pub fn approve_document(&self, doc_id: i64) -> Result<()> {
-        let (note, profile_id, ty): (String, Option<i64>, String) = self.conn.query_row(
-            "SELECT d.review_note, a.bank_profile_id, a.account_type FROM documents d JOIN accounts a ON a.id = d.account_id WHERE d.id = ?1",
+    /// for that reason. Approving a statement held for its layout (new, off the saved one, or changed)
+    /// teaches the bank profile what that statement showed (`BankProfile::learn`, undoable), keeps an
+    /// anonymised layout sample, and re-reads the bank's other held statements with what was learned.
+    pub fn approve_document(&self, doc_id: i64) -> Result<Approval> {
+        let (note, profile_id, ty, status, sha, filename): (String, Option<i64>, String, String, String, String) = self.conn.query_row(
+            "SELECT d.review_note, a.bank_profile_id, a.account_type, d.reconciliation_status, d.sha256_hash, d.filename FROM documents d JOIN accounts a ON a.id = d.account_id WHERE d.id = ?1",
             [doc_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )?;
+        let mut out = Approval::default();
         self.conn.execute("UPDATE documents SET review_hold = 0, review_note = '' WHERE id = ?1", [doc_id])?;
-        if Review::parse_list(&note).contains(&Review::NewLayout)
-            && let Some(mut p) = self.profiles()?.into_iter().find(|p| Some(p.id) == profile_id)
+        let why = Review::parse_list(&note);
+        let profile = self.profiles()?.into_iter().find(|p| Some(p.id) == profile_id);
+        if why.contains(&Review::NewLayout)
+            && let Some(mut p) = profile.clone()
         {
             if !p.layout.verified.contains(&ty) {
                 p.layout.verified.push(ty.clone());
@@ -1567,10 +1619,162 @@ impl Db {
                 params![Review::NewLayout.code(), profile_id, ty],
             )?;
         }
+        // a bank nobody had set up: this statement becomes its profile, when page 1 says who the bank is
+        let reconciled = Reconciliation::from_db(&status) == Reconciliation::Reconciled;
+        let mut profile_id = profile_id;
+        if profile_id.is_none() && why.contains(&Review::NewLayout) && reconciled {
+            let (diag, _) = self.document_report(doc_id)?;
+            let mut p = BankProfile::from_statement(&diag);
+            if p.routing_identifiers.is_empty() {
+                out.unnamed = true;
+            } else {
+                let taken: Vec<String> = self.profiles()?.into_iter().map(|p| p.slug).collect();
+                let base = p.slug.clone();
+                p.slug = (1..).map(|n| if n == 1 { base.clone() } else { format!("{base}_{n}") }).find(|s| !taken.contains(s)).unwrap_or(base);
+                p.layout.verified = vec![ty.clone()];
+                p.id = self.save_profile(&p)?;
+                let account: i64 = self.conn.query_row("SELECT account_id FROM documents WHERE id = ?1", [doc_id], |r| r.get(0))?;
+                self.adopt_account(account, &p)?;
+                out.created = Some(p.short_name.clone());
+                profile_id = Some(p.id);
+                out.rereads = self.reread_unknown(&p)? + self.reread_held(p.id)?;
+            }
+        }
+        // only a read that adds up is worth learning from
+        let layout_hold = why.iter().any(|r| matches!(r, Review::NewLayout | Review::OffLayout | Review::LayoutChanged));
+        if layout_hold
+            && Reconciliation::from_db(&status) == Reconciliation::Reconciled
+            && let Some(before) = self.profiles()?.into_iter().find(|p| Some(p.id) == profile_id)
+        {
+            let (diag, _) = self.document_report(doc_id)?;
+            let mut p = before.clone();
+            if p.learn(&diag.observed) {
+                self.push_layout_history(&before)?;
+                self.save_profile(&p)?;
+                out.learned = Some(p.short_name.clone());
+                out.rereads = self.reread_held(p.id)?;
+            }
+            if let Some(dir) = self.layout_samples_dir()
+                && let Some(pdf) = self.stored_pdf(&sha, &filename)
+                && let Ok(json) = crate::parser::layout_sample_json(&pdf, &self.profiles()?)
+                && std::fs::create_dir_all(&dir).is_ok()
+            {
+                let name = format!("{}-{}.json", p.slug, &sha[..sha.len().min(12)]);
+                out.sample = std::fs::write(dir.join(&name), json).ok().map(|_| dir.join(name));
+            }
+        }
         self.match_transfers()?;
         self.mark_card_payments()?;
         self.mark_recurring()?;
+        Ok(out)
+    }
+
+    /// The layout of the account's last approved statement ending on or before `end` (any, without a period).
+    fn previous_layout(&self, account_id: i64, end: Option<NaiveDate>) -> Result<Option<crate::parser::ObservedLayout>> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT scan_diagnostics_json FROM documents WHERE account_id = ?1 AND review_hold = 0 AND (?2 IS NULL OR period_end IS NULL OR period_end <= ?2)
+                 ORDER BY period_end DESC, id DESC LIMIT 1",
+                params![account_id, end.map(|d| d.to_string())],
+                |r| r.get(0),
+            )
+            .optional()?;
+        #[derive(serde::Deserialize)]
+        struct Stored {
+            diagnostics: Diagnostics,
+        }
+        Ok(json.and_then(|j| serde_json::from_str::<Stored>(&j).ok()).map(|s| s.diagnostics.observed))
+    }
+
+    /// Link an account that had no bank to `p`, renaming it from the stand-in `Bank …` to the bank's name.
+    fn adopt_account(&self, account: i64, p: &BankProfile) -> Result<()> {
+        self.conn.execute(
+            "UPDATE accounts SET bank_profile_id = ?2, name = CASE WHEN name LIKE 'Bank %' THEN ?3 || substr(name, 5) ELSE name END WHERE id = ?1 AND bank_profile_id IS NULL",
+            params![account, p.id, p.short_name],
+        )?;
+        self.conn.execute("UPDATE documents SET bank_profile_id = ?2 WHERE account_id = ?1", params![account, p.id])?;
         Ok(())
+    }
+
+    /// Statements held from banks nobody had set up, read again now `p` exists: those that turn out to be
+    /// from its bank join it (their accounts too), and the import rules release the ones that read cleanly.
+    fn reread_unknown(&self, p: &BankProfile) -> Result<usize> {
+        let held: Vec<(String, String, i64, i64)> = {
+            let mut st = self.conn.prepare(
+                "SELECT d.sha256_hash, d.filename, a.entity_id, a.id FROM documents d JOIN accounts a ON a.id = d.account_id
+                 WHERE d.review_hold = 1 AND a.bank_profile_id IS NULL GROUP BY d.sha256_hash",
+            )?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        let profiles = self.profiles()?;
+        let scanner = crate::parser::MultiPassScanner::new(&profiles);
+        let mut n = 0;
+        for (sha, name, entity, account) in held {
+            let Some(pdf) = self.stored_pdf(&sha, &name) else { continue };
+            let Ok(scan) = scanner.scan_pdf(&pdf) else { continue };
+            if scan.profile_slug.as_deref() != Some(p.slug.as_str()) {
+                continue;
+            }
+            self.adopt_account(account, p)?;
+            self.replace_statement(entity, &name, &sha, &scan)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Anonymised layout samples of approved statements, next to the ledger (none for an in-memory one).
+    pub fn layout_samples_dir(&self) -> Option<std::path::PathBuf> {
+        Some(self.path()?.parent()?.join("layout_samples"))
+    }
+
+    /// Re-read a bank's other statements held for their layout, now the profile knows more. Those that
+    /// read cleanly are released by the import rules themselves. Returns how many were re-read.
+    fn reread_held(&self, profile_id: i64) -> Result<usize> {
+        let held: Vec<(String, String, i64)> = {
+            let mut st = self.conn.prepare(
+                "SELECT DISTINCT d.sha256_hash, d.filename, a.entity_id FROM documents d JOIN accounts a ON a.id = d.account_id
+                 WHERE d.review_hold = 1 AND a.bank_profile_id = ?1 AND d.review_note LIKE '%layout%'",
+            )?;
+            st.query_map([profile_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        let profiles = self.profiles()?;
+        let scanner = crate::parser::MultiPassScanner::new(&profiles);
+        let mut n = 0;
+        for (sha, name, entity) in held {
+            let Some(pdf) = self.stored_pdf(&sha, &name) else { continue };
+            let Ok(scan) = scanner.scan_pdf(&pdf) else { continue };
+            self.replace_statement(entity, &name, &sha, &scan)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Earlier versions of a bank profile's layout, newest last, kept when approving changed it.
+    fn layout_history(&self, profile_id: i64) -> Vec<BankProfile> {
+        self.setting(&format!("layout_history:{profile_id}")).and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default()
+    }
+
+    fn push_layout_history(&self, p: &BankProfile) -> Result<()> {
+        let mut h = self.layout_history(p.id);
+        h.push(p.clone());
+        // ponytail: the last ten layouts per bank; a bank that changes its statements more often than that is unlikely
+        let skip = h.len().saturating_sub(10);
+        self.set_setting(&format!("layout_history:{}", p.id), &serde_json::to_string(&h[skip..])?)
+    }
+
+    /// How many layout changes learned from approvals can be undone for this bank.
+    pub fn layout_changes(&self, profile_id: i64) -> usize {
+        self.layout_history(profile_id).len()
+    }
+
+    /// Put the bank profile back the way it was before the last approval taught it something.
+    pub fn undo_layout_change(&self, profile_id: i64) -> Result<bool> {
+        let mut h = self.layout_history(profile_id);
+        let Some(prev) = h.pop() else { return Ok(false) };
+        self.save_profile(&prev)?;
+        self.set_setting(&format!("layout_history:{profile_id}"), &serde_json::to_string(&h)?)?;
+        Ok(true)
     }
 
     pub fn recheck_document(&self, doc_id: i64, _currency: Currency) -> Result<Reconciliation> {
@@ -2249,8 +2453,9 @@ mod tests {
         let docs = db.documents_all(&[]).unwrap();
         let bad: Vec<&DocumentRow> = docs.iter().filter(|d| d.reconciliation != Reconciliation::Reconciled).collect();
         assert_eq!(bad.len(), 1, "only the deliberately garbled statement: {bad:?}");
-        // it doesn't add up, so it waits for review and its rows count nowhere yet
-        assert_eq!(bad[0].review, vec![Review::Mismatch]);
+        // it doesn't add up (and has a dated line with no readable amount), so it waits for review and its
+        // rows count nowhere yet
+        assert_eq!(bad[0].review, vec![Review::Mismatch, Review::OffLayout]);
         assert!(db.documents(&[]).unwrap().iter().all(|d| d.id != bad[0].id));
         assert!(db.transactions(&TxFilter::default()).unwrap().iter().all(|t| t.document_id != Some(bad[0].id)));
         // fix it the way the inspector does, and it reconciles
@@ -2259,7 +2464,8 @@ mod tests {
         let i = rep.skipped.iter().position(|l| l.date.is_some()).unwrap();
         db.convert_skipped_line(bad[0].id, i, rep.skipped[i].date.unwrap(), gap, "INCOMING WIRE").unwrap();
         assert_eq!(db.recheck_document(bad[0].id, Currency::USD).unwrap(), Reconciliation::Reconciled);
-        // fixed so it adds up: nothing left to hold it for
+        // it adds up now; the unreadable line was the only other reason, so one look and Approve
+        db.approve_document(bad[0].id).unwrap();
         assert!(db.documents(&[]).unwrap().iter().any(|d| d.id == bad[0].id));
         let rows = db.transactions(&TxFilter::default()).unwrap();
         let paired = rows.iter().filter(|t| t.transfer_peer.is_some()).count();
@@ -2278,6 +2484,90 @@ mod tests {
         assert_eq!(hbo.len(), 12);
         assert!(hbo.iter().all(|t| t.category_name.as_deref() == Some("Subscriptions & Digital") && t.is_subscription && t.review == ReviewStatus::AutoCategorized));
         assert!(db.triage(&[p]).unwrap().iter().all(|g| !g.stem.starts_with("HBO")));
+    }
+
+    /// Scotiabank renames its column headings: the first statement like that is held (its layout changed),
+    /// approving it teaches the profile, the next one imports by itself, and the lesson can be undone.
+    #[test]
+    fn a_changed_layout_is_held_once_then_learned() {
+        let db = Db::open_in_memory().unwrap();
+        let ent = db.create_entity("Personal", EntityKind::Personal, Currency::KYD).unwrap();
+        let docs: Vec<_> = crate::demo::demo_documents().into_iter().filter(|d| d.filename.starts_with("Scotiabank_Chequing")).collect();
+        let renamed = |toks: &[crate::parser::Token]| -> Vec<crate::parser::Token> {
+            toks.iter()
+                .map(|t| {
+                    let text = match t.text.as_str() {
+                        "Description" => "Narrative",
+                        "DEBIT" => "Out",
+                        "CREDIT" => "In",
+                        "Balance" => "Running",
+                        w => w,
+                    };
+                    crate::parser::Token { text: text.into(), ..t.clone() }
+                })
+                .collect()
+        };
+        let import = |i: usize, toks: Vec<crate::parser::Token>| {
+            let scan = crate::parser::MultiPassScanner::new(&db.profiles().unwrap()).scan_tokens(toks).unwrap();
+            assert!(scan.is_reconciled(), "month {i}");
+            db.import_auto(ent, &docs[i].filename, &format!("h{i}"), &scan).unwrap()
+        };
+        assert_eq!(import(0, docs[0].tokens.clone()).held, 0);
+        let rep = import(1, renamed(&docs[1].tokens));
+        assert_eq!(rep.held, 1);
+        let held = db.documents_all(&[]).unwrap().into_iter().find(|d| d.id == rep.document_ids[0]).unwrap();
+        assert!(held.review.contains(&Review::LayoutChanged), "{:?}", held.review);
+        let (diag, _) = db.document_report(held.id).unwrap();
+        assert!(diag.pass3.layout_notes.iter().any(|n| n.contains("column headings are now")), "{:?}", diag.pass3.layout_notes);
+
+        let ap = db.approve_document(held.id).unwrap();
+        assert_eq!(ap.learned.as_deref(), Some("Scotiabank"));
+        let sb = || db.profiles().unwrap().into_iter().find(|p| p.slug == "scotiabank_ky").unwrap();
+        assert!(sb().header_anchors.debit.contains(&"out".to_string()), "{:?}", sb().header_anchors);
+        assert_eq!(import(2, renamed(&docs[2].tokens)).held, 0, "the new layout is known now");
+        // and the old one still reads cleanly (Rescan All re-reads old statements with the learned profile)
+        let old = crate::parser::MultiPassScanner::new(&db.profiles().unwrap()).scan_tokens(docs[0].tokens.clone()).unwrap();
+        assert!(old.is_reconciled() && old.diagnostics.pass3.read_as.is_none() && old.diagnostics.pass3.layout_notes.is_empty());
+
+        assert_eq!(db.layout_changes(sb().id), 1);
+        assert!(db.undo_layout_change(sb().id).unwrap());
+        assert!(!sb().header_anchors.debit.contains(&"out".to_string()));
+        assert_eq!(db.layout_changes(sb().id), 0);
+    }
+
+    /// A statement from a bank nobody set up: held, and approving it makes the bank's profile from what page 1
+    /// says, so the next statement is recognised and imports by itself into the same account.
+    #[test]
+    fn approving_an_unknown_banks_statement_makes_its_profile() {
+        let db = Db::open_in_memory().unwrap();
+        let ent = db.create_entity("Personal", EntityKind::Personal, Currency::KYD).unwrap();
+        let docs: Vec<_> = crate::demo::demo_documents().into_iter().filter(|d| d.filename.starts_with("Scotiabank_Chequing")).collect();
+        // the same statements from a bank FinGraph doesn't know
+        let rebrand = |toks: &[crate::parser::Token]| -> Vec<crate::parser::Token> {
+            toks.iter().map(|t| crate::parser::Token { text: t.text.replace("Scotiabank", "Harbour").replace("scotiabank", "harbourbank"), ..t.clone() }).collect()
+        };
+        let import = |i: usize| {
+            let scan = crate::parser::MultiPassScanner::new(&db.profiles().unwrap()).scan_tokens(rebrand(&docs[i].tokens)).unwrap();
+            assert!(scan.is_reconciled(), "month {i}");
+            (scan.profile_slug.clone(), db.import_auto(ent, &docs[i].filename, &format!("u{i}"), &scan).unwrap())
+        };
+        let (bank, rep) = import(0);
+        assert_eq!((bank, rep.held), (None, 1), "an unknown bank's first statement waits");
+        let doc = rep.document_ids[0];
+        let (diag, _) = db.document_report(doc).unwrap();
+        assert_eq!(diag.pass1.identifiers, vec!["Harbour & Trust (Cayman) Ltd.".to_string(), "ky.harbourbank.com".into()]);
+
+        let ap = db.approve_document(doc).unwrap();
+        assert_eq!(ap.created.as_deref(), Some("Harbour & Trust"));
+        let p = db.profiles().unwrap().into_iter().find(|p| p.display_name.starts_with("Harbour")).unwrap();
+        assert!(!p.is_builtin && p.layout.verified == vec!["Checking".to_string()], "{p:?}");
+        let acct = db.accounts().unwrap().into_iter().find(|a| a.name.starts_with("Harbour & Trust Checking")).expect("the account is named for its bank");
+
+        let (bank, rep) = import(1);
+        assert_eq!(bank.as_deref(), Some(p.slug.as_str()), "the next statement is recognised");
+        assert_eq!(rep.held, 0, "and imports by itself");
+        let d = db.documents_all(&[]).unwrap().into_iter().find(|d| d.id == rep.document_ids[0]).unwrap();
+        assert_eq!(d.account_id, acct.id, "into the same account");
     }
 
     #[test]

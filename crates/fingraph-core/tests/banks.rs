@@ -236,8 +236,9 @@ fn cnb_real_layout_multiline_rows_and_page_split() {
 }
 
 /// A statement that breaks its bank's declared layout says which rule it broke. Here the amounts still
-/// add up (each amount lands on the line before it), so the balance check alone would pass: the
-/// descriptions are wrong, and only the layout note says so.
+/// add up under the saved layout (each amount lands on the line before it), so the balance check alone
+/// would pass with wrong descriptions: the layout note catches it, and a re-read without the saved rules
+/// gets the descriptions right (and says so, so the statement is still held for a look).
 #[test]
 fn a_layout_mismatch_names_the_rule() {
     let mut p = profiles::builtins();
@@ -248,8 +249,9 @@ fn a_layout_mismatch_names_the_rule() {
     let notes = r.diagnostics.pass3.layout_notes.join("\n");
     assert!(notes.contains("dated line(s) had no amount"), "{notes}");
     assert!(notes.contains("opening balance wasn't under any of this bank's own labels"), "{notes}");
+    assert!(notes.contains("didn't read with CNB's saved layout"), "{notes}");
     assert_eq!(r.sections[0].reconciliation, Reconciliation::Reconciled);
-    assert_ne!(r.sections[0].transactions[1].description, "POS Purchase SAMPLE GROCERY GEORGE TOWN KY");
+    assert_eq!(r.sections[0].transactions[1].description, "POS Purchase SAMPLE GROCERY GEORGE TOWN KY");
 }
 
 fn cnb_sample() -> Vec<fingraph_core::parser::Token> {
@@ -364,23 +366,34 @@ fn cnb_sample_checks(r: &ScanResult) {
 
 /// Anonymised layout samples of real statements (Bank Profiles → Test PDF → Save Layout Sample), kept in
 /// `tests/fixtures/private/` and never committed. Each must be recognised as its bank, reconcile to the
-/// cent and match its bank's declared layout. `cargo test -p fingraph-core -- --ignored layout_samples`
+/// cent and match its bank's declared layout. Approving a statement in a new layout also keeps a sample, in
+/// `<data dir>/layout_samples/`: those are read with your ledger's profiles (what they learned), from a
+/// copy of the ledger. `cargo test -p fingraph-core -- --ignored layout_samples`
 #[test]
 #[ignore]
 fn private_layout_samples() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/private");
-    let mut files: Vec<_> = std::fs::read_dir(&dir).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|e| e == "json")).collect()).unwrap_or_default();
-    files.sort();
-    let p = profiles::builtins();
+    let json_in = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+        let mut v: Vec<_> = std::fs::read_dir(dir).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|e| e == "json")).collect()).unwrap_or_default();
+        v.sort();
+        v
+    };
+    let builtin = profiles::builtins();
+    let data = fingraph_core::data_dir();
+    let tmp = std::env::temp_dir().join(format!("fingraph-samples-{}.db", std::process::id()));
+    let learned = std::fs::copy(data.join("ledger.db"), &tmp).ok().and_then(|_| fingraph_core::db::Db::open(&tmp).ok()).and_then(|db| db.profiles().ok()).unwrap_or_else(|| builtin.clone());
+    let _ = std::fs::remove_file(&tmp);
+    let sets = [(json_in(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/private")), &builtin), (json_in(&data.join("layout_samples")), &learned)];
     let mut failed = Vec::new();
-    for f in &files {
-        let s: fingraph_core::parser::LayoutSample = serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
-        let r = MultiPassScanner::new(&p).scan_tokens(s.tokens).unwrap();
-        let ok = r.profile_slug == s.bank && r.is_reconciled() && r.diagnostics.pass3.layout_notes.is_empty();
-        let n: usize = r.sections.iter().map(|s| s.transactions.len()).sum();
-        println!("{} {:?}: {n} transactions, {:?}, notes {:?}", f.file_name().unwrap().to_string_lossy(), r.profile_slug, r.sections.iter().map(|s| &s.reconciliation).collect::<Vec<_>>(), r.diagnostics.pass3.layout_notes);
-        if !ok {
-            failed.push(f.file_name().unwrap().to_string_lossy().into_owned());
+    for (files, p) in sets {
+        for f in &files {
+            let s: fingraph_core::parser::LayoutSample = serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
+            let r = MultiPassScanner::new(p).scan_tokens(s.tokens).unwrap();
+            let ok = r.profile_slug == s.bank && r.is_reconciled() && r.diagnostics.pass3.layout_notes.is_empty();
+            let n: usize = r.sections.iter().map(|s| s.transactions.len()).sum();
+            println!("{} {:?}: {n} transactions, {:?}, notes {:?}", f.file_name().unwrap().to_string_lossy(), r.profile_slug, r.sections.iter().map(|s| &s.reconciliation).collect::<Vec<_>>(), r.diagnostics.pass3.layout_notes);
+            if !ok {
+                failed.push(f.file_name().unwrap().to_string_lossy().into_owned());
+            }
         }
     }
     assert!(failed.is_empty(), "{failed:?}");

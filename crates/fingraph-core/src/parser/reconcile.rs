@@ -3,10 +3,13 @@
 
 use rust_decimal::Decimal;
 
-use super::{ScannedTx, Section, SegmentCheck, SummaryCheck};
+use super::{ScannedTx, Section, SegmentCheck, SkippedLine, SummaryCheck};
 use crate::Reconciliation;
 
 type Key = (u32, f64);
+
+/// Skipped as a summary or total line: its amount sums other rows, so it is never a missing transaction.
+pub(crate) const SUMMARY_LINE: &str = "summary/total line";
 
 fn key(t: &ScannedTx) -> Key {
     (t.page, t.y)
@@ -42,8 +45,15 @@ fn verify(s: &mut Section) -> Vec<Gap> {
     let pts = points(s);
     // a checkpoint before any transaction is the opening balance; one after all of them, the closing
     let pos_of = |c: &(u32, f64, Decimal)| s.transactions.iter().filter(|t| before(key(t), (c.0, c.1))).count();
-    let opening = s.checkpoints.iter().find(|c| pos_of(c) == 0).map(|c| c.2).or(s.opening);
-    let closing = s.checkpoints.iter().rev().find(|c| pos_of(c) == s.transactions.len()).map(|c| c.2).or(s.closing);
+    // the printed opening balance comes first: a balance line before the first transaction is checked
+    // against it, never put in its place (a first row that lost its amount still prints its balance, and
+    // taking that for the opening would hide the row)
+    // nor is the balance of a dated line whose amount couldn't be read: that line is a transaction
+    let unread = |c: &(u32, f64, Decimal)| s.report.skipped.iter().any(|l| (l.page, l.y) == (c.0, c.1) && l.date.is_some() && l.balance.is_some());
+    let opening = s.opening.or_else(|| s.checkpoints.iter().find(|c| pos_of(c) == 0 && !unread(c)).map(|c| c.2));
+    // the printed closing balance comes first too: balance lines after the last transaction (a listing that
+    // follows the statement) are checked against it, never put in its place
+    let closing = s.closing.or_else(|| s.checkpoints.iter().rev().find(|c| pos_of(c) == s.transactions.len()).map(|c| c.2));
     s.opening = opening;
     s.closing = closing;
 
@@ -134,6 +144,26 @@ fn verify(s: &mut Section) -> Vec<Gap> {
     gaps
 }
 
+/// Something on the line that is an amount nobody could read (`-26` for `.26`, `1,243,92`), besides its balance:
+/// without one, the line has no amount to work out — a listing after the statement that prints one figure
+/// per line isn't a column of transactions with lost amounts.
+fn shows_unread_amount(text: &str) -> bool {
+    let dates: Vec<(usize, usize)> = super::dates::find_dates(text).into_iter().map(|d| (d.0, d.1)).collect();
+    let mut at = 0;
+    let mut figures = 0;
+    for w in text.split(' ') {
+        let start = at;
+        at += w.len() + 1;
+        if w.is_empty() || dates.iter().any(|d| start >= d.0 && start < d.1) {
+            continue;
+        }
+        let core = w.trim_start_matches(['-', '(', '$']).trim_end_matches(['-', ')']);
+        let amount_like = core.chars().next().is_some_and(|c| c.is_ascii_digit()) && core.chars().all(|c| c.is_ascii_digit() || matches!(c, ',' | '.')) && (core.contains([',', '.']) || w.starts_with('-') || w.ends_with('-') || w.starts_with('('));
+        figures += amount_like as usize;
+    }
+    figures >= 2
+}
+
 /// Description left on a recovered line once its date and amount are taken out.
 fn leftover_text(text: &str) -> String {
     let words: Vec<&str> = text.split_whitespace().filter(|w| !crate::money::is_amount_core(w) && !crate::money::is_amount_affix(w)).collect();
@@ -151,6 +181,8 @@ fn leftover_text(text: &str) -> String {
 fn recover(s: &mut Section, li: usize, stmt: Decimal) {
     let mut line = s.report.skipped.remove(li);
     let at = (line.page, line.y);
+    // its balance was a balance-only point; now it's this transaction's
+    s.checkpoints.retain(|c| (c.0, c.1) != at);
     let idx = s.transactions.iter().position(|t| before(at, key(t))).unwrap_or(s.transactions.len());
     // a row split across a page break: its dated half is the last skipped line since the previous transaction
     if line.date.is_none() {
@@ -177,7 +209,7 @@ fn recover(s: &mut Section, li: usize, stmt: Decimal) {
             memo: "Recovered by re-scan".into(),
             amount: if liability { -stmt } else { stmt },
             stmt_amount: stmt,
-            balance: None,
+            balance: line.balance,
             fx_original: None,
             page: line.page,
             y: line.y,
@@ -187,16 +219,98 @@ fn recover(s: &mut Section, li: usize, stmt: Decimal) {
     );
 }
 
-/// Passes 4 and 5, then the verdict and a confidence score.
+/// A row whose amount couldn't be read, so it was worked out from the balances around it: right by
+/// construction, so a person should glance at it (the import holds it).
+pub(crate) const DERIVED: &str = "amount unreadable, worked out from the balance";
+
+/// Skipped as listed after the closing balance (a re-listing by type, a ledger on another page).
+pub(crate) const AFTER_CLOSING: &str = "listed after the closing balance";
+
+/// Passes 4 and 5, then the verdict and a confidence score. A statement that doesn't add up because of
+/// rows listed after its closing balance (the same transactions again by type, another document's table)
+/// is judged without them, when they carry no balances and it then adds up to that closing balance.
 pub fn verify_and_heal(s: &mut Section) {
+    let mut trimmed = s.clone();
+    let cut = trim_after_closing(&mut trimmed);
+    heal_and_judge(s);
+    if cut && s.reconciliation != Reconciliation::Reconciled {
+        heal_and_judge(&mut trimmed);
+        if trimmed.reconciliation == Reconciliation::Reconciled {
+            *s = trimmed;
+        }
+    }
+}
+
+/// Move what comes after the printed closing balance out of the statement: rows to the skipped lines, balance
+/// lines dropped. The cut is where the running balance prints the closing (nothing after it prints a balance on
+/// a row), or — with no running balance — at a break in the page (a gap, a heading) where the opening plus the
+/// rows above it makes the closing. `verify_and_heal` keeps the cut only if the statement then adds up.
+fn trim_after_closing(s: &mut Section) -> bool {
+    let Some(closing) = s.closing else { return false };
+    let n = s.transactions.len();
+    let cut_key: Option<Key> = {
+        // the latest printed balance equal to the closing, with no row after it printing a balance
+        let mut points: Vec<(Key, Decimal)> = s.transactions.iter().filter_map(|t| Some((key(t), t.balance?))).chain(s.checkpoints.iter().map(|c| ((c.0, c.1), c.2))).collect();
+        points.sort_by(|a, b| a.0.0.cmp(&b.0.0).then(a.0.1.total_cmp(&b.0.1)));
+        let by_balance = points.iter().rev().find(|(at, v)| *v == closing && s.transactions.iter().filter(|t| before(*at, key(t))).all(|t| t.balance.is_none())).map(|p| p.0);
+        by_balance.or_else(|| {
+            // no running balance: a break in the page where opening + the rows above = closing
+            let opening = s.opening?;
+            let gaps: Vec<f64> = s.transactions.windows(2).filter(|w| w[0].page == w[1].page).map(|w| w[1].y - w[0].y).collect();
+            let mut sorted = gaps.clone();
+            sorted.sort_by(f64::total_cmp);
+            let typical = *sorted.get(sorted.len() / 2)?;
+            let mut sum = opening;
+            for k in 0..n.saturating_sub(1) {
+                sum += s.transactions[k].stmt_amount;
+                let (a, b) = (&s.transactions[k], &s.transactions[k + 1]);
+                if sum == closing && a.page == b.page && b.y - a.y > 2.5 * typical && s.transactions[k + 1..].iter().all(|t| t.balance.is_none()) {
+                    return Some(key(a));
+                }
+            }
+            None
+        })
+    };
+    let Some(at) = cut_key else { return false };
+    let after: Vec<usize> = (0..n).filter(|&i| before(at, key(&s.transactions[i]))).collect();
+    let stray_points = s.checkpoints.iter().any(|c| before(at, (c.0, c.1)));
+    if (after.is_empty() && !stray_points) || after.len() == n {
+        return false;
+    }
+    for &i in after.iter().rev() {
+        let t = s.transactions.remove(i);
+        s.report.skipped.push(SkippedLine { page: t.page, y: t.y, text: format!("{} {}", t.description, t.stmt_amount.abs()), date: Some(t.posted), amount: Some(t.stmt_amount.abs()), reason: AFTER_CLOSING.into(), balance: None });
+    }
+    s.checkpoints.retain(|c| !before(at, (c.0, c.1)));
+    true
+}
+
+fn heal_and_judge(s: &mut Section) {
     let mut gaps = verify(s);
     for _ in 0..4 {
         let mut fixed = false;
         // a failing stretch: the missing row must be among the skipped lines between its two balances
         for g in &gaps {
             let m = g.missing.abs();
-            let hit = s.report.skipped.iter().position(|l| l.amount == Some(m) && g.lo.is_none_or(|lo| before(lo, (l.page, l.y))) && before((l.page, l.y), g.hi));
+            // up to and including the line of the closing balance: a dated row whose amount strayed still printed
+            // its balance, and that balance is the stretch's end
+            let between = |l: &SkippedLine| g.lo.is_none_or(|lo| before(lo, (l.page, l.y))) && !before(g.hi, (l.page, l.y));
+            let usable = |l: &SkippedLine| l.reason != SUMMARY_LINE && l.reason != AFTER_CLOSING;
+            let hit = s.report.skipped.iter().position(|l| l.amount == Some(m) && usable(l) && between(l));
             if let Some(li) = hit {
+                recover(s, li, g.missing);
+                fixed = true;
+                break;
+            }
+            // a dated line whose amount was unreadable but whose balance wasn't: the balance change is its amount
+            let unread: Vec<usize> = (0..s.report.skipped.len())
+                .filter(|&i| {
+                    let l = &s.report.skipped[i];
+                    l.amount.is_none() && l.date.is_some() && l.balance.is_some() && usable(l) && between(l) && shows_unread_amount(&l.text)
+                })
+                .collect();
+            if let [li] = unread[..] {
+                s.report.skipped[li].reason = DERIVED.into();
                 recover(s, li, g.missing);
                 fixed = true;
                 break;
@@ -207,7 +321,7 @@ pub fn verify_and_heal(s: &mut Section) {
             && gaps.is_empty()
             && let Some(d) = s.report.summary.difference.filter(|d| !d.is_zero())
         {
-            let hits: Vec<usize> = (0..s.report.skipped.len()).filter(|&i| s.report.skipped[i].amount == Some(d.abs())).collect();
+            let hits: Vec<usize> = (0..s.report.skipped.len()).filter(|&i| s.report.skipped[i].amount == Some(d.abs()) && s.report.skipped[i].reason != SUMMARY_LINE && s.report.skipped[i].reason != AFTER_CLOSING).collect();
             if hits.len() == 1 {
                 recover(s, hits[0], d);
                 fixed = true;
@@ -222,12 +336,27 @@ pub fn verify_and_heal(s: &mut Section) {
 
     let diff = s.report.summary.difference;
     let failing: Vec<&SegmentCheck> = s.report.segments.iter().filter(|g| !g.ok).collect();
+    // without a total to check against, the balance checks must reach every row, first to last: with no
+    // opening balance the first row's amount (even its sign) is proven by nothing — the generator found a
+    // first withdrawal read as a deposit that "reconciled" this way
+    // The one exception: a first row whose direction its column gives (debit/credit, or a printed sign), in a
+    // statement where the balances confirmed that reading everywhere else (three checks or more, no sign
+    // corrected anywhere) — only that row's amount goes unchecked, never which way it went.
+    let pts = points(s);
+    let confirmed = s.report.sign_heals.is_empty() && s.report.segments.iter().filter(|g| g.ok).count() >= 3;
+    let first_known = s.transactions.first().is_some_and(|t| !t.sign_flexible && t.balance.is_some());
+    let start = s.opening.is_some() || pts.first().is_some_and(|p| p.0 == 0 || (p.0 == 1 && confirmed && first_known));
+    let covered = start && pts.last().is_some_and(|p| p.0 == s.transactions.len());
+    // no rows read, but lines with amounts were left over: the balances agreeing proves nothing
+    let empty_read = s.transactions.is_empty() && s.report.skipped.iter().any(|l| l.amount.is_some() && l.reason != SUMMARY_LINE);
     s.reconciliation = match diff {
+        _ if empty_read => Reconciliation::Unverified,
         Some(d) if d.is_zero() && failing.is_empty() => Reconciliation::Reconciled,
         Some(d) if !d.is_zero() => Reconciliation::Discrepancy(d),
         Some(_) => Reconciliation::Discrepancy(failing[0].expected - failing[0].got),
         None if s.report.segments.is_empty() => Reconciliation::Unverified,
-        None if failing.is_empty() => Reconciliation::Reconciled,
+        None if failing.is_empty() && covered => Reconciliation::Reconciled,
+        None if failing.is_empty() => Reconciliation::Unverified,
         None => Reconciliation::Discrepancy(failing.iter().map(|g| g.expected - g.got).sum()),
     };
     let n = s.report.segments.len();

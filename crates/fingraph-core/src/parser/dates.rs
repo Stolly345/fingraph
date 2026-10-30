@@ -26,35 +26,51 @@ pub struct DateCtx {
     pub fallback_year: i32,
 }
 
-const MON: &str = r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
+// English, French, Spanish, Dutch and German month names and their usual abbreviations, longest first.
+// ponytail: no Portuguese/Italian `out`/`set`/`gen`/`mag` (they'd read "Money Out 12.50" as a date); add a
+// language here and in MONTHS when a statement needs it
+const MON: &str = r"january|february|march|april|june|july|august|september|october|november|december|janvier|février|fevrier|avril|juillet|août|aout|septembre|octobre|novembre|décembre|decembre|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|januari|februari|maart|augustus|oktober|januar|februar|märz|märz|juni|juli|dezember|janv|févr|fevr|juil|sept|mars|mai|juin|ene|abr|ago|dic|mrt|mei|okt|dez|déc|fév|avr|aoû|mär|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec";
+
+/// Month number by the start of its name, in the languages MON knows.
+const MONTHS: &[(&str, u32)] = &[
+    ("jan", 1), ("ene", 1),
+    ("feb", 2), ("fév", 2), ("fev", 2),
+    ("mar", 3), ("mär", 3), ("mrt", 3), ("maa", 3),
+    ("apr", 4), ("avr", 4), ("abr", 4),
+    ("may", 5), ("mai", 5), ("mei", 5),
+    ("jun", 6), ("jui", 6), // juin (juillet is matched first below)
+    ("jul", 7),
+    ("aug", 8), ("aoû", 8), ("aou", 8), ("ago", 8),
+    ("sep", 9), ("set", 9),
+    ("oct", 10), ("okt", 10),
+    ("nov", 11),
+    ("dec", 12), ("déc", 12), ("dic", 12), ("dez", 12),
+];
 
 static DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
         r"(?ix)
         \b(?P<iy>\d{{4}})-(?P<im>\d{{2}})-(?P<id>\d{{2}})\b
-      | \b(?P<bm>{MON})\.?\s+(?P<bd>\d{{1,2}})(?:st|nd|rd|th)?\b(?:,?\s+(?P<by>\d{{4}})\b)?
-      | \b(?P<ad>\d{{1,2}})(?:st|nd|rd|th)?[\s\-]?(?P<am>{MON})\.?(?:[\s\-,]+(?P<ay4>\d{{4}})\b|-?(?P<ay2>\d{{2}})\b|\b)
+      | \b(?P<bm>{MON})(?:\.\s*|\s+)(?P<bd>\d{{1,2}})(?:st|nd|rd|th)?\b(?:,?\s+(?P<by>\d{{4}})\b)?
+      | \b(?P<ad>\d{{1,2}})(?:st|nd|rd|th)?[\s\-]?(?P<am>{MON})(?:\.?[\s\-,]+(?P<ay4>\d{{4}})\b|\.?-?(?P<ay2>\d{{2}})\b|\.\s(?P<ay2d>\d{{2}})(?:\s|$)|\.?\b)
       | \b(?P<na>\d{{1,2}})[/.\-](?P<nb>\d{{1,2}})[/.\-](?P<ny>\d{{4}}|\d{{2}})\b
       | \b(?P<sa>\d{{1,2}})/(?P<sb>\d{{1,2}})\b"
     ))
     .expect("date regex")
 });
 
-fn month_num(s: &str) -> u32 {
-    match &s.to_ascii_lowercase()[..3] {
-        "jan" => 1,
-        "feb" => 2,
-        "mar" => 3,
-        "apr" => 4,
-        "may" => 5,
-        "jun" => 6,
-        "jul" => 7,
-        "aug" => 8,
-        "sep" => 9,
-        "oct" => 10,
-        "nov" => 11,
-        _ => 12,
+impl Partial {
+    pub fn has_year(&self) -> bool {
+        !matches!(self, Partial::Named { year: None, .. } | Partial::Numeric { year: None, .. })
     }
+}
+
+fn month_num(s: &str) -> u32 {
+    let s = s.to_lowercase();
+    if s.starts_with("juil") {
+        return 7;
+    }
+    MONTHS.iter().find(|(p, _)| s.starts_with(p)).map_or(12, |m| m.1)
 }
 
 fn year_of(s: &str) -> i32 {
@@ -76,7 +92,7 @@ pub fn find_dates(text: &str) -> Vec<(usize, usize, Partial)> {
         } else if let (Some(mo), Some(d)) = (g("bm"), g("bd")) {
             Partial::Named { day: d.parse().unwrap_or(0), month: month_num(mo), year: g("by").map(year_of) }
         } else if let (Some(d), Some(mo)) = (g("ad"), g("am")) {
-            Partial::Named { day: d.parse().unwrap_or(0), month: month_num(mo), year: g("ay4").or(g("ay2")).map(year_of) }
+            Partial::Named { day: d.parse().unwrap_or(0), month: month_num(mo), year: g("ay4").or(g("ay2")).or(g("ay2d")).map(year_of) }
         } else if let (Some(a), Some(b), Some(y)) = (g("na"), g("nb"), g("ny")) {
             Partial::Numeric { a: a.parse().unwrap_or(0), b: b.parse().unwrap_or(0), year: Some(year_of(y)) }
         } else if let (Some(a), Some(b)) = (g("sa"), g("sb")) {

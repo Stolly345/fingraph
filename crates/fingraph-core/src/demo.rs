@@ -377,8 +377,10 @@ pub fn render(specs: &[StatementSpec]) -> Vec<Token> {
             } else {
                 sh.right(rights[k], &money_text(spec.bank, shown, col));
             }
+            // the garbled row prints no balance either, so the balances can't fill it in: it's left for the inspector
             if let Some(bk) = st.money.iter().position(|m| m.1 == Col::Balance)
                 && !(st.grouped && same_day_after)
+                && Some(i) != spec.garble_row
             {
                 sh.right(rights[bk], &money_text(spec.bank, bal, Col::Balance));
             }
