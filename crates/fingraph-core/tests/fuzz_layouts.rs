@@ -92,6 +92,30 @@ struct Layout {
     card_unmarked: bool,
     /// Two dates on each line, the transaction's and the posting one; Some(true) prints the posting date first.
     two_dates: Option<bool>,
+    /// "Balance carried forward" at the foot of each page and "brought forward" at the top of the next.
+    carried_forward: bool,
+    /// The table header printed on page 1 only.
+    header_once: bool,
+    /// Page 2's transactions net to exactly zero (a transfer in and back out): dropping the page still adds up.
+    zero_net_page: bool,
+    /// Every date (and the period's) has day and month 12 or under, so day/month order can't be told.
+    ambiguous_dates: bool,
+    /// The period runs from mid-December to mid-January.
+    rollover: bool,
+    /// A card paid down past zero: the closing balance is a credit.
+    card_credit: bool,
+    /// Some amounts are followed by a `*` marker.
+    star_marks: bool,
+    /// Amounts sit up to a point above or below their line.
+    jitter: bool,
+    /// A wrapped transaction can be split by a page break.
+    split_break: bool,
+    /// Some descriptions end in a price-like string (`STORE #4500.00`) reaching close to the money column.
+    long_desc: bool,
+    /// A separate Fee column left of the balance; the balance moves by amount + fee.
+    fee_column: bool,
+    /// A second account section in another currency follows, opening at the first one's closing.
+    two_sections: bool,
     per_page: usize,
 }
 
@@ -115,6 +139,18 @@ impl Layout {
             (self.card_unmarked, "card_unmarked"),
             (self.two_dates == Some(false), "two_dates"),
             (self.two_dates == Some(true), "two_dates_posting_first"),
+            (self.carried_forward, "carried_forward"),
+            (self.header_once, "header_once"),
+            (self.zero_net_page, "zero_net_page"),
+            (self.ambiguous_dates, "ambiguous_dates"),
+            (self.rollover, "rollover"),
+            (self.card_credit, "card_credit"),
+            (self.star_marks, "star_marks"),
+            (self.jitter, "jitter"),
+            (self.split_break, "split_break"),
+            (self.long_desc, "long_desc"),
+            (self.fee_column, "fee_column"),
+            (self.two_sections, "two_sections"),
         ] {
             if on {
                 v.push(name.into());
@@ -125,6 +161,8 @@ impl Layout {
 }
 
 struct Tx {
+    /// A separate fee on the same line (fee-column layouts): part of the line's amount in the ledger.
+    fee: Decimal,
     date: NaiveDate,
     /// When it posted (the ledger date): the same day or a few days after.
     posted: NaiveDate,
@@ -256,12 +294,41 @@ fn generate(seed: u64) -> Statement {
         relisting: r.chance(10),
         card_unmarked: cols == Cols::CardAmount && r.chance(20),
         two_dates: if r.chance(20) { Some(r.chance(50)) } else { None },
+        carried_forward: false,
+        header_once: r.chance(10),
+        zero_net_page: false,
+        ambiguous_dates: matches!(date, DateFmt::DmySlash | DateFmt::MdySlash) && r.chance(25),
+        rollover: r.chance(10),
+        card_credit: cols == Cols::CardAmount && r.chance(25),
+        star_marks: r.chance(8),
+        jitter: r.chance(15),
+        split_break: r.chance(15),
+        long_desc: r.chance(10),
+        fee_column: matches!(cols, Cols::DebitCreditBalance) && r.chance(15),
+        two_sections: false,
         per_page: 12 + r.below(20),
     };
+    let mut layout = layout;
+    let balance_col = cols != Cols::CardAmount;
+    layout.carried_forward = balance_col && !layout.newest_first && r.chance(15);
+    layout.zero_net_page = balance_col && r.chance(10);
+    layout.two_sections = balance_col && layout.opening_row && !layout.newest_first && !layout.fee_column && r.chance(10);
+    if layout.ambiguous_dates {
+        layout.rollover = false;
+    }
     let l = &layout;
     // the period: a month, in 2024 or 2025
-    let start = NaiveDate::from_ymd_opt(2024 + r.below(2) as i32, 1 + r.below(12) as u32, 1).unwrap();
-    let end = (start + Duration::days(32)).with_day(1).unwrap() - Duration::days(1);
+    let (start, end) = if layout.rollover {
+        let y = 2024 + r.below(2) as i32;
+        (NaiveDate::from_ymd_opt(y, 12, 16).unwrap(), NaiveDate::from_ymd_opt(y + 1, 1, 15).unwrap())
+    } else if layout.ambiguous_dates {
+        // the 1st to the 12th: no day above 12 anywhere, period included
+        let s = NaiveDate::from_ymd_opt(2024 + r.below(2) as i32, 1 + r.below(12) as u32, 1).unwrap();
+        (s, s + Duration::days(11))
+    } else {
+        let s = NaiveDate::from_ymd_opt(2024 + r.below(2) as i32, 1 + r.below(12) as u32, 1).unwrap();
+        (s, (s + Duration::days(32)).with_day(1).unwrap() - Duration::days(1))
+    };
     let n = 6 + r.below(30);
     let mut days: Vec<i64> = (0..n).map(|_| r.below((end - start).num_days() as usize + 1) as i64).collect();
     days.sort();
@@ -274,7 +341,7 @@ fn generate(seed: u64) -> Statement {
             let amt = if deposit { r.cents(50, 3000) } else { -r.cents(2, 900) };
             let desc = if deposit { if card { "PAYMENT RECEIVED".to_string() } else { format!("DEPOSIT REF {}", 1000 + i) } } else { MERCHANTS[r.below(MERCHANTS.len())].to_string() };
             let date = start + Duration::days(*d);
-            Tx { date, posted: (date + Duration::days(r.below(4) as i64)).min(end), desc, memo: format!("REF {} AUTH {}", 400_000 + r.below(99_999), r.below(9_999)), amount: amt }
+            Tx { date, posted: (date + Duration::days(r.below(4) as i64)).min(end), desc, memo: format!("REF {} AUTH {}", 400_000 + r.below(99_999), r.below(9_999)), amount: amt, fee: Decimal::ZERO }
         })
         .collect();
     // fees: a card's raise what's owed, a bank account's lower its balance; either way money out
@@ -284,9 +351,47 @@ fn generate(seed: u64) -> Statement {
             t.amount = -r.cents(2, 60);
         }
     }
+    // a long description ending in something that looks like a price, right up against the money column
+    if layout.long_desc {
+        for t in txs.iter_mut() {
+            if r.chance(30) {
+                t.desc = format!("{} {}", t.desc, ["STORE #4500.00", "USD 142.50 @ 1.00", "ITEM 19.99"][r.below(3)]);
+            }
+        }
+    }
+    if layout.fee_column {
+        for t in txs.iter_mut() {
+            if t.amount < Decimal::ZERO && r.chance(30) {
+                t.fee = r.cents(1, 6);
+            }
+        }
+    }
+    // page 2 nets to zero: its last row cancels the rest
+    let order_len = txs.len();
+    if layout.zero_net_page && order_len > layout.per_page + 2 {
+        let page2: Vec<usize> = (layout.per_page..(2 * layout.per_page).min(order_len)).collect();
+        let idx: Vec<usize> = if layout.newest_first { page2.iter().map(|&k| order_len - 1 - k).collect() } else { page2 };
+        let (last, rest) = idx.split_last().unwrap();
+        let sum: Decimal = rest.iter().map(|&k| txs[k].amount - txs[k].fee).sum();
+        if !sum.is_zero() {
+            txs[*last].amount = -sum;
+            txs[*last].fee = Decimal::ZERO;
+            txs[*last].desc = if sum > Decimal::ZERO { "TRANSFER OUT".into() } else { "TRANSFER IN".into() };
+        }
+    }
+    // a card paid down past zero: one large payment
+    if layout.card_credit {
+        let owed: Decimal = txs.iter().map(|t| -t.amount).sum::<Decimal>() + Decimal::new(200_000, 2);
+        let mid = txs.len() / 2;
+        if let Some(t) = txs.get_mut(mid) {
+            t.desc = "PAYMENT RECEIVED".into();
+            t.amount = owed.round_dp(2);
+            t.fee = Decimal::ZERO;
+        }
+    }
     let opening = if card { r.cents(0, 2000) } else { r.cents(1000, 20_000) };
     // statement terms: a card's balance is what's owed (a charge raises it)
-    let stmt = |t: &Tx| if card { -t.amount } else { t.amount };
+    let stmt = |t: &Tx| if card { -(t.amount - t.fee) } else { t.amount - t.fee };
     let mut bal = opening;
     let mut bals = Vec::new();
     for t in &txs {
@@ -295,7 +400,7 @@ fn generate(seed: u64) -> Statement {
     }
     let closing = bal;
     let two = layout.two_dates;
-    let truth: Vec<(NaiveDate, Decimal)> = txs.iter().map(|t| (if two.is_some() { t.posted } else { t.date }, t.amount)).collect();
+    let mut truth: Vec<(NaiveDate, Decimal)> = txs.iter().map(|t| (if two.is_some() { t.posted } else { t.date }, t.amount - t.fee)).collect();
     // with two dates the description moves right to make room
     let desc_x = if two.is_some() { 175.0 } else { 120.0 };
 
@@ -330,7 +435,12 @@ fn generate(seed: u64) -> Statement {
         sh.right(260.0, &money(opening, l, false));
         sh.y += LINE;
         sh.put(40.0, lab_close);
-        sh.right(260.0, &money(closing, l, true));
+        // a card in credit prints its closing as a credit: `1,234.56 CR` or with the minus sign
+        if card && closing < Decimal::ZERO && r.chance(50) {
+            sh.right(260.0, &format!("{} CR", money(closing.abs(), l, false)));
+        } else {
+            sh.right(260.0, &money(closing, l, true));
+        }
         sh.y += LINE * 2.0;
     }
 
@@ -342,7 +452,14 @@ fn generate(seed: u64) -> Statement {
         Heads::Spanish => ("Fecha", "Concepto", "Cargo", "Abono", "Saldo", "Importe"),
         Heads::None => ("", "", "", "", "", ""),
     };
+    let h_fee = match heads {
+        Heads::None => "",
+        Heads::French => "Frais",
+        Heads::Spanish => "Comisión",
+        _ => "Fee",
+    };
     let money_heads: Vec<(f64, &str)> = match cols {
+        Cols::DebitCreditBalance if l.fee_column => vec![(400.0, h_out), (450.0, h_fee), (500.0, h_in), (560.0, h_bal)],
         Cols::DebitCreditBalance => vec![(420.0, h_out), (490.0, h_in), (560.0, h_bal)],
         Cols::CreditDebitBalance => vec![(420.0, h_in), (490.0, h_out), (560.0, h_bal)],
         Cols::SignedBalance | Cols::MarkedBalance => vec![(490.0, h_amt), (560.0, h_bal)],
@@ -401,35 +518,64 @@ fn generate(seed: u64) -> Statement {
         balance_line(&mut sh, first_line.0, first_line.1);
     }
     let order: Vec<usize> = if l.newest_first { (0..txs.len()).rev().collect() } else { (0..txs.len()).collect() };
+    let stars = |r: &mut Rng| if l.star_marks && r.chance(20) { " *" } else { "" };
+    let amounts = |sh: &mut Sheet, r: &mut Rng, i: usize| {
+        let t = &txs[i];
+        let v = stmt(t);
+        // a jittered amount sits up to a point off its line
+        let dy = if l.jitter { (r.below(21) as f64 - 10.0) / 10.0 } else { 0.0 };
+        sh.y += dy;
+        match cols {
+            Cols::DebitCreditBalance | Cols::CreditDebitBalance => {
+                let (out_x, in_x) = match (cols, l.fee_column) {
+                    (Cols::DebitCreditBalance, true) => (400.0, 500.0),
+                    (Cols::DebitCreditBalance, false) => (420.0, 490.0),
+                    _ => (490.0, 420.0),
+                };
+                let shown = if t.amount < Decimal::ZERO { t.amount.abs() } else { t.amount };
+                let star = stars(r);
+                sh.right(if t.amount < Decimal::ZERO { out_x } else { in_x }, &format!("{}{star}", money(shown, l, false)));
+                if !t.fee.is_zero() {
+                    sh.right(450.0, &money(t.fee, l, false));
+                }
+            }
+            Cols::SignedBalance => sh.right(490.0, &money(v, l, true)),
+            Cols::MarkedBalance => sh.right(490.0, &format!("{} {}", money(v.abs(), l, false), if v < Decimal::ZERO { "DR" } else { "CR" })),
+            Cols::CardAmount => sh.right(560.0, &money(v, l, true)),
+        }
+        if cols != Cols::CardAmount {
+            // an overdrawn balance carries the statement's minus sign
+            sh.right(560.0, &money(bals[i], l, true));
+        }
+        sh.y -= dy;
+    };
+    let page_break = |sh: &mut Sheet, carried: Option<Decimal>| {
+        if let Some(v) = carried.filter(|_| l.carried_forward) {
+            sh.put(120.0, "Balance carried forward");
+            sh.right(560.0, &money(v, l, true));
+        }
+        sh.page += 1;
+        sh.y = 40.0;
+        sh.put(40.0, bank);
+        sh.y += LINE * 2.0;
+        if !l.header_once {
+            header(sh);
+        }
+        if let Some(v) = carried.filter(|_| l.carried_forward) {
+            sh.put(120.0, "Balance brought forward");
+            sh.right(560.0, &money(v, l, true));
+            sh.y += LINE;
+        }
+    };
     let mut on_page = 0;
+    let mut last_bal = opening;
     for &i in &order {
         if on_page == l.per_page {
-            sh.page += 1;
-            sh.y = 40.0;
-            sh.put(40.0, bank);
-            sh.y += LINE * 2.0;
-            header(&mut sh);
+            page_break(&mut sh, Some(last_bal));
             on_page = 0;
         }
         on_page += 1;
         let t = &txs[i];
-        let amounts = |sh: &mut Sheet| {
-            let v = stmt(t);
-            match cols {
-                Cols::DebitCreditBalance | Cols::CreditDebitBalance => {
-                    let out_x = if cols == Cols::DebitCreditBalance { 420.0 } else { 490.0 };
-                    let in_x = if cols == Cols::DebitCreditBalance { 490.0 } else { 420.0 };
-                    sh.right(if v < Decimal::ZERO { out_x } else { in_x }, &money(v.abs(), l, false));
-                }
-                Cols::SignedBalance => sh.right(490.0, &money(v, l, true)),
-                Cols::MarkedBalance => sh.right(490.0, &format!("{} {}", money(v.abs(), l, false), if v < Decimal::ZERO { "DR" } else { "CR" })),
-                Cols::CardAmount => sh.right(560.0, &money(v, l, true)),
-            }
-            if cols != Cols::CardAmount {
-                // an overdrawn balance carries the statement's minus sign
-                sh.right(560.0, &money(bals[i], l, true));
-            }
-        };
         margin(&mut sh, &mut r);
         match two {
             Some(posting_first) => {
@@ -440,23 +586,63 @@ fn generate(seed: u64) -> Statement {
             None => sh.put(40.0, &fmt_date(t.date, date, false)),
         }
         sh.put(desc_x, &t.desc);
+        // a wrapped transaction on the last line of a page may carry on over the page break
+        let split = l.split_break && l.wrap.is_some() && on_page == l.per_page && !l.carried_forward;
         match l.wrap {
             Some(false) => {
-                sh.y += LINE;
+                if split {
+                    page_break(&mut sh, None);
+                    on_page = 0;
+                } else {
+                    sh.y += LINE;
+                }
                 sh.put(desc_x, &t.memo);
-                amounts(&mut sh);
+                amounts(&mut sh, &mut r, i);
             }
             Some(true) => {
-                amounts(&mut sh);
-                sh.y += LINE;
+                amounts(&mut sh, &mut r, i);
+                if split {
+                    page_break(&mut sh, None);
+                    on_page = 0;
+                } else {
+                    sh.y += LINE;
+                }
                 sh.put(desc_x, &t.memo);
             }
-            None => amounts(&mut sh),
+            None => amounts(&mut sh, &mut r, i),
         }
         sh.y += LINE;
+        last_bal = bals[i];
     }
     if l.opening_row {
         balance_line(&mut sh, last_line.0, last_line.1);
+    }
+    // a second account in another currency, opening at the first one's closing (the coincidence to survive)
+    if l.two_sections {
+        sh.y += LINE;
+        sh.put(40.0, "USD Current Account — 4411");
+        sh.y += LINE * 1.4;
+        balance_line(&mut sh, open_label, closing);
+        let mut b = closing;
+        for k in 0..3 + r.below(4) {
+            let d = start + Duration::days(r.below((end - start).num_days() as usize + 1) as i64);
+            let a = if r.chance(30) { r.cents(20, 400) } else { -r.cents(2, 300) };
+            b += a;
+            sh.put(40.0, &fmt_date(d, date, false));
+            sh.put(desc_x, &format!("USD ITEM {k}"));
+            match cols {
+                Cols::DebitCreditBalance | Cols::CreditDebitBalance => {
+                    let (out_x, in_x) = if cols == Cols::DebitCreditBalance { (420.0, 490.0) } else { (490.0, 420.0) };
+                    sh.right(if a < Decimal::ZERO { out_x } else { in_x }, &money(a.abs(), l, false));
+                }
+                Cols::SignedBalance => sh.right(490.0, &money(a, l, true)),
+                _ => sh.right(490.0, &format!("{} {}", money(a.abs(), l, false), if a < Decimal::ZERO { "DR" } else { "CR" })),
+            }
+            sh.right(560.0, &money(b, l, true));
+            sh.y += LINE;
+            truth.push((d, a));
+        }
+        balance_line(&mut sh, close_label, b);
     }
     if l.relisting {
         sh.y += LINE * 2.0;
@@ -532,6 +718,7 @@ fn generated_statements() {
         }
         println!("\n{:?}", s.txs);
         let r = MultiPassScanner::new(&[]).scan_tokens(s.tokens.clone()).unwrap();
+        println!("notes: {:?}", r.diagnostics.pass3.layout_notes);
         for sec in &r.sections {
             println!("{:?} open {:?} close {:?} read_as {:?}", sec.reconciliation, sec.opening, sec.closing, r.diagnostics.pass3.read_as);
             for t in &sec.transactions {
@@ -551,7 +738,10 @@ fn generated_statements() {
         let s = generate(seed * 1_000_003 + k);
         let (o, why) = judge(&s);
         *tally.entry(o).or_default() += 1;
-        if !s.layout.card_unmarked {
+        // unprovable on its own, so held by design: a card that doesn't say so, dates that read both ways, no
+        // opening balance printed (at import the previous statement's closing proves it; there's none here)
+        let no_opening = !s.layout.opening_row && !s.layout.summary_box;
+        if !s.layout.card_unmarked && !s.layout.ambiguous_dates && !no_opening {
             provable += 1;
             provable_exact += (o == Outcome::Exact) as usize;
         }

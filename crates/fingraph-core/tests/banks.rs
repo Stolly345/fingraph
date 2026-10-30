@@ -398,3 +398,26 @@ fn private_layout_samples() {
     }
     assert!(failed.is_empty(), "{failed:?}");
 }
+
+/// Figures inside a description's detail line, right up against the money column, that add up to the
+/// transaction's own amount (`100.00` + `25.00` under a `125.00` row): the row keeps its own amount, and the two
+/// figures are never taken for transactions.
+#[test]
+fn figures_in_a_detail_line_never_replace_the_amount() {
+    let txs = vec![
+        DemoTx::new(d(2026, 1, 5), "POS PURCHASE", dec("-125.00")).memo("SPLIT ORDER"),
+        DemoTx::new(d(2026, 1, 9), "ELECTRONIC CREDIT", dec("900.00")).memo("PAYROLL"),
+        DemoTx::new(d(2026, 1, 12), "CUC WEB PMT", dec("-210.00")),
+    ];
+    let spec = StatementSpec::new(Bank::Scotiabank, AccountType::Checking, Currency::KYD, "2045", dec("800.00"), (d(2025, 12, 16), d(2026, 1, 15)), txs);
+    let mut toks = demo::render(std::slice::from_ref(&spec));
+    // the detail line under the 125.00 row: two figures ending 20 points left of the amounts' column
+    let memo = toks.iter().find(|t| t.text == "SPLIT").unwrap().clone();
+    let amount = toks.iter().find(|t| t.text.contains("125.00")).unwrap().clone();
+    for (k, f) in ["100.00", "25.00"].iter().enumerate() {
+        let x1 = amount.x0 - 20.0 - k as f64 * 40.0;
+        toks.push(fingraph_core::parser::Token::new(memo.page, x1 - 30.0, memo.y0, x1, memo.y1, f));
+    }
+    let r = MultiPassScanner::new(&profiles::builtins()).scan_tokens(toks).unwrap();
+    assert_exact(&r, &[spec]);
+}

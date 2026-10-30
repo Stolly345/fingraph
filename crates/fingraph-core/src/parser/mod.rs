@@ -235,6 +235,9 @@ pub struct Pass1Report {
     /// like, no bank profile that says): the type above is a default.
     #[serde(default)]
     pub type_unstated: bool,
+    /// No bank profile and no date past the 12th: day/month order is a guess.
+    #[serde(default)]
+    pub date_order_unproven: bool,
     pub currency: Option<Currency>,
     pub currency_columns: Vec<Currency>,
     pub summary_lines: Vec<String>,
@@ -276,6 +279,9 @@ pub struct Pass3Report {
     /// The transaction and posting date columns were taken the wrong way round, and swapped back.
     #[serde(default)]
     pub date_columns_swapped: bool,
+    /// Dated lines with amounts among the transactions that no table read (a page lost its header, say).
+    #[serde(default)]
+    pub outside_dated_lines: usize,
 }
 
 /// What a read found out about a statement's layout. Approving a held statement teaches its bank profile

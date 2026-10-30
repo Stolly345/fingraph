@@ -32,6 +32,25 @@ fn rows(r: &ScanResult, f: &Mutate) -> Vec<(String, String, String)> {
     v
 }
 
+/// Same dates and amounts, row for row, and proven: for changes to the page's geometry. Descriptions are compared
+/// and reported (a wrapped word may land on its other line), not required.
+fn same_money(r: &ScanResult, base: &ScanResult) -> bool {
+    let money = |r: &ScanResult| {
+        let mut v: Vec<(String, String)> = r.sections.iter().flat_map(|s| &s.transactions).map(|t| (t.posted.to_string(), t.amount.to_string())).collect();
+        v.sort();
+        v
+    };
+    let descs = |r: &ScanResult| r.sections.iter().flat_map(|s| &s.transactions).map(|t| t.description.clone()).collect::<Vec<_>>();
+    let (a, b) = (descs(r), descs(base));
+    let alike = b.iter().filter(|d| a.contains(d)).count();
+    if alike * 10 < b.len() * 9 {
+        // reported, not failed: distorted geometry can cost a description its wrapped line or prefix it with a
+        // reference number, never an amount
+        println!("     (descriptions: {alike}/{} the same)", b.len());
+    }
+    r.is_reconciled() && money(r) == money(base)
+}
+
 #[test]
 #[ignore]
 fn drift_probe() {
@@ -96,6 +115,77 @@ fn drift_probe() {
         let moved: Vec<Token> = t.iter().map(|x| Token { x0: x.x0 * 0.9 + 30.0, x1: x.x1 * 0.9 + 30.0, ..x.clone() }).collect();
         let r = MultiPassScanner::new(&all).scan_tokens(moved).unwrap();
         check("page moved".into(), r.is_reconciled() && rows(&r, &same) == rows(&base, &same));
+        // the page printed another way: stretched unevenly (A4 vs Letter), even pages drifting in a scanner, word
+        // boxes 40% taller (overlapping the next line's, centres kept)
+        let geometric: Vec<(&str, Vec<Token>)> = vec![
+            ("stretched", t.iter().map(|x| Token { x0: x.x0 * 1.35, x1: x.x1 * 1.35, y0: x.y0 * 0.85, y1: x.y1 * 0.85, ..x.clone() }).collect()),
+            ("even pages shifted", t.iter().map(|x| if x.page % 2 == 0 { Token { x0: x.x0 + 18.0, x1: x.x1 + 18.0, y0: x.y0 - 12.0, y1: x.y1 - 12.0, ..x.clone() } } else { x.clone() }).collect()),
+            ("taller boxes", t.iter().map(|x| { let g = 0.2 * (x.y1 - x.y0); Token { y0: x.y0 - g, y1: x.y1 + g, ..x.clone() } }).collect()),
+        ];
+        for (what, toks) in geometric {
+            let r = MultiPassScanner::new(&all).scan_tokens(toks).unwrap();
+            let ok = same_money(&r, &base);
+            if !ok && std::env::var("DRIFT_VERBOSE").is_ok() {
+                let (a, b) = (rows(&base, &same), rows(&r, &same));
+                println!("     {what}: {} rows vs {}, {:?} read_as {:?} notes {:?}", b.len(), a.len(), r.sections.iter().map(|s| &s.reconciliation).collect::<Vec<_>>(), r.diagnostics.pass3.read_as, r.diagnostics.pass3.layout_notes);
+                for (x, y) in a.iter().filter(|x| !b.contains(x)).zip(b.iter().filter(|y| !a.contains(y))).take(3) {
+                    println!("       want {x:?}\n        got {y:?}");
+                }
+            }
+            check(what.into(), ok);
+        }
+        // the table headings replaced by gibberish (same boxes): the columns have to come from the amounts
+        let header_rows: Vec<(u32, f64, f64)> = base
+            .diagnostics
+            .pages
+            .iter()
+            .filter_map(|pg| {
+                let first_tx = base.sections.iter().flat_map(|s| &s.transactions).filter(|tx| tx.page == pg.page).map(|tx| tx.y).fold(f64::MAX, f64::min);
+                Some((pg.page, pg.header_y?, first_tx))
+            })
+            .collect();
+        let mut k = 0;
+        let gibberish: Vec<Token> = t
+            .iter()
+            .map(|x| {
+                let in_header = header_rows.iter().any(|&(p, hy, ty)| x.page == p && x.y0 >= hy - 0.5 && x.yc() < ty - 4.0 && x.yc() < hy + 26.0);
+                if in_header && !fingraph_core::money::is_amount_core(&x.text) {
+                    k += 1;
+                    Token { text: format!("Xyz{k}"), ..x.clone() }
+                } else {
+                    x.clone()
+                }
+            })
+            .collect();
+        let r = MultiPassScanner::new(&all).scan_tokens(gibberish).unwrap();
+        if std::env::var("DRIFT_VERBOSE").is_ok() && !same_money(&r, &base) {
+            let (a, b) = (rows(&base, &same), rows(&r, &same));
+            println!("     gibberish: {} rows vs {}, {:?} read_as {:?} notes {:?}", b.len(), a.len(), r.sections.iter().map(|s| &s.reconciliation).collect::<Vec<_>>(), r.diagnostics.pass3.read_as, r.diagnostics.pass3.layout_notes);
+            for (x, y) in a.iter().filter(|x| !b.contains(x)).zip(b.iter().filter(|y| !a.contains(y))).take(3) {
+                println!("       want {x:?}\n        got {y:?}");
+            }
+        }
+        check(format!("gibberish headings ({k} words)"), same_money(&r, &base));
+        // an OCR-style slip in one amount (`1,234.56` → `1,234,56`): repaired and held, or held — never silently wrong
+        let victim = base.sections.iter().flat_map(|s| &s.transactions).nth(2).map(|tx| (tx.page, tx.y, fingraph_core::money::fmt_plain(tx.stmt_amount.abs())));
+        if let Some((pg, y, _)) = victim {
+            let mut done = false;
+            let slipped: Vec<Token> = t
+                .iter()
+                .map(|x| {
+                    if !done && x.page == pg && (x.yc() - y).abs() < 3.0 && fingraph_core::money::is_amount_core(&x.text) && x.text.contains('.') {
+                        done = true;
+                        return Token { text: x.text.replacen('.', ",", 1), ..x.clone() };
+                    }
+                    x.clone()
+                })
+                .collect();
+            let r = MultiPassScanner::new(&all).scan_tokens(slipped).unwrap();
+            let silent = r.is_reconciled() && r.diagnostics.pass3.layout_notes.is_empty() && r.sections.iter().all(|s| s.report.derived.is_empty());
+            // (the recovered line keeps the garbled figure in its description: the money is what has to match)
+            let repaired = same_money(&r, &base);
+            check(format!("OCR slip ({})", if repaired { "repaired, held" } else { "held" }), done && !silent && (repaired || !r.is_reconciled()));
+        }
 
         for (case, m) in &cases {
             let changed = map(&t, m);
@@ -167,4 +257,5 @@ fn rescan_a_ledger_copy() {
     println!("rescanned {n} files, {txs} rows, missing {missing:?}; held before {before:?}");
     assert_eq!(held(&db), before);
 }
+
 

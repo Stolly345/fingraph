@@ -340,15 +340,11 @@ fn heal_and_judge(s: &mut Section) {
     let diff = s.report.summary.difference;
     let failing: Vec<&SegmentCheck> = s.report.segments.iter().filter(|g| !g.ok).collect();
     // without a total to check against, the balance checks must reach every row, first to last: with no
-    // opening balance the first row's amount (even its sign) is proven by nothing — the generator found a
-    // first withdrawal read as a deposit that "reconciled" this way
-    // The one exception: a first row whose direction its column gives (debit/credit, or a printed sign), in a
-    // statement where the balances confirmed that reading everywhere else (three checks or more, no sign
-    // corrected anywhere) — only that row's amount goes unchecked, never which way it went.
+    // opening balance the first row's amount is proven by nothing. (A first row "known" from its column was
+    // once let through; the generator found a fee missing from one, and a withdrawal read as a deposit. The
+    // previous statement's closing proves first rows at import instead.)
     let pts = points(s);
-    let confirmed = s.report.sign_heals.is_empty() && s.report.segments.iter().filter(|g| g.ok).count() >= 3;
-    let first_known = s.transactions.first().is_some_and(|t| !t.sign_flexible && t.balance.is_some());
-    let start = s.opening.is_some() || pts.first().is_some_and(|p| p.0 == 0 || (p.0 == 1 && confirmed && first_known));
+    let start = s.opening.is_some() || pts.first().is_some_and(|p| p.0 == 0);
     let covered = start && pts.last().is_some_and(|p| p.0 == s.transactions.len());
     // no rows read, but lines with amounts were left over: the balances agreeing proves nothing
     let empty_read = s.transactions.is_empty() && s.report.skipped.iter().any(|l| l.amount.is_some() && l.reason != SUMMARY_LINE);

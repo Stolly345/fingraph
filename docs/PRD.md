@@ -1,7 +1,7 @@
 # FinGraph — PRD / System Reference
 
-**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.10 `.deb`
-**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Updated:** 2026-10-30 for 0.2.10 · **Status:** in daily personal use; not published
+**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.11 `.deb`
+**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Updated:** 2026-10-30 for 0.2.11 · **Status:** in daily personal use; not published
 
 > Single source of truth for what FinGraph is, how it's built, and why it behaves the way it does.
 > It replaces the Python/Flet prototype in `~/Projects/FinGraph` (left untouched; its
@@ -361,6 +361,33 @@ would prove them, so "Reconciled" would stop meaning anything).
 Generator: 90–92% of all, 94–96% of provable statements read exactly (harder set: two-date layouts and
 unmarked cards added), none wrong and passed through — "proven" now also needs no notes.
 
+**0.2.11: adversarial tests** (owner pasted another AI's test ideas; built those that weren't already covered).
+Generator options added: "balance carried forward" at page breaks, header on page 1 only, a page netting to zero,
+day/month-ambiguous dates, December–January periods, cards in credit (`CR` closing), `*` markers, ±1 pt jitter,
+transactions split by page breaks, price-like text at the end of descriptions, a fee column, a second currency
+section. Real-statement variations added: uneven stretch, even pages shifted, 40% taller boxes, scrambled
+headings, an injected OCR slip. Direct tests: figures in a detail line, learn → learn → undo → undo, a poisoned
+profile. What they found and what changed:
+- **Whole sections and pages silently missing** (the worst): a second account's rows after the first one's
+  "Closing Balance" were never read, and with scrambled headings an Amex statement's KYD section vanished — the
+  rest reconciled each time. Now a section heading resumes the table at its first dated line (its own summary box
+  stays outside), and any dated line with an amount that no table read, from the top of the statement to the
+  table's end (or anywhere, if nothing was read), holds it (`outside_dated_lines`). A statement whose only rows
+  were "carried forward" lines had "reconciled" with nothing read.
+- **"Balance carried forward" ended the table** and counted as the closing: it's a page-foot line now.
+- **Ambiguous dates**: with no bank profile and no date past the 12th, every date could be read the wrong way
+  round silently; now noted and held (`date_order_unproven`). Amounts like `5.20` no longer count as date evidence.
+- **The first-row shortcut is gone**: a first row "known" from its column let a fee-column statement through with
+  a fee missing. A first row with no opening balance is proven by the previous statement's closing at import
+  (continuity), or the statement is held once.
+- A card's `1,234.56 CR` summary balance is a credit (it had read as owed); fee columns ("Fee", "Charges",
+  "Frais", "Comisión") are money out and two money-out columns on one line add up; a second date column needs only
+  a quarter of the lines; two dates days apart on a line aren't mistaken for the period; lowercase words (`as of`)
+  aren't margin lettering.
+Measured: 0 of 10,400 generated statements wrong and passed through; 95–97% of provable ones read exactly (a
+harder set again). Under scrambled headings or inflated boxes the dates and amounts of the owner's statements stay
+exact; descriptions can lose a wrapped word or gain a reference number (reported, not failed).
+
 **Profiles for unknown banks (Approve):** approving a reconciled statement from a bank with no profile makes one
 (`BankProfile::from_statement`): named and fingerprinted by what the letterhead says (`bank_identifiers`: a
 proper name with Bank/Trust/Credit Union…, and the bank's web address — never an email domain or a merchant's
@@ -634,10 +661,10 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 10. Packaging & operations
 
-- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.10-1_amd64.deb` (binary, desktop entry with
+- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.11-1_amd64.deb` (binary, desktop entry with
   PDF "Open With", icon, README; depends on poppler-utils, GTK 4, libadwaita; recommends
   tesseract-ocr for picture-only statements).
-- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.10-1_amd64.deb`. The
+- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.11-1_amd64.deb`. The
   version is bumped for every change to the app: apt skips a same-version `.deb` unless given
   `--reinstall`, and once that made a fix look missing. A docs-only rebuild keeps the version and
   is installed with `--reinstall`.

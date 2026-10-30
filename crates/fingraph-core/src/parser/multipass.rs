@@ -95,6 +95,8 @@ impl<'a> MultiPassScanner<'a> {
             None => pass2(&meta, rows, &mut diag),
         };
         let mut sections = pass3(&meta, rows, &layout, &mut diag);
+        let none_read = sections.iter().all(|s| s.transactions.is_empty());
+        diag.pass3.outside_dated_lines = outside_dated_lines(&meta, rows, &layout, none_read);
         for s in &mut sections {
             // newest first: the balances run backwards down the page, so read the page bottom-up
             if transaction_and_posting_swapped(s) {
@@ -151,6 +153,35 @@ fn polarity_note(s: &Section) -> Option<String> {
         let (was, looks) = (s.account_type.label(), if liability { "a bank account" } else { "a credit card" });
         format!("Read as {was}, but {against} of its lines (fees, payments, salary) move the balance the way {looks}'s would: if it is one, every amount's sign is the wrong way round")
     })
+}
+
+/// Lines that open with a date and carry an amount, between the table's first and last rows, that no table
+/// took in: a page whose header wasn't found, say. Their transactions are missing, and if they net to zero the
+/// balances can't tell — so they're counted, and a note holds the statement.
+fn outside_dated_lines(meta: &Meta, rows: &[Row], layout: &Layout, none_read: bool) -> usize {
+    let table = |k: &RowKind| matches!(k, RowKind::Table(_));
+    // from the top (a whole section before the table read can go missing: its lines open with dates, a summary box's
+    // don't) to the table's last row — after it come listings set aside on purpose; with no table, or nothing read
+    // from it, every such line in the statement is missing
+    let first = 0;
+    let last = match layout.kinds.iter().rposition(table) {
+        Some(b) if !none_read => b,
+        _ => rows.len().saturating_sub(1),
+    };
+    (first..=last.min(rows.len().saturating_sub(1)))
+        .filter(|&i| layout.kinds[i] == RowKind::Outside)
+        .filter(|&i| {
+            let r = &rows[i];
+            let text = r.text();
+            // the amount on the line itself, or on the next (a description that runs on to its amount)
+            let next_has_money = rows.get(i + 1).is_some_and(|n| n.page == r.page && n.yc() - r.yc() < 2.6 * r.h() && !money_items(&n.words).is_empty() && leading_date(n, &meta.ctx).is_none());
+            (!money_items(&r.words).is_empty() || next_has_money)
+                && leading_date(r, &meta.ctx).is_some()
+                // (the statement period's line: two dates weeks apart, not a transaction's two dates days apart)
+                && dates::parse_period(&text, meta.ctx.order).is_none_or(|(a, b)| (b - a).num_days() < 7)
+                && !SUMMARY_ROW.is_match(&text)
+        })
+        .count()
 }
 
 /// Two dates on a line: the transaction's and the day it posted, which is never earlier. When most lines
@@ -276,7 +307,7 @@ struct Variant {
 impl Variant {
     fn alternatives() -> Vec<Variant> {
         let mut v = vec![Variant { generic: true, ..Default::default() }, Variant { swap_dates: true, ..Default::default() }];
-        v.extend((0..=3).map(|n| Variant { generic: true, money: Some(n), ..Default::default() }));
+        v.extend((0..=4).map(|n| Variant { generic: true, money: Some(n), ..Default::default() }));
         v
     }
     fn describe(&self) -> Option<String> {
@@ -314,6 +345,16 @@ fn score(r: &ScanResult) -> (usize, usize, std::cmp::Reverse<usize>, std::cmp::R
 /// Where the statement departed from what its bank profile declares, so a failed read names the rule.
 fn layout_notes(meta: &Meta, sections: &[Section], diag: &mut Diagnostics) {
     // whatever the bank: things a person should look at even when the statement adds up
+    if diag.pass3.outside_dated_lines > 0 {
+        let n = diag.pass3.outside_dated_lines;
+        diag.pass3.layout_notes.push(format!(
+            "{n} dated line(s) with amounts sit among the transactions but outside the table that was read: if they're transactions, they're missing (they could cancel out, so the balances wouldn't show it)"
+        ));
+    }
+    if diag.pass1.date_order_unproven {
+        let read = if meta.ctx.order == Order::MonthFirst { "month first" } else { "day first" };
+        diag.pass3.layout_notes.push(format!("Every date could be day/month or month/day (none is past the 12th): they were read {read}, check them against the PDF"));
+    }
     if meta.ctx.period.is_none() && diag.pass3.yearless_dates > 0 {
         let y = meta.ctx.fallback_year;
         diag.pass3.layout_notes.push(format!("The dates have no year and no statement period was found, so {y} was assumed: check the year"));
@@ -581,7 +622,8 @@ static GENERIC_NOISE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 });
 
 /// The amount under a summary label: (amount, the line, the label as printed).
-pub(crate) fn summary_value(rows: &[&Row], label: &Regex, cols: &[(Currency, f64)], want: Currency) -> Option<(Decimal, String, String)> {
+/// `liability`: a card's `1,234.56 CR` is a credit (nothing owed, below zero); a bank account's `DR` is overdrawn.
+pub(crate) fn summary_value(rows: &[&Row], label: &Regex, cols: &[(Currency, f64)], want: Currency, liability: bool) -> Option<(Decimal, String, String)> {
     for (ri, r) in rows.iter().enumerate() {
         for s in r.cell_starts() {
             let rest = r.words[s..].iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
@@ -617,7 +659,7 @@ pub(crate) fn summary_value(rows: &[&Row], label: &Regex, cols: &[(Currency, f64
                 &items[0]
             };
             let p = pick.printed;
-            let v = if p.negative == Some(true) { -p.magnitude } else { p.magnitude };
+            let v = balance_value(&p, liability);
             let printed = label.find(&rest).map_or(String::new(), |m| m.as_str().split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase());
             return Some((v, r.text(), printed));
         }
@@ -655,20 +697,35 @@ fn detect_type(page1: &str) -> AccountType {
     }
 }
 
-static NUMERIC_DATE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(\d{1,2})[/.-](\d{1,2})\b").unwrap());
+// `03/04`, `03-04-2025`, `03.04.2025` — a dotted pair only with its year, or every `5.20` would count
+static NUMERIC_DATE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(\d{1,2})[/-](\d{1,2})\b|\b(\d{1,2})\.(\d{1,2})\.\d{2,4}\b").unwrap());
 
 /// Day or month first, for a bank with no profile: whichever the statement's own numeric dates allow
 /// (`09/23` can only be month first). Day first when nothing tells.
 fn infer_order(rows: &[Row]) -> Order {
-    let (mut day, mut month) = (0, 0);
+    let (day, month, _) = order_evidence(rows);
+    if month > day { Order::MonthFirst } else { Order::DayFirst }
+}
+
+/// Numeric dates that can only be day-first, only month-first, and that could be either (`03/04`).
+fn order_evidence(rows: &[Row]) -> (usize, usize, usize) {
+    let (mut day, mut month, mut either) = (0, 0, 0);
     for r in rows {
-        for c in NUMERIC_DATE.captures_iter(&r.text()) {
-            let (a, b): (u32, u32) = (c[1].parse().unwrap_or(0), c[2].parse().unwrap_or(0));
+        let text = r.text();
+        for c in NUMERIC_DATE.captures_iter(&text) {
+            // the month and day of an ISO date (`2025-03-04`) say nothing about order
+            let start = c.get(0).map_or(0, |m| m.start());
+            if text[..start].ends_with(|ch: char| ch == '-' || ch.is_ascii_digit()) {
+                continue;
+            }
+            let num = |i: usize, j: usize| c.get(i).or(c.get(j)).and_then(|m| m.as_str().parse::<u32>().ok()).unwrap_or(0);
+            let (a, b) = (num(1, 3), num(2, 4));
             day += (a > 12 && b <= 12) as usize;
             month += (b > 12 && a <= 12) as usize;
+            either += ((1..=12).contains(&a) && (1..=12).contains(&b) && a != b) as usize;
         }
     }
-    if month > day { Order::MonthFirst } else { Order::DayFirst }
+    (day, month, either)
 }
 
 fn pass1<'p>(scanner: &MultiPassScanner<'p>, rows: &[Row], diag: &mut Diagnostics, v: &Variant) -> Meta<'p> {
@@ -719,6 +776,11 @@ fn pass1<'p>(scanner: &MultiPassScanner<'p>, rows: &[Row], diag: &mut Diagnostic
     let layout = profile.map_or(LayoutKind::DebitCreditWithBalance, |p| p.column_layout_kind);
     if layout == LayoutKind::CreditCardDRCR {
         account_type = AccountType::CreditCard;
+    }
+    // no bank to say how it writes dates, and every numeric date reads both ways (`03/04/2025`): a guess
+    if profile.is_none() {
+        let (day, month, either) = order_evidence(rows);
+        diag.pass1.date_order_unproven = day == 0 && month == 0 && either > 0;
     }
     // said in so many words? ("Savings Bank" in a name doesn't say what this account is)
     diag.pass1.type_unstated = profile.is_none() && account_type != AccountType::CreditCard && !TYPE_STATED.is_match(&page1);
@@ -807,10 +869,14 @@ impl Geometry {
         self.text.iter().find(|(_, lo, hi)| x >= *lo && x < *hi).map(|c| c.0)
     }
     fn money_role(&self, right_edge: f64) -> Option<ColumnRole> {
+        self.money_band(right_edge).map(|k| self.money[k].0)
+    }
+    /// Which money column (by position) an amount ending at `right_edge` sits in.
+    fn money_band(&self, right_edge: f64) -> Option<usize> {
         if right_edge < self.money_lo || right_edge > self.right {
             return None;
         }
-        self.money.iter().find(|(_, lo, hi)| right_edge > *lo && right_edge <= *hi).map(|c| c.0)
+        self.money.iter().position(|(_, lo, hi)| right_edge > *lo && right_edge <= *hi)
     }
     fn bands(&self) -> Vec<ColumnBand> {
         self.text.iter().chain(&self.money).map(|&(role, x0, x1)| ColumnBand { role, x0: x0.max(self.left), x1: x1.min(self.right) }).collect()
@@ -861,7 +927,7 @@ pub(crate) fn classify_header(text: &str, profile: Option<&BankProfile>) -> Opti
         Some(ColumnRole::Date)
     } else if has(&["debit/credit", "amount", "montant", "importe", "bedrag", "betrag"]) {
         Some(ColumnRole::Amount)
-    } else if has(&["withdrawal", "debit", "débit", "cargo", "retiro", "minus", "money out", "paid out"]) {
+    } else if has(&["withdrawal", "debit", "débit", "cargo", "retiro", "minus", "money out", "paid out", "fee", "charges", "frais", "comisión"]) {
         Some(ColumnRole::Debit)
     } else if has(&["deposit", "credit", "crédit", "abono", "depósito", "plus", "money in", "paid in"]) {
         Some(ColumnRole::Credit)
@@ -1048,6 +1114,9 @@ fn pass2(meta: &Meta, rows: &[Row], diag: &mut Diagnostics) -> Layout {
     let mut kinds: Vec<RowKind> = rows.iter().map(|r| if meta.noise.iter().any(|n| n.is_match(&r.text())) { RowKind::Noise } else { RowKind::Outside }).collect();
     let mut geos: Vec<Geometry> = Vec::new();
     let mut current: Option<usize> = None;
+    // the table that last ended (at a closing line), for a section that follows it
+    let mut ended: Option<usize> = None;
+    let mut resume: Option<usize> = None;
     let mut page = 0;
     let mut pages: Vec<PageGeometry> = Vec::new();
     let mut i = 0;
@@ -1069,6 +1138,7 @@ fn pass2(meta: &Meta, rows: &[Row], diag: &mut Diagnostics) -> Layout {
             }
             geos.push(initial_geometry(&bare(&cols)));
             current = Some(geos.len() - 1);
+            resume = None;
             for k in kinds.iter_mut().take(last + 1).skip(i) {
                 *k = RowKind::Header;
             }
@@ -1077,12 +1147,20 @@ fn pass2(meta: &Meta, rows: &[Row], diag: &mut Diagnostics) -> Layout {
             i = last + 1;
             continue;
         }
+        // another account's section after a closing line (`USD Current Account — 4411`): its table goes on at
+        // its first dated line — the section's own summary box (opening, totals) in between stays outside it
+        if current.is_none() && ended.is_some() && SECTION_ROW.is_match(&r.text()) && money_items(&r.words).is_empty() {
+            resume = ended;
+        }
+        if current.is_none() && resume.is_some() && leading_date(r, &meta.ctx).is_some() {
+            current = resume.take();
+        }
         if let Some(g) = current {
             kinds[i] = RowKind::Table(g);
             pg.rows += 1;
             // the table ends with its closing balance; what follows is fee breakdowns and fine print
             if TABLE_END.is_match(&r.text()) || meta.table_end.as_ref().is_some_and(|e| e.is_match(&r.text())) {
-                current = None;
+                ended = current.take();
             }
         }
         i += 1;
@@ -1111,7 +1189,9 @@ fn money_roles(k: usize) -> &'static [&'static [ColumnRole]] {
         0 => &[],
         1 => &[&[Amount]],
         2 => &[&[Amount, Balance], &[Debit, Credit], &[Credit, Debit]],
-        _ => &[&[Debit, Credit, Balance], &[Credit, Debit, Balance], &[Amount, Balance]],
+        3 => &[&[Debit, Credit, Balance], &[Credit, Debit, Balance], &[Amount, Balance]],
+        // a fee column beside the money out (the balance moves by both)
+        _ => &[&[Debit, Debit, Credit, Balance], &[Debit, Credit, Balance], &[Credit, Debit, Balance], &[Amount, Balance]],
     }
 }
 
@@ -1130,7 +1210,8 @@ fn leading_date(r: &Row, ctx: &DateCtx) -> Option<LeadDate> {
             (*a == 0 && *b == text.len() && dates::parse_first(&text, ctx).is_some()).then(|| (s + n, (w[s].x0, w[s + n - 1].x1)))
         })
     };
-    let margin = w.iter().take_while(|t| t.text.chars().count() <= 3 && !t.text.chars().any(|c| c.is_ascii_digit())).count().min(2);
+    // margin lettering is capitals (`SS`, `AC`): `as of 01/02/26` under a summary label is a summary line, not a row
+    let margin = w.iter().take_while(|t| t.text.chars().count() <= 3 && !t.text.chars().any(|c| c.is_ascii_digit() || c.is_lowercase())).count().min(2);
     let (next, first) = (0..=margin).find_map(date_at)?;
     Some((first, date_at(next).map(|d| d.1)))
 }
@@ -1171,7 +1252,8 @@ fn data_layout(meta: &Meta, rows: &[Row], diag: &mut Diagnostics, n: usize) -> O
     let date_lo = dated.iter().flatten().map(|d| d.0.0).fold(f64::MAX, f64::min);
     let date_hi = dated.iter().flatten().map(|d| d.0.1).fold(f64::MIN, f64::max);
     let seconds: Vec<(f64, f64)> = dated.iter().flatten().filter_map(|d| d.1).collect();
-    let post_hi = (seconds.len() * 2 >= n_dated).then(|| seconds.iter().map(|d| d.1).fold(f64::MIN, f64::max));
+    // a second date column: on enough lines to be a column (a re-listing or a second section may print one date)
+    let post_hi = (seconds.len() >= 3 && seconds.len() * 4 >= n_dated).then(|| seconds.iter().map(|d| d.1).fold(f64::MIN, f64::max));
     let text_hi = post_hi.unwrap_or(date_hi);
 
     let mut items: Vec<(f64, f64)> = Vec::new();
@@ -1187,7 +1269,7 @@ fn data_layout(meta: &Meta, rows: &[Row], diag: &mut Diagnostics, n: usize) -> O
     // whose page also has a few amounts lined up elsewhere)
     let (roles, cols): (&[ColumnRole], Vec<f64>) = match money_roles(found.len()).get(n) {
         Some(roles) => (roles, found[found.len() - roles.len()..].iter().map(|c| c.0).collect()),
-        None if n == 3 && !found.is_empty() => (&[ColumnRole::Amount], vec![found.iter().max_by_key(|c| c.1)?.0]),
+        None if n == money_roles(found.len()).len() && !found.is_empty() => (&[ColumnRole::Amount], vec![found.iter().max_by_key(|c| c.1)?.0]),
         None => return None,
     };
 
@@ -1330,11 +1412,14 @@ fn split_row(r: &Row, g: &Geometry) -> Parts {
     let items = money_items(&r.words);
     let mut p = Parts::default();
     let mut in_money = vec![false; r.words.len()];
+    // one amount per column; two columns may share a role (a payment and its fee, both money out)
+    let mut used: Vec<usize> = Vec::new();
     for it in items.iter().rev() {
-        if let Some(role) = g.money_role(it.x1)
-            && !p.monies.iter().any(|(r, _)| *r == role)
+        if let Some(k) = g.money_band(it.x1)
+            && !used.contains(&k)
         {
-            p.monies.push((role, it.printed));
+            used.push(k);
+            p.monies.push((g.money[k].0, it.printed));
             in_money[it.lo..it.hi].iter_mut().for_each(|m| *m = true);
         } else {
             p.loose.push(it.printed);
@@ -1378,7 +1463,8 @@ fn split_row(r: &Row, g: &Geometry) -> Parts {
 
 static GENERIC_FX: LazyLock<Regex> = LazyLock::new(|| Regex::new(profiles::GENERIC_FX).unwrap());
 static DIGITS4: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{4,}\b").unwrap());
-static TABLE_END: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:closing|ending)\s+balance\b|\bbalance\s+carried\s+forward\b|\bnouveau\s+solde\b|\bsaldo\s+final\b").unwrap());
+// (not "balance carried forward": that's printed at the foot of a page, and the table carries on overleaf)
+static TABLE_END: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:closing|ending)\s+balance\b|\bnouveau\s+solde\b|\bsaldo\s+final\b").unwrap());
 static SUMMARY_ROW: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:sub-?)?totals?\b|^(?:opening|closing|previous|new|beginning|ending)\s+balance|balance\s+(?:brought|carried)?\s*forward|^brought\s+forward|^carried\s+forward|^nouveau\s+solde|^solde\s+(?:précédent|reporté|final|d'ouverture)|^saldo\s+(?:anterior|inicial|final)").unwrap()
 });
@@ -1540,10 +1626,10 @@ fn pass3(meta: &Meta, rows: &[Row], layout: &Layout, diag: &mut Diagnostics) -> 
         if total_line {
             // a section's own totals, printed under its table: they check its rows when no balance does
             let cur = b.section.currency;
-            if let Some((v, _, _)) = summary_value(&[r], &DEBITS, &[], cur) {
+            if let Some((v, _, _)) = summary_value(&[r], &DEBITS, &[], cur, false) {
                 b.section.total_debits = Some(v.abs());
             }
-            if let Some((v, _, _)) = summary_value(&[r], &CREDITS, &[], cur) {
+            if let Some((v, _, _)) = summary_value(&[r], &CREDITS, &[], cur, false) {
                 b.section.total_credits = Some(v.abs());
             }
         }
@@ -1710,8 +1796,9 @@ fn pass3(meta: &Meta, rows: &[Row], layout: &Layout, diag: &mut Diagnostics) -> 
         let own: Vec<&Row> = outside.iter().filter(|&&i| i >= start_row && i < end_row).map(|&i| &rows[i]).collect();
         for (label, slot) in [(&*OPENING, 0), (&*CLOSING, 1), (&*DEBITS, 2), (&*CREDITS, 3)] {
             let find = |label: &Regex| {
-                summary_value(&own, label, &meta.currency_columns, sec.currency).or_else(|| {
-                    (n_sections == 1 || !meta.currency_columns.is_empty()).then(|| summary_value(&all, label, &meta.currency_columns, sec.currency)).flatten()
+                let liability = sec.account_type.is_liability();
+                summary_value(&own, label, &meta.currency_columns, sec.currency, liability).or_else(|| {
+                    (n_sections == 1 || !meta.currency_columns.is_empty()).then(|| summary_value(&all, label, &meta.currency_columns, sec.currency, liability)).flatten()
                 })
             };
             // the bank's declared label first; the generic words are the fallback, and using them is noted

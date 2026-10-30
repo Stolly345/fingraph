@@ -2672,6 +2672,75 @@ mod tests {
         assert!(april.review.is_empty(), "{:?}", april.review);
     }
 
+    /// Two layout changes learned one after the other, then undone: each version of the profile reads exactly the
+    /// statements it was taught, the latest one reads both, and undoing puts the older one back.
+    #[test]
+    fn learned_layouts_build_up_and_undo_cleanly() {
+        let db = Db::open_in_memory().unwrap();
+        let ent = db.create_entity("Personal", EntityKind::Personal, Currency::KYD).unwrap();
+        let docs: Vec<_> = crate::demo::demo_documents().into_iter().filter(|d| d.filename.starts_with("Scotiabank_Chequing")).collect();
+        let rename = |toks: &[crate::parser::Token], to: [&str; 4]| -> Vec<crate::parser::Token> {
+            toks.iter()
+                .map(|t| {
+                    let text = match t.text.as_str() {
+                        "Description" => to[0],
+                        "DEBIT" => to[1],
+                        "CREDIT" => to[2],
+                        "Balance" => to[3],
+                        w => w,
+                    };
+                    crate::parser::Token { text: text.into(), ..t.clone() }
+                })
+                .collect()
+        };
+        let a = rename(&docs[1].tokens, ["Narrative", "Out", "In", "Running"]);
+        let b = rename(&docs[2].tokens, ["Particulars", "Spent", "Got", "Left"]);
+        let clean = |toks: &[crate::parser::Token]| {
+            let r = crate::parser::MultiPassScanner::new(&db.profiles().unwrap()).scan_tokens(toks.to_vec()).unwrap();
+            r.is_reconciled() && r.diagnostics.pass3.read_as.is_none() && r.diagnostics.pass3.layout_notes.is_empty()
+        };
+        let learn = |i: usize, toks: &[crate::parser::Token]| {
+            let scan = crate::parser::MultiPassScanner::new(&db.profiles().unwrap()).scan_tokens(toks.to_vec()).unwrap();
+            assert!(scan.is_reconciled());
+            let rep = db.import_auto(ent, &format!("l{i}.pdf"), &format!("l{i}"), &scan).unwrap();
+            assert_eq!(rep.held, 1, "a new layout waits");
+            assert!(db.approve_document(rep.document_ids[0]).unwrap().learned.is_some());
+        };
+        let sb = || db.profiles().unwrap().into_iter().find(|p| p.slug == "scotiabank_ky").unwrap().id;
+        assert!(!clean(&a) && !clean(&b));
+        learn(1, &a);
+        assert!(clean(&a) && !clean(&b), "v1 knows A only");
+        learn(2, &b);
+        assert!(clean(&a) && clean(&b), "v2 knows both");
+        assert!(clean(&docs[0].tokens), "and the original layout still");
+        assert!(db.undo_layout_change(sb()).unwrap());
+        assert!(clean(&a) && !clean(&b), "undone: back to v1");
+        assert!(db.undo_layout_change(sb()).unwrap());
+        assert!(!clean(&a) && !clean(&b) && clean(&docs[0].tokens), "and to the shipped profile");
+    }
+
+    /// A wrong approval can teach a profile the wrong row shape and stray headings (it only adds headings, but
+    /// it replaces the row shape). With the profile poisoned like that, a normal statement must still come out
+    /// right, or be held — never imported wrong.
+    #[test]
+    fn a_poisoned_profile_cannot_let_a_normal_statement_through_wrong() {
+        let db = Db::open_in_memory().unwrap();
+        let mut p = db.profiles().unwrap().into_iter().find(|p| p.slug == "scotiabank_ky").unwrap();
+        p.layout.row_shape = profiles::RowShape::AmountLast;
+        p.header_anchors.debit.push("description".into());
+        p.header_anchors.balance.push("debit".into());
+        p.layout.opening.push("closing balance".into());
+        db.save_profile(&p).unwrap();
+        let money = |r: &crate::parser::ScanResult| r.sections.iter().flat_map(|s| &s.transactions).map(|t| (t.posted, t.amount)).collect::<Vec<_>>();
+        for d in crate::demo::demo_documents().into_iter().filter(|d| d.filename.starts_with("Scotiabank")) {
+            let want = money(&crate::parser::MultiPassScanner::new(&profiles::builtins()).scan_tokens(d.tokens.clone()).unwrap());
+            let r = crate::parser::MultiPassScanner::new(&db.profiles().unwrap()).scan_tokens(d.tokens.clone()).unwrap();
+            let held = !r.is_reconciled() || !r.diagnostics.pass3.layout_notes.is_empty();
+            assert!(held, "{}: a poisoned profile's read is held for a look", d.filename);
+            assert!(money(&r) == want || !r.is_reconciled(), "{}: if it adds up, it's the right rows", d.filename);
+        }
+    }
+
     #[test]
     fn learning_applies_retroactively() {
         let db = Db::open_in_memory().unwrap();
