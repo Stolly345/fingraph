@@ -40,7 +40,7 @@ struct Snap {
 
 fn snap(app: &App) -> Snap {
     let ids = app.entity_ids();
-    let rows = app.db.transactions(&TxFilter { entity_ids: ids.clone(), ..Default::default() }).unwrap_or_default();
+    let rows = app.db.transactions(&TxFilter { entity_ids: ids.clone(), by_account: true, ..Default::default() }).unwrap_or_default();
     let docs = app.db.documents(&ids).unwrap_or_default();
     let hidden: Vec<i64> = app.db.accounts().unwrap_or_default().iter().filter(|a| a.hidden).map(|a| a.id).collect();
     let mut accounts = core::account_balances(&rows, &docs);

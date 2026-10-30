@@ -534,6 +534,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     uncategorized_only: cat_filter == Some(-1),
                     search: search.text().to_string(),
                     split_lines: false,
+                    by_account: false,
                 })
                 .unwrap_or_default();
             let focus = a.focus_ids.borrow().clone();

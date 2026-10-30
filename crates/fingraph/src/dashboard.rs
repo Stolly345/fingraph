@@ -238,6 +238,9 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             crate::budget::fill_overview(&a, &budget_box);
             crate::budget::fill_big_bills(&a, &bills_box);
             let k = insights::kpis(&rows, &docs, from, to, ccy, &fx, today());
+            // a currency with no exchange rate yet is left out of every total, and said so
+            let unrated: Vec<&str> = insights::missing_rates(&rows, ccy, &fx).iter().map(|c| c.code()).collect();
+            let unrated = if unrated.is_empty() { String::new() } else { format!("\nNot counted: {} (no exchange rate yet)", unrated.join(", ")) };
             // net cash flow: (income, expenses) over a window, scaled to the card's period
             let data_end = insights::data_span(&rows).map_or(end_of(today()), |s| s.1.min(today()));
             let data_start = insights::data_span(&rows).map_or(data_end, |s| s.0);
@@ -271,7 +274,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 let net = inc - exp;
                 k.value.set_label(&money(net));
                 k.value.set_css_classes(&["value", "tnum", if net.is_sign_negative() { "amount-out" } else { "amount-in" }]);
-                k.sub.set_label(&format!("In {} · Out {}\n{what}", money(inc), money(exp)));
+                k.sub.set_label(&format!("In {} · Out {}\n{what}{unrated}", money(inc), money(exp)));
             }
             match crate::budget::left_this_month(&a) {
                 Some((funded, spent)) => {

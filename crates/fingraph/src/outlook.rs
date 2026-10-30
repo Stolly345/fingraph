@@ -30,7 +30,8 @@ fn list() -> gtk::ListBox {
 
 fn forecasts(app: &App) -> Vec<Forecast> {
     let ids = app.entity_ids();
-    let rows = app.db.transactions(&TxFilter { entity_ids: ids.clone(), ..Default::default() }).unwrap_or_default();
+    // an account's forecast follows all its rows, business-flagged ones too
+    let rows = app.db.transactions(&TxFilter { entity_ids: ids.clone(), by_account: true, ..Default::default() }).unwrap_or_default();
     let docs = app.db.documents(&ids).unwrap_or_default();
     let hidden: Vec<i64> = app.db.accounts().unwrap_or_default().iter().filter(|a| a.hidden).map(|a| a.id).collect();
     core::forecast(&rows, &docs, today() + Duration::days(AHEAD)).into_iter().filter(|x| !hidden.contains(&x.account_id)).collect()

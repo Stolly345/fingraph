@@ -475,5 +475,9 @@ mod tests {
         let nw = |rows: &[TxRow]| crate::wealth::net_worth_on(&crate::wealth::account_balances(rows, &bdocs), &[], t.posted, Currency::KYD, &fx).net();
         let without: Vec<TxRow> = brows.iter().filter(|x| x.id != t.id).cloned().collect();
         assert_eq!(nw(&brows), nw(&without));
+        // picked by account, the personal view still sees the flagged row in its own account
+        let mine = db.transactions(&TxFilter { entity_ids: vec![personal], by_account: true, ..Default::default() }).unwrap();
+        assert!(mine.iter().any(|x| x.id == t.id));
+        assert!(!db.transactions(&TxFilter { entity_ids: vec![biz], by_account: true, ..Default::default() }).unwrap().iter().any(|x| x.id == t.id));
     }
 }

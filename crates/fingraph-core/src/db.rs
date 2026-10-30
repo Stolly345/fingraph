@@ -451,6 +451,8 @@ pub struct TxFilter {
     pub search: String,
     /// For reports: a split row becomes its lines, each in its own category and workspace.
     pub split_lines: bool,
+    /// Pick rows by their account's own workspace, ignoring business flags (balances, forecasts, exports).
+    pub by_account: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2284,7 +2286,8 @@ impl Db {
         let mut sql = format!("{TX_SELECT} WHERE (t.document_id IS NULL OR t.document_id NOT IN (SELECT id FROM documents WHERE review_hold = 1))");
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
         if !f.entity_ids.is_empty() {
-            sql += &format!(" AND COALESCE(t.business_entity_id, a.entity_id) IN ({})", f.entity_ids.iter().map(|_| "?").collect::<Vec<_>>().join(","));
+            let col = if f.by_account { "a.entity_id" } else { "COALESCE(t.business_entity_id, a.entity_id)" };
+            sql += &format!(" AND {col} IN ({})", f.entity_ids.iter().map(|_| "?").collect::<Vec<_>>().join(","));
             args.extend(f.entity_ids.iter().map(|&i| i.into()));
         }
         if let Some(d) = f.from {

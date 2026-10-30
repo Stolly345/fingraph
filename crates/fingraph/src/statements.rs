@@ -537,6 +537,8 @@ fn watched_file(a: &Rc<App>, p: &std::path::Path, k: &str, r: Result<(ScanResult
     let seen_now = || {
         let mut seen: std::collections::HashSet<String> = a.db.setting("watch_seen").and_then(|j| serde_json_lite(&j)).unwrap_or_default();
         seen.insert(k.to_string());
+        // forget files that are gone, so the list doesn't grow forever
+        seen.retain(|s| s.rsplitn(3, '|').nth(2).is_some_and(|p| std::path::Path::new(p).exists()));
         let _ = a.db.set_setting("watch_seen", &seen.iter().map(|s| format!("{s}\n")).collect::<String>());
     };
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
