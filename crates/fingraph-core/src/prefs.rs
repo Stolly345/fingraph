@@ -30,7 +30,7 @@ pub struct Prefs {
     pub download_rates: bool,
 
     // Import & scanning
-    /// Where imported PDFs are kept; `None` = `~/.local/share/fingraph/statements`.
+    /// Where imported PDFs are kept; `None` = `statements/` beside the ledger (`Db::statements_dir`).
     pub statements_dir: Option<PathBuf>,
     pub watch_enabled: bool,
     pub watch_folder: Option<PathBuf>,
@@ -103,10 +103,6 @@ impl Default for Prefs {
 }
 
 impl Prefs {
-    pub fn statements_dir(&self) -> PathBuf {
-        self.statements_dir.clone().unwrap_or_else(|| crate::data_dir().join("statements"))
-    }
-
     /// The parts of the engine that read preferences as process-wide switches.
     pub fn apply_globals(&self) {
         crate::money::set_style(self.currency_codes, self.brackets, self.statement_fx_wins);

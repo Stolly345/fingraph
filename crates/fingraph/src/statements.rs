@@ -182,8 +182,8 @@ fn approve_dialog(app: &Rc<App>, id: i64, name: &str, why: &[Review], n: i64) {
     dlg.present(Some(&app.win));
 }
 
-/// Ask about what an import can't decide alone. `None` skips the file.
-async fn decide(app: &Rc<App>, name: &str, plan: &ImportPlan) -> Option<Vec<Target>> {
+/// Ask about what an import can't decide alone: the accounts, and the statements it replaces. `None` skips the file.
+async fn decide(app: &Rc<App>, name: &str, plan: &ImportPlan) -> Option<(Vec<Target>, Vec<i64>)> {
     if !plan.same_period.is_empty() {
         let old = plan.same_period.iter().map(|d| format!("“{}”", d.1)).collect::<Vec<_>>().join(", ");
         let d = adw::AlertDialog::new(
@@ -194,9 +194,6 @@ async fn decide(app: &Rc<App>, name: &str, plan: &ImportPlan) -> Option<Vec<Targ
         d.set_close_response("skip");
         if d.choose_future(Some(&app.win)).await != "replace" {
             return None;
-        }
-        for (id, _) in &plan.same_period {
-            let _ = app.db.delete_document(*id);
         }
     }
     let mut targets = Vec::new();
@@ -232,7 +229,8 @@ async fn decide(app: &Rc<App>, name: &str, plan: &ImportPlan) -> Option<Vec<Targ
             a => a.strip_prefix('a').and_then(|i| i.parse().ok()).map_or(Target::Skip, Target::Existing),
         });
     }
-    targets.iter().any(|t| *t != Target::Skip).then_some(targets)
+    let replace = plan.same_period.iter().map(|d| d.0).collect();
+    targets.iter().any(|t| *t != Target::Skip).then_some((targets, replace))
 }
 
 /// Account × month dots for the last twelve months, then any break in the chain of balances.
@@ -341,9 +339,9 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
                 Ok((scan, sha, plan)) => {
                     let targets = if plan.already_imported { Some(Vec::new()) } else { plan.automatic() };
                     match targets {
-                        Some(t) => Ok((scan, sha, t)),
+                        Some(t) => Ok((scan, sha, t, Vec::new())),
                         None => match decide(&a, &name, &plan).await {
-                            Some(t) => Ok((scan, sha, t)),
+                            Some((t, replace)) => Ok((scan, sha, t, replace)),
                             None => {
                                 a.toast(&format!("{name}: skipped"));
                                 continue;
@@ -354,7 +352,8 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
                 Err(e) => Err(e),
             };
             match scanned {
-                Ok((scan, sha, targets)) => match a.db.import_scan(entity, &name, &sha, &scan, &targets) {
+                // "Replace": the earlier copy goes in the same step, with what you changed on it carried across
+                Ok((scan, sha, targets, replace)) => match if replace.is_empty() { a.db.import_scan(entity, &name, &sha, &scan, &targets) } else { a.db.replace_with(&replace, entity, &name, &sha, &scan, &targets) } {
                     Ok(rep) => {
                         // kept so the statement can be rescanned after a scanner or profile change
                         if let Err(e) = a.db.keep_pdf(&p, &sha) {
@@ -549,7 +548,9 @@ pub fn rescan_all(app: &Rc<App>) {
         if r != "go" {
             return;
         }
-        let _ = a.db.auto_backup("before-rescan");
+        if let Err(e) = a.db.auto_backup("before-rescan") {
+            return a.toast(&format!("Couldn't make the backup first, so nothing was rescanned: {e}"));
+        }
         let files = a.db.statement_files().unwrap_or_default();
         let profiles = a.db.profiles().unwrap_or_default();
         let w = Rc::downgrade(&a);

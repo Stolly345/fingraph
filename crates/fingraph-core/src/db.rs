@@ -274,6 +274,26 @@ CREATE TABLE fx_daily (
     source TEXT NOT NULL,
     PRIMARY KEY (day, currency)
 );
+"#, r#"
+-- every statement that lists a transaction, not only the one that brought it in: deleting one of two
+-- overlapping statements keeps the rows the other also lists, and a held copy can't hide a clean one's rows
+CREATE TABLE shared_rows (
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    PRIMARY KEY (document_id, transaction_id)
+);
+-- rows you deleted stay deleted when their statement is rescanned or imported again
+CREATE TABLE deleted_rows (account_id INTEGER NOT NULL, fitid TEXT NOT NULL, PRIMARY KEY (account_id, fitid));
+-- transfer pairs you unlinked stay unlinked
+CREATE TABLE unpaired (account_a INTEGER NOT NULL, fitid_a TEXT NOT NULL, account_b INTEGER NOT NULL, fitid_b TEXT NOT NULL, PRIMARY KEY (account_a, fitid_a, account_b, fitid_b));
+-- a memo you wrote survives a rescan
+ALTER TABLE transactions ADD COLUMN memo_edited INTEGER NOT NULL DEFAULT 0;
+-- left behind by workspaces and accounts deleted before ids stopped being reused
+DELETE FROM manual_values WHERE item_id IN (SELECT id FROM manual_items WHERE entity_id NOT IN (SELECT id FROM entities));
+DELETE FROM manual_items WHERE entity_id NOT IN (SELECT id FROM entities);
+DELETE FROM attachments WHERE account_id NOT IN (SELECT id FROM accounts);
+DELETE FROM reimbursements WHERE account_id NOT IN (SELECT id FROM accounts);
+DELETE FROM settings WHERE key LIKE 'apr:%' AND CAST(substr(key, 5) AS INTEGER) NOT IN (SELECT id FROM accounts);
 "#];
 
 /// (name, kind, children). Missing ones are added to existing ledgers on open; lists are shown A–Z.
@@ -585,6 +605,36 @@ pub struct Db {
     pub conn: Connection,
 }
 
+/// A transaction that nests: a SAVEPOINT, so one inside another (a rescan's import inside the rescan)
+/// commits or rolls back with the outer one. Dropped without `commit` = rolled back.
+pub struct Sp<'a> {
+    conn: &'a Connection,
+    done: bool,
+}
+
+impl Sp<'_> {
+    pub fn commit(mut self) -> Result<()> {
+        self.done = true;
+        self.conn.execute_batch("RELEASE fg")?;
+        Ok(())
+    }
+}
+
+impl Drop for Sp<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = self.conn.execute_batch("ROLLBACK TO fg; RELEASE fg");
+        }
+    }
+}
+
+impl std::ops::Deref for Sp<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn
+    }
+}
+
 pub(crate) fn dec(s: &str) -> Decimal {
     Decimal::from_str(s).unwrap_or_default()
 }
@@ -694,12 +744,38 @@ fn profile_row(r: &Row) -> rusqlite::Result<BankProfile> {
     })
 }
 
+/// `chmod`, best effort (a folder on a drive without Unix permissions just keeps its own).
+pub(crate) fn private(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    if path.exists() {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+}
+
+/// One of FinGraph's kept statement copies: a file named by its SHA-256.
+fn is_kept_pdf(path: &Path) -> bool {
+    path.is_file() && path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".pdf")).is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+fn kept_pdfs(dir: &Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| is_kept_pdf(p)).collect()
+}
+
 impl Db {
     pub fn open(path: &Path) -> Result<Db> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
+            // the data folder is yours alone; a ledger kept somewhere you chose keeps that folder's permissions
+            if dir == crate::data_dir() {
+                private(dir, 0o700);
+            }
         }
-        Self::init(Connection::open(path)?)
+        let conn = Connection::open(path)?;
+        // SQLite gives the -wal and -shm files the ledger's own permissions
+        for f in [path.to_path_buf(), path.with_extension("db-wal"), path.with_extension("db-shm")] {
+            private(&f, 0o600);
+        }
+        Self::init(conn)
     }
 
     pub fn open_default() -> Result<Db> {
@@ -716,11 +792,19 @@ impl Db {
         // spares an fsync per write
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // another handle on the same ledger (the `ledger` example, a backup) waits instead of failing
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let db = Db { conn };
         db.migrate()?;
         db.seed()?;
         db.prefs().apply_globals();
         Ok(db)
+    }
+
+    /// Begin a (nestable) transaction.
+    pub fn sp(&self) -> Result<Sp<'_>> {
+        self.conn.execute_batch("SAVEPOINT fg")?;
+        Ok(Sp { conn: &self.conn, done: false })
     }
 
     // ---------------------------------------------------------------- preferences
@@ -747,10 +831,12 @@ impl Db {
         if let Some(dir) = dest.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        if dest.exists() {
-            std::fs::remove_file(dest)?;
-        }
-        self.conn.execute("VACUUM INTO ?1", [dest.to_string_lossy()])?;
+        // written beside it first, so a failed backup never costs the one already there
+        let tmp = dest.with_extension("db-partial");
+        let _ = std::fs::remove_file(&tmp);
+        self.conn.execute("VACUUM INTO ?1", [tmp.to_string_lossy()])?;
+        private(&tmp, 0o600);
+        std::fs::rename(&tmp, dest)?;
         Ok(())
     }
 
@@ -792,69 +878,108 @@ impl Db {
     /// Everything you put in goes: workspaces, accounts, statements, transactions, rules and
     /// settings. Bank profiles, categories and preferences stay.
     pub fn erase_all(&self) -> Result<()> {
-        let prefs = self.setting("preferences");
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         for t in [
-            "transactions", "documents", "accounts", "learned_rules", "entities", "settings", "splits", "reimbursements", "attachments", "budgets", "budget_history", "budget_moves", "sinking_funds",
-            "month_closes", "manual_values", "manual_items", "goal_entries", "goals",
+            "transactions", "documents", "accounts", "learned_rules", "entities", "splits", "reimbursements", "attachments", "budgets", "budget_history", "budget_moves", "sinking_funds",
+            "month_closes", "manual_values", "manual_items", "goal_entries", "goals", "deleted_rows", "unpaired",
         ] {
             tx.execute(&format!("DELETE FROM {t}"), [])?;
         }
+        // preferences, and the bookkeeping that says the bank profiles are already up to date (otherwise the
+        // next open resets the built-ins and their learned layouts)
+        tx.execute("DELETE FROM settings WHERE key != 'preferences' AND key != 'fitid_v2' AND key NOT LIKE 'profile_rev:%' AND key NOT LIKE 'last_id:%'", [])?;
         tx.commit()?;
-        if let Some(p) = prefs {
-            self.set_setting("preferences", &p)?;
-        }
         Ok(())
     }
 
     // ---------------------------------------------------------------- kept statement PDFs
 
+    /// The ledger's own folder (a scratch or demo ledger has its own, so it never touches your real files).
+    fn home(&self) -> std::path::PathBuf {
+        self.path().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(|| std::env::temp_dir().join(format!("fingraph-memory-{}", std::process::id())))
+    }
+
+    /// Where kept statement PDFs live: the folder chosen in Preferences, else `statements/` beside the ledger.
+    pub fn statements_dir(&self) -> std::path::PathBuf {
+        self.prefs().statements_dir.unwrap_or_else(|| self.home().join("statements"))
+    }
+
     /// Keep a copy of an imported PDF, named by its SHA-256, so it can be rescanned later.
     pub fn keep_pdf(&self, src: &Path, sha256: &str) -> Result<()> {
-        let dir = self.prefs().statements_dir();
+        let dir = self.statements_dir();
         std::fs::create_dir_all(&dir)?;
+        private(&dir, 0o700);
         let dst = dir.join(format!("{sha256}.pdf"));
         if !dst.exists() {
             std::fs::copy(src, &dst)?;
+            private(&dst, 0o600);
         }
         Ok(())
     }
 
     /// A statement's PDF: the kept copy, else a file with the same name and contents in the data folder.
     pub fn stored_pdf(&self, sha256: &str, filename: &str) -> Option<std::path::PathBuf> {
-        let kept = self.prefs().statements_dir().join(format!("{sha256}.pdf"));
+        let kept = self.statements_dir().join(format!("{sha256}.pdf"));
         if kept.exists() {
             return Some(kept);
         }
-        let old = crate::data_dir().join("documents").join(filename);
+        let old = self.home().join("documents").join(filename);
         (file_sha256(&old).ok().as_deref() == Some(sha256)).then_some(old)
     }
 
-    /// Move the kept PDFs to a new folder and remember it. Returns how many moved.
-    pub fn move_statements_dir(&self, to: &Path) -> Result<usize> {
-        let mut p = self.prefs();
-        let from = p.statements_dir();
-        std::fs::create_dir_all(to)?;
+    /// Move the kept PDFs to a new folder and remember it. Only FinGraph's own copies (`<sha256>.pdf`) ever
+    /// move; a folder that already holds other things gets a `FinGraph Statements` folder inside it.
+    /// Returns how many moved and the folder they're in now.
+    pub fn move_statements_dir(&self, to: &Path) -> Result<(usize, std::path::PathBuf)> {
+        let from = self.statements_dir();
+        let others = std::fs::read_dir(to).map(|d| d.flatten().any(|e| !is_kept_pdf(&e.path()))).unwrap_or(false);
+        let to = if others { to.join("FinGraph Statements") } else { to.to_path_buf() };
         let mut n = 0;
-        if from != to && from.exists() {
-            for e in std::fs::read_dir(&from)?.flatten() {
-                let dst = to.join(e.file_name());
-                if std::fs::rename(e.path(), &dst).is_err() {
-                    std::fs::copy(e.path(), &dst)?;
-                    std::fs::remove_file(e.path())?;
+        if to != from {
+            std::fs::create_dir_all(&to)?;
+            private(&to, 0o700);
+            for f in kept_pdfs(&from) {
+                let dst = to.join(f.file_name().unwrap_or_default());
+                if std::fs::rename(&f, &dst).is_err() {
+                    std::fs::copy(&f, &dst)?;
+                    std::fs::remove_file(&f)?;
                 }
                 n += 1;
             }
+            // only if nothing else is left in it
+            let _ = std::fs::remove_dir(&from);
         }
-        p.statements_dir = Some(to.to_path_buf());
+        let mut p = self.prefs();
+        p.statements_dir = Some(to.clone());
         self.save_prefs(&p)?;
-        Ok(n)
+        Ok((n, to))
+    }
+
+    /// Erase's "also delete the kept statement PDFs": FinGraph's own copies only, never anything else in the folder.
+    pub fn delete_kept_pdfs(&self) -> Result<usize> {
+        let dir = self.statements_dir();
+        let files = kept_pdfs(&dir);
+        for f in &files {
+            std::fs::remove_file(f)?;
+        }
+        let _ = std::fs::remove_dir(&dir);
+        Ok(files.len())
+    }
+
+    /// A kept copy no statement uses any more (its statement was deleted) goes too.
+    fn drop_unused_pdf(&self, sha256: &str) -> Result<()> {
+        let used: i64 = self.conn.query_row("SELECT COUNT(*) FROM documents WHERE sha256_hash = ?1", [sha256], |r| r.get(0))?;
+        let f = self.statements_dir().join(format!("{sha256}.pdf"));
+        if used == 0 && is_kept_pdf(&f) {
+            let _ = std::fs::remove_file(f);
+        }
+        Ok(())
     }
 
     fn migrate(&self) -> Result<()> {
         let v: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         for (i, m) in MIGRATIONS.iter().enumerate().skip(v as usize) {
-            let tx = self.conn.unchecked_transaction()?;
+            let tx = self.sp()?;
             tx.execute_batch(m)?;
             tx.pragma_update(None, "user_version", i as i64 + 1)?;
             tx.commit()?;
@@ -935,8 +1060,19 @@ impl Db {
             EntityKind::Business => "folder-documents-symbolic",
             EntityKind::RentalProperty => "go-home-symbolic",
         };
-        self.conn.execute("INSERT INTO entities (name, kind, base_currency, icon_name, created_at) VALUES (?1, ?2, ?3, ?4, ?5)", params![name, kind.as_str(), base.code(), icon, now()])?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.next_id("entities")?;
+        self.conn.execute("INSERT INTO entities (id, name, kind, base_currency, icon_name, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![id, name, kind.as_str(), base.code(), icon, now()])?;
+        Ok(id)
+    }
+
+    /// Workspace and account ids are never handed out twice, so what's keyed by one without a foreign key
+    /// (budgets, goals, receipts, APRs) can't turn up in a new workspace after a delete.
+    fn next_id(&self, table: &str) -> Result<i64> {
+        let key = format!("last_id:{table}");
+        let max: i64 = self.conn.query_row(&format!("SELECT COALESCE(MAX(id), 0) FROM {table}"), [], |r| r.get(0))?;
+        let n = max.max(self.setting(&key).and_then(|v| v.parse().ok()).unwrap_or(0)) + 1;
+        self.set_setting(&key, &n.to_string())?;
+        Ok(n)
     }
 
     pub fn update_entity(&self, id: i64, name: &str, base: Currency) -> Result<()> {
@@ -958,7 +1094,7 @@ impl Db {
             let mut st = self.conn.prepare("SELECT id, account_id, document_id, posted_date, amount, fitid, memo FROM transactions ORDER BY COALESCE(document_id, 0), id")?;
             st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?.collect::<rusqlite::Result<_>>()?
         };
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         // numbered within each statement, the way an import numbers them
         let mut seq: std::collections::HashMap<(i64, Option<i64>, String, Decimal, bool), usize> = Default::default();
         for (id, account, doc, posted, amount, old, memo) in rows {
@@ -1094,16 +1230,41 @@ impl Db {
     }
 
     /// Keep downloaded rates (units per US dollar), then convert every transaction again at its own day's rate.
+    /// A rate that can't be right is dropped, so one bad answer from a server can't turn 50 GBP into millions:
+    /// a pegged currency, a day still to come, a rate outside any currency's range, or one more than half off
+    /// the currency's stored rate within a month of it (else this download's middle rate). Returns how many were kept.
     pub fn store_rates(&self, rates: &[(NaiveDate, Currency, Decimal)], source: &str) -> Result<usize> {
-        let tx = self.conn.unchecked_transaction()?;
-        for (day, c, r) in rates {
+        let fx = self.fx()?;
+        let today = Local::now().date_naive();
+        let mut batch: std::collections::BTreeMap<Currency, Vec<Decimal>> = Default::default();
+        for (_, c, r) in rates {
+            batch.entry(*c).or_default().push(*r);
+        }
+        for v in batch.values_mut() {
+            v.sort();
+        }
+        let month = chrono::Duration::days(31);
+        let sane = |day: &NaiveDate, c: &Currency, r: &Decimal| {
+            if c.pegged() || *day > today || *r < Decimal::new(1, 6) || *r > Decimal::from(10_000_000) {
+                return false;
+            }
+            let stored = fx.daily.get(c).and_then(|m| {
+                let near = [m.range(..=*day).next_back(), m.range(*day..).next()];
+                near.into_iter().flatten().filter(|(d, _)| (**d - *day).abs() <= month).min_by_key(|(d, _)| (**d - *day).abs()).map(|(_, v)| *v)
+            });
+            let middle = batch.get(c).map(|v| v[v.len() / 2]);
+            stored.or(middle).is_some_and(|m| (*r - m).abs() <= m / Decimal::TWO)
+        };
+        let keep: Vec<_> = rates.iter().filter(|(d, c, r)| sane(d, c, r)).collect();
+        let tx = self.sp()?;
+        for (day, c, r) in &keep {
             tx.execute("INSERT OR REPLACE INTO fx_daily VALUES (?1, ?2, ?3, ?4)", params![day.to_string(), c.code(), r.to_string(), source])?;
         }
         tx.commit()?;
-        if !rates.is_empty() {
+        if !keep.is_empty() {
             self.revalue(None)?;
         }
-        Ok(rates.len())
+        Ok(keep.len())
     }
 
     /// For Preferences: each floating currency in use, its latest stored rate's day and source (`None`: none yet).
@@ -1141,7 +1302,7 @@ impl Db {
             )?;
             st.query_map([entity], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?.collect::<rusqlite::Result<_>>()?
         };
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         for (id, amt, c, base, memo, day) in rows {
             let v = entity_amount(&fx, dec(&amt), ccy(&c), ccy(&base), parse_fx_memo(&memo), date(&day));
             tx.execute("UPDATE transactions SET amount_in_entity_currency = ?2, amount_in_entity_minor = ?3 WHERE id = ?1", params![id, v.to_string(), to_minor(v)])?;
@@ -1176,7 +1337,7 @@ impl Db {
     }
 
     pub fn update_account(&self, a: &Account) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         tx.execute(
             "UPDATE accounts SET name = ?2, ofx_bank_id = ?3, ofx_intu_bid = ?4, entity_id = ?5, hidden = ?6, currency = ?7 WHERE id = ?1",
             params![a.id, a.name, a.ofx_bank_id, a.ofx_intu_bid, a.entity_id, a.hidden, a.currency.code()],
@@ -1213,11 +1374,12 @@ impl Db {
         let masked = s.account_last4.as_ref().map(|l| format!("••{l}")).unwrap_or_default();
         let pid = profile.map(|p| p.id);
         let name = Self::new_account_name(profile, s);
+        let id = self.next_id("accounts")?;
         self.conn.execute(
-            "INSERT INTO accounts (entity_id, bank_profile_id, name, account_number_masked, account_type, currency, opening_balance, opening_balance_minor, opening_date) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,NULL)",
-            params![entity_id, pid, name, masked, s.account_type.as_str(), s.currency.code(), s.opening.unwrap_or_default().to_string(), to_minor(s.opening.unwrap_or_default())],
+            "INSERT INTO accounts (id, entity_id, bank_profile_id, name, account_number_masked, account_type, currency, opening_balance, opening_balance_minor, opening_date) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL)",
+            params![id, entity_id, pid, name, masked, s.account_type.as_str(), s.currency.code(), s.opening.unwrap_or_default().to_string(), to_minor(s.opening.unwrap_or_default())],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(id)
     }
 
     // ---------------------------------------------------------------- import
@@ -1303,15 +1465,17 @@ impl Db {
         let profiles = self.profiles()?;
         let profile = scan.profile_slug.as_ref().and_then(|s| profiles.iter().find(|p| &p.slug == s));
         let fx = self.fx()?;
-        let base: Currency = self.conn.query_row("SELECT base_currency FROM entities WHERE id = ?1", [entity_id], |r| r.get::<_, String>(0)).map(|s| ccy(&s))?;
         let rules = self.rules()?;
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         for (si, s) in scan.sections.iter().enumerate() {
             let account_id = match targets.get(si).copied().unwrap_or(Target::New) {
                 Target::Skip => continue,
                 Target::Existing(id) => id,
                 Target::New => self.create_account(entity_id, profile, s)?,
             };
+            // an account found in another workspace counts in that one's currency, under that one's rules
+            let (entity_id, base): (i64, Currency) =
+                tx.query_row("SELECT a.entity_id, e.base_currency FROM accounts a JOIN entities e ON e.id = a.entity_id WHERE a.id = ?1", [account_id], |r| Ok((r.get(0)?, ccy(&r.get::<_, String>(1)?))))?;
             // the account's previous statement: where this one has to start
             let mut s = std::borrow::Cow::Borrowed(s);
             let mut continuity: Vec<String> = Vec::new();
@@ -1401,6 +1565,10 @@ impl Db {
                 let n = seq.entry((t.posted, crate::money::round2(t.amount))).or_insert(0);
                 let fid = fitid(account_id, t.posted, t.amount, *n);
                 *n += 1;
+                // you deleted it: a rescan or another copy of the statement doesn't bring it back
+                if tx.query_row("SELECT COUNT(*) FROM deleted_rows WHERE account_id = ?1 AND fitid = ?2", params![account_id, fid], |r| r.get::<_, i64>(0))? > 0 {
+                    continue;
+                }
                 let stem = rules::merchant_stem(&t.description, &t.memo);
                 let (payee, _) = rules::known_merchant(&stem, &t.description);
                 let ent = entity_amount(&fx, t.amount, s.currency, base, t.fx_original, t.posted);
@@ -1445,10 +1613,14 @@ impl Db {
                 }
                 if n == 0 {
                     rep.duplicates += 1;
+                    tx.execute("INSERT OR IGNORE INTO shared_rows (document_id, transaction_id) SELECT ?1, id FROM transactions WHERE account_id = ?2 AND fitid = ?3", params![doc_id, account_id, fid])?;
                 } else {
                     rep.inserted += 1;
                     rep.auto_categorized += rule.is_some_and(|r| r.category_id.is_some()) as usize;
                 }
+            }
+            if why.is_empty() {
+                self.claim_rows(doc_id)?;
             }
         }
         tx.commit()?;
@@ -1523,9 +1695,47 @@ impl Db {
         Ok(())
     }
 
-    /// Deletes the whole statement (every section of the same file) and its transactions.
+    /// Deletes the whole statement (every section of the same file), its transactions and its kept PDF.
+    /// Rows another statement also lists (an overlapping period) stay, with that statement.
     pub fn delete_document(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM documents WHERE sha256_hash = (SELECT sha256_hash FROM documents WHERE id = ?1)", [id])?;
+        let sha: String = self.conn.query_row("SELECT sha256_hash FROM documents WHERE id = ?1", [id], |r| r.get(0))?;
+        let tx = self.sp()?;
+        self.drop_documents(&sha)?;
+        tx.commit()?;
+        self.drop_unused_pdf(&sha)
+    }
+
+    /// Every section of one file goes; rows another statement also lists move to it (one that counts first).
+    fn drop_documents(&self, sha256: &str) -> Result<()> {
+        let moves: Vec<(i64, i64)> = {
+            let mut st = self.conn.prepare(
+                "SELECT t.id, (SELECT s.document_id FROM shared_rows s JOIN documents o ON o.id = s.document_id WHERE s.transaction_id = t.id AND o.sha256_hash != ?1 ORDER BY o.review_hold, o.id LIMIT 1) AS other
+                 FROM transactions t JOIN documents d ON d.id = t.document_id WHERE d.sha256_hash = ?1 AND other IS NOT NULL",
+            )?;
+            st.query_map([sha256], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        for (t, other) in moves {
+            self.conn.execute("UPDATE transactions SET document_id = ?2 WHERE id = ?1", params![t, other])?;
+            self.conn.execute("DELETE FROM shared_rows WHERE document_id = ?2 AND transaction_id = ?1", params![t, other])?;
+        }
+        self.conn.execute("DELETE FROM documents WHERE sha256_hash = ?1", [sha256])?;
+        Ok(())
+    }
+
+    /// A statement that counts takes over the rows it lists from statements still waiting for review, so a
+    /// held copy (an OCR read of the same month) can't keep them out of view. The held one still lists them.
+    fn claim_rows(&self, doc_id: i64) -> Result<()> {
+        let rows: Vec<(i64, i64)> = {
+            let mut st = self.conn.prepare(
+                "SELECT t.id, t.document_id FROM shared_rows s JOIN transactions t ON t.id = s.transaction_id JOIN documents d ON d.id = t.document_id WHERE s.document_id = ?1 AND d.review_hold = 1",
+            )?;
+            st.query_map([doc_id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        for (t, owner) in rows {
+            self.conn.execute("UPDATE transactions SET document_id = ?2 WHERE id = ?1", params![t, doc_id])?;
+            self.conn.execute("DELETE FROM shared_rows WHERE document_id = ?2 AND transaction_id = ?1", params![t, doc_id])?;
+            self.conn.execute("INSERT OR IGNORE INTO shared_rows (document_id, transaction_id) VALUES (?1, ?2)", params![owner, t])?;
+        }
         Ok(())
     }
 
@@ -1540,8 +1750,64 @@ impl Db {
     }
 
     /// Swap a statement for a fresh scan of it: its old sections and transactions go, the new ones
-    /// come in through the normal import (rules applied, transfers re-matched).
+    /// come in through the normal import (rules applied, transfers re-matched). Each section goes back to
+    /// the account it was in (matched by account number and currency, not position), and stays approved
+    /// if it was, unless it stops adding up.
     pub fn replace_statement(&self, entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult) -> Result<ImportReport> {
+        // deleted while a Rescan All was running: not brought back
+        let old: Vec<(i64, bool, String, String)> = {
+            let mut st = self.conn.prepare(
+                "SELECT d.account_id, d.review_hold, a.account_number_masked, a.currency FROM documents d JOIN accounts a ON a.id = d.account_id WHERE d.sha256_hash = ?1 ORDER BY d.section_index",
+            )?;
+            st.query_map([sha256], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        if old.is_empty() {
+            return Err(Error("that statement is no longer in FinGraph".into()));
+        }
+        let mut targets = self.plan_import(sha256, scan)?.default_targets();
+        let mut approved = Vec::new();
+        let mut used = vec![false; old.len()];
+        for (si, s) in scan.sections.iter().enumerate() {
+            let masked = s.account_last4.as_ref().map(|l| format!("••{l}")).unwrap_or_default();
+            let free = |i: usize, o: &(i64, bool, String, String)| !used[i] && o.3 == s.currency.code();
+            // an unnumbered section you put in an account by hand: the same place in the statement
+            let hit = old.iter().enumerate().position(|(i, o)| free(i, o) && o.2 == masked).or_else(|| (s.account_last4.is_none() && old.get(si).is_some_and(|o| free(si, o))).then_some(si));
+            if let Some(i) = hit {
+                used[i] = true;
+                if let Some(t) = targets.get_mut(si) {
+                    *t = Target::Existing(old[i].0);
+                }
+                if !old[i].1 {
+                    approved.push(si);
+                }
+            }
+        }
+        // the OCR mark comes back from the scan itself; strip it so the name doesn't grow
+        let filename = filename.trim_end_matches(" (read by OCR)");
+        self.swap(&[sha256.to_string()], entity_id, filename, sha256, scan, &targets, &approved)
+    }
+
+    /// The import's "Replace": the statements in `old` (the same account and period, from another file) go,
+    /// this one comes in where `targets` say, with what you changed by hand carried across.
+    pub fn replace_with(&self, old: &[i64], entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult, targets: &[Target]) -> Result<ImportReport> {
+        let mut shas = Vec::new();
+        for id in old {
+            let sha: String = self.conn.query_row("SELECT sha256_hash FROM documents WHERE id = ?1", [id], |r| r.get(0))?;
+            if !shas.contains(&sha) && sha != sha256 {
+                shas.push(sha);
+            }
+        }
+        let rep = self.swap(&shas, entity_id, filename, sha256, scan, targets, &[])?;
+        for sha in &shas {
+            self.drop_unused_pdf(sha)?;
+        }
+        Ok(rep)
+    }
+
+    /// One transaction: the `old` statements go, `scan` comes in, hand edits are put back. Any error
+    /// leaves the ledger as it was.
+    #[allow(clippy::too_many_arguments)]
+    fn swap(&self, old: &[String], entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult, targets: &[Target], approved: &[usize]) -> Result<ImportReport> {
         // what you changed by hand, by transaction fingerprint, so a rescan doesn't lose it
         struct Kept {
             account: i64,
@@ -1552,67 +1818,63 @@ impl Db {
             business: Option<i64>,
             subscription: bool,
             confirmed: bool,
+            memo: Option<String>,
             manual: Option<(NaiveDate, String, Decimal, String)>,
             splits: Vec<crate::workflows::SplitLine>,
         }
-        let keep = self.prefs().rescan_keeps_edits;
-        let kept: Vec<Kept> = if keep {
-            let mut st = self.conn.prepare(
-                "SELECT t.account_id, t.fitid, t.category_id, t.clean_payee, t.sub_entity_tag, t.business_entity_id, t.is_subscription, t.review_status, t.posted_date, t.raw_description, t.amount, t.memo
-                 FROM transactions t JOIN documents d ON d.id = t.document_id WHERE d.sha256_hash = ?1",
-            )?;
-            let rows = st.query_map([sha256], |r| {
-                let memo: String = r.get(11)?;
-                Ok(Kept {
-                    account: r.get(0)?,
-                    fitid: r.get(1)?,
-                    category: r.get(2)?,
-                    payee: r.get(3)?,
-                    tag: r.get(4)?,
-                    business: r.get(5)?,
-                    subscription: r.get(6)?,
-                    confirmed: r.get::<_, String>(7)? == "Confirmed",
-                    manual: memo.starts_with("Converted from skipped line").then(|| (date(&r.get::<_, String>(8).unwrap_or_default()), r.get(9).unwrap_or_default(), dec(&r.get::<_, String>(10).unwrap_or_default()), memo.clone())),
-                    splits: Vec::new(),
-                })
-            })?;
-            let mut v: Vec<Kept> = rows.collect::<rusqlite::Result<_>>()?;
-            for k in &mut v {
-                if let Some(id) = self.conn.query_row("SELECT id FROM transactions WHERE account_id = ?1 AND fitid = ?2", params![k.account, k.fitid], |r| r.get::<_, i64>(0)).optional()? {
-                    k.splits = self.splits(id)?;
-                }
-            }
-            v
-        } else {
-            Vec::new()
-        };
         // a read that found nothing never replaces the statement you have
         if nothing_read(scan) {
             return Err(Error("the new read found no transactions or balances; the statement was left as it was".into()));
         }
-        // same accounts as before, and what was already approved stays approved unless it stops adding up
-        let old: Vec<(i64, i64, bool)> = {
-            let mut st = self.conn.prepare("SELECT section_index, account_id, review_hold FROM documents WHERE sha256_hash = ?1")?;
-            st.query_map([sha256], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?
-        };
-        let mut targets = self.plan_import(sha256, scan)?.default_targets();
-        for &(si, account, _) in &old {
-            if let Some(t) = targets.get_mut(si as usize) {
-                *t = Target::Existing(account);
+        let mut kept: Vec<Kept> = Vec::new();
+        if self.prefs().rescan_keeps_edits {
+            let mut st = self.conn.prepare(
+                "SELECT t.account_id, t.fitid, t.category_id, t.clean_payee, t.sub_entity_tag, t.business_entity_id, t.is_subscription, t.review_status, t.posted_date, t.raw_description, t.amount, t.memo, t.memo_edited, t.id
+                 FROM transactions t JOIN documents d ON d.id = t.document_id WHERE d.sha256_hash = ?1",
+            )?;
+            for sha in old {
+                let rows = st.query_map([sha], |r| {
+                    let memo: String = r.get(11)?;
+                    Ok((
+                        r.get::<_, i64>(13)?,
+                        Kept {
+                            account: r.get(0)?,
+                            fitid: r.get(1)?,
+                            category: r.get(2)?,
+                            payee: r.get(3)?,
+                            tag: r.get(4)?,
+                            business: r.get(5)?,
+                            subscription: r.get(6)?,
+                            confirmed: r.get::<_, String>(7)? == "Confirmed",
+                            memo: r.get::<_, bool>(12)?.then(|| memo.clone()),
+                            manual: memo.starts_with("Converted from skipped line").then(|| (date(&r.get::<_, String>(8).unwrap_or_default()), r.get(9).unwrap_or_default(), dec(&r.get::<_, String>(10).unwrap_or_default()), memo.clone())),
+                            splits: Vec::new(),
+                        },
+                    ))
+                })?;
+                for row in rows {
+                    let (id, mut k) = row?;
+                    k.splits = self.splits(id)?;
+                    kept.push(k);
+                }
             }
         }
-        let approved: Vec<usize> = old.iter().filter(|o| !o.2).map(|o| o.0 as usize).collect();
-        // the OCR mark comes back from the scan itself; strip it so the name doesn't grow
-        let filename = filename.trim_end_matches(" (read by OCR)");
-        self.conn.execute("DELETE FROM documents WHERE sha256_hash = ?1", [sha256])?;
-        let rep = self.import_scan_reviewed(entity_id, filename, sha256, scan, &targets, &approved)?;
+        let sp = self.sp()?;
+        for sha in old {
+            self.drop_documents(sha)?;
+        }
+        let rep = self.import_scan_reviewed(entity_id, filename, sha256, scan, targets, approved)?;
         for k in kept {
             let id: Option<i64> = self.conn.query_row("SELECT id FROM transactions WHERE account_id = ?1 AND fitid = ?2", params![k.account, k.fitid], |r| r.get(0)).optional()?;
             let id = match (id, &k.manual) {
                 (Some(id), _) => Some(id),
                 // a line you converted in the inspector: put it back unless the scanner now reads it itself
                 (None, Some((day, desc, amt, memo))) => {
-                    let found: i64 = self.conn.query_row("SELECT COUNT(*) FROM transactions WHERE account_id = ?1 AND posted_date = ?2 AND amount = ?3", params![k.account, day.to_string(), amt.to_string()], |r| r.get(0))?;
+                    let found: i64 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM transactions WHERE account_id = ?1 AND posted_date = ?2 AND amount_minor = ?3",
+                        params![k.account, day.to_string(), to_minor(*amt)],
+                        |r| r.get(0),
+                    )?;
                     let doc: Option<i64> = self.conn.query_row("SELECT id FROM documents WHERE sha256_hash = ?1 AND account_id = ?2", params![sha256, k.account], |r| r.get(0)).optional()?;
                     if found == 0 { Some(self.add_manual(k.account, doc, *day, desc, *amt, memo)?) } else { None }
                 }
@@ -1632,6 +1894,9 @@ impl Db {
             if !k.tag.is_empty() {
                 self.set_tag(&[id], &k.tag)?;
             }
+            if let Some(m) = &k.memo {
+                self.set_memo(id, m)?;
+            }
             if k.business.is_some() {
                 self.set_business(&[id], k.business)?;
             }
@@ -1640,6 +1905,7 @@ impl Db {
             }
         }
         self.recheck_documents(sha256)?;
+        sp.commit()?;
         Ok(rep)
     }
 
@@ -1660,7 +1926,25 @@ impl Db {
 
     /// Remove a workspace and everything in it: accounts, statements, transactions, its rules.
     pub fn delete_entity(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM entities WHERE id = ?1", [id])?;
+        let shas: Vec<String> = {
+            let mut st = self.conn.prepare("SELECT DISTINCT d.sha256_hash FROM documents d JOIN accounts a ON a.id = d.account_id WHERE a.entity_id = ?1")?;
+            st.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        let tx = self.sp()?;
+        for sha in &shas {
+            self.drop_documents(sha)?;
+        }
+        // kept by workspace id without a foreign key
+        tx.execute("DELETE FROM manual_values WHERE item_id IN (SELECT id FROM manual_items WHERE entity_id = ?1)", [id])?;
+        tx.execute("DELETE FROM manual_items WHERE entity_id = ?1", [id])?;
+        tx.execute("DELETE FROM attachments WHERE account_id IN (SELECT id FROM accounts WHERE entity_id = ?1)", [id])?;
+        tx.execute("DELETE FROM reimbursements WHERE account_id IN (SELECT id FROM accounts WHERE entity_id = ?1)", [id])?;
+        tx.execute("DELETE FROM settings WHERE key LIKE 'apr:%' AND CAST(substr(key, 5) AS INTEGER) IN (SELECT id FROM accounts WHERE entity_id = ?1)", [id])?;
+        tx.execute("DELETE FROM entities WHERE id = ?1", [id])?;
+        tx.commit()?;
+        for sha in &shas {
+            self.drop_unused_pdf(sha)?;
+        }
         Ok(())
     }
 
@@ -1690,7 +1974,7 @@ impl Db {
         let scope: Vec<i64> = if entity_ids.is_empty() { all.clone() } else { entity_ids.to_vec() };
         let everything = all.iter().all(|e| scope.contains(e));
         let rows = self.transactions(&TxFilter { entity_ids: scope.clone(), ..Default::default() })?;
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         for e in &scope {
             tx.execute("DELETE FROM learned_rules WHERE entity_id = ?1", [e])?;
         }
@@ -1708,9 +1992,15 @@ impl Db {
                     "UPDATE transactions SET category_id = NULL, clean_payee = ?2, is_subscription = 0, business_entity_id = NULL, review_status = 'NeedsReview' WHERE id = ?1",
                     params![t.id, payee],
                 )?;
+                // no longer a business expense: nothing owed back for it
+                if t.business_entity_id.is_some() {
+                    tx.execute("DELETE FROM reimbursements WHERE account_id = ?1 AND fitid = ?2 AND split_seq = -1", params![t.account_id, t.fitid])?;
+                }
                 n += 1;
             }
         }
+        // a row that left a business workspace counts in its own workspace's currency again
+        self.revalue(None)?;
         tx.commit()?;
         Ok(n)
     }
@@ -1743,6 +2033,8 @@ impl Db {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )?;
         let mut out = Approval::default();
+        // all of it or none of it: an error part-way leaves the statement held, as it says
+        let sp = self.sp()?;
         self.conn.execute("UPDATE documents SET review_hold = 0, review_note = '' WHERE id = ?1", [doc_id])?;
         let why = Review::parse_list(&note);
         let profile = self.profiles()?.into_iter().find(|p| Some(p.id) == profile_id);
@@ -1803,9 +2095,21 @@ impl Db {
                 out.sample = std::fs::write(dir.join(&name), json).ok().map(|_| dir.join(name));
             }
         }
+        // statements that count now take their rows back from held copies of them
+        let claim: Vec<i64> = {
+            let mut st = self.conn.prepare(
+                "SELECT DISTINCT s.document_id FROM shared_rows s JOIN documents nd ON nd.id = s.document_id JOIN transactions t ON t.id = s.transaction_id
+                 JOIN documents od ON od.id = t.document_id WHERE nd.review_hold = 0 AND od.review_hold = 1",
+            )?;
+            st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        for d in claim {
+            self.claim_rows(d)?;
+        }
         self.match_transfers()?;
         self.mark_card_payments()?;
         self.mark_recurring()?;
+        sp.commit()?;
         Ok(out)
     }
 
@@ -2021,7 +2325,7 @@ impl Db {
     }
 
     pub fn set_category(&self, ids: &[i64], category_id: Option<i64>) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         for id in ids {
             tx.execute("UPDATE transactions SET category_id = ?2, review_status = 'Confirmed' WHERE id = ?1", params![id, category_id])?;
         }
@@ -2042,7 +2346,7 @@ impl Db {
     }
 
     pub fn set_memo(&self, id: i64, memo: &str) -> Result<()> {
-        self.conn.execute("UPDATE transactions SET memo = ?2 WHERE id = ?1", params![id, memo])?;
+        self.conn.execute("UPDATE transactions SET memo = ?2, memo_edited = 1 WHERE id = ?1", params![id, memo])?;
         Ok(())
     }
 
@@ -2057,7 +2361,7 @@ impl Db {
     /// The workspace amount is recalculated in case the business keeps a different currency.
     pub fn set_business(&self, ids: &[i64], business: Option<i64>) -> Result<()> {
         let fx = self.fx()?;
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         for id in ids {
             let (amt, cur, memo, home, day): (String, String, String, i64, String) = tx.query_row(
                 "SELECT t.amount, t.currency, t.memo, a.entity_id, t.posted_date FROM transactions t JOIN accounts a ON a.id = t.account_id WHERE t.id = ?1",
@@ -2081,7 +2385,12 @@ impl Db {
         let fx = self.fx()?;
         let ent = entity_amount(&fx, amount, ccy(&cur), ccy(&base), None, posted);
         let stem = rules::merchant_stem(description, "");
-        let seq: i64 = self.conn.query_row("SELECT COUNT(*) FROM transactions WHERE account_id = ?1 AND posted_date = ?2", params![account_id, posted.to_string()], |r| r.get(0))?;
+        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM transactions WHERE account_id = ?1 AND posted_date = ?2", params![account_id, posted.to_string()], |r| r.get(0))?;
+        // the first free number: after a delete the count goes down, the fingerprints already used don't
+        let mut seq = 1000 + n as usize;
+        while self.conn.query_row("SELECT COUNT(*) FROM transactions WHERE account_id = ?1 AND fitid = ?2", params![account_id, fitid(account_id, posted, amount, seq)], |r| r.get::<_, i64>(0))? > 0 {
+            seq += 1;
+        }
         self.conn.execute(
             "INSERT INTO transactions (document_id, account_id, posted_date, raw_description, clean_payee, amount, amount_minor, currency, amount_in_entity_currency, amount_in_entity_minor, memo, fitid, review_status)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'Confirmed')",
@@ -2097,17 +2406,20 @@ impl Db {
                 ent.to_string(),
                 to_minor(ent),
                 memo,
-                fitid(account_id, posted, amount, 1000 + seq as usize)
+                fitid(account_id, posted, amount, seq)
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Deleted for good: a rescan or another copy of the statement doesn't bring them back.
     pub fn delete_transactions(&self, ids: &[i64]) -> Result<()> {
+        let tx = self.sp()?;
         for id in ids {
-            self.conn.execute("DELETE FROM transactions WHERE id = ?1", [id])?;
+            tx.execute("INSERT OR IGNORE INTO deleted_rows (account_id, fitid) SELECT account_id, fitid FROM transactions WHERE id = ?1", [id])?;
+            tx.execute("DELETE FROM transactions WHERE id = ?1", [id])?;
         }
-        Ok(())
+        tx.commit()
     }
 
     // ---------------------------------------------------------------- categories & rules
@@ -2177,7 +2489,7 @@ impl Db {
     pub fn apply_rule(&self, rule: &Rule, force: bool) -> Result<usize> {
         // a workspace rule covers what that workspace's accounts paid, wherever it was booked
         let rows: Vec<TxRow> = self.transactions(&TxFilter::default())?.into_iter().filter(|t| rule.entity_id.is_none_or(|e| e == t.account_entity_id || e == t.entity_id)).collect();
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         let mut n = 0;
         for t in rows.iter().filter(|t| rule.applies(&t.raw_description, &t.memo, t.amount)) {
             if t.review == ReviewStatus::Confirmed && !force && t.category_id.is_some() {
@@ -2229,7 +2541,7 @@ impl Db {
             }
         }
         let rows = self.transactions(&TxFilter { uncategorized_only: true, ..Default::default() })?;
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         let mut n = 0;
         for t in rows.iter().filter(|t| t.review != ReviewStatus::Confirmed) {
             let Some((cat, name)) = rules::auto_category(&t.raw_description, &t.memo, p.auto_keywords) else { continue };
@@ -2260,6 +2572,10 @@ impl Db {
         // "Transfer to 2197": the account whose last four digits the description names is the likely other side
         let last4: std::collections::HashMap<i64, String> = self.accounts()?.into_iter().map(|a| (a.id, a.account_number_masked.trim_start_matches('•').to_string())).collect();
         let names = |a: &TxRow, b: &TxRow| last4.get(&b.account_id).is_some_and(|l| l.len() == 4 && names_account(&crate::merchants::tokens(&format!("{} {}", a.raw_description, a.memo)), l));
+        let apart: std::collections::HashSet<(i64, String, i64, String)> = {
+            let mut st = self.conn.prepare("SELECT account_a, fitid_a, account_b, fitid_b FROM unpaired")?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?
+        };
         let mut used = std::collections::HashSet::new();
         let mut pairs = Vec::new();
         for a in rows.iter().filter(|t| t.amount.is_sign_negative()) {
@@ -2269,6 +2585,7 @@ impl Db {
             let best = rows
                 .iter()
                 .filter(|b| b.amount.is_sign_positive() && b.account_id != a.account_id && !used.contains(&b.id))
+                .filter(|b| !apart.contains(&(a.account_id, a.fitid.clone(), b.account_id, b.fitid.clone())))
                 .filter(|b| (b.posted - a.posted).num_days().abs() <= 5)
                 .filter(|b| rules::looks_like_transfer(&a.raw_description, &a.memo) || rules::looks_like_transfer(&b.raw_description, &b.memo) || names(a, b))
                 .filter(|b| {
@@ -2286,7 +2603,7 @@ impl Db {
                 pairs.push((a.id, b.id));
             }
         }
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         for (a, b) in &pairs {
             for (x, y) in [(a, b), (b, a)] {
                 tx.execute(
@@ -2316,7 +2633,7 @@ impl Db {
             .collect();
         let is_card = |id: i64| accts.iter().any(|a| a.id == id && a.account_type == AccountType::CreditCard);
         let rows = self.transactions(&TxFilter::default())?;
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         let mut n = 0;
         for t in &rows {
             if t.review == ReviewStatus::Confirmed && t.category_id.is_some() && t.category_id != transfers && t.category_id != Some(cat) {
@@ -2358,9 +2675,22 @@ impl Db {
         Ok(n)
     }
 
+    /// Not a transfer after all: the pair stays apart (the next import doesn't pair it again), and loses the
+    /// Transfers category the pairing gave it.
     pub fn unlink_transfer(&self, id: i64) -> Result<()> {
-        self.conn.execute("UPDATE transactions SET transfer_peer_tx_id = NULL WHERE id = ?1 OR transfer_peer_tx_id = ?1", [id])?;
-        Ok(())
+        let t = self.transaction(id)?;
+        let Some(peer) = t.transfer_peer else { return Ok(()) };
+        let p = self.transaction(peer)?;
+        let tx = self.sp()?;
+        tx.execute("INSERT OR IGNORE INTO unpaired VALUES (?1, ?2, ?3, ?4), (?3, ?4, ?1, ?2)", params![t.account_id, t.fitid, p.account_id, p.fitid])?;
+        let transfers = self.category_id("Transfers")?;
+        for r in [&t, &p] {
+            tx.execute("UPDATE transactions SET transfer_peer_tx_id = NULL WHERE id = ?1", [r.id])?;
+            if r.category_id.is_some() && r.category_id == transfers {
+                tx.execute("UPDATE transactions SET category_id = NULL, review_status = 'NeedsReview' WHERE id = ?1", [r.id])?;
+            }
+        }
+        tx.commit()
     }
 
     /// Flag merchants charged on a steady cadence as recurring.
@@ -2370,7 +2700,7 @@ impl Db {
         for t in rows.iter().filter(|t| t.amount.is_sign_negative() && !t.is_transfer()) {
             by.entry((t.account_id, rules::merchant_stem(&t.raw_description, &t.memo))).or_default().push(t);
         }
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         for v in by.values().filter(|v| v.len() >= 3) {
             let dates: Vec<NaiveDate> = v.iter().map(|t| t.posted).collect();
             if rules::cadence(&dates).is_some() {

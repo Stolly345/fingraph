@@ -61,7 +61,7 @@ fn cadence_word(days: Option<i64>) -> &'static str {
 pub fn reset_and_retriage(app: &Rc<App>) {
     let d = adw::AlertDialog::new(
         Some("Reset Learning?"),
-        Some("Every learned rule, category, payee name and subscription flag in the workspaces you're viewing is forgotten, and Smart Triage starts over. Transfers matched between your own accounts stay matched. Your statements aren't touched."),
+        Some("Every learned rule, category, payee name, subscription flag and business flag in the workspaces you're viewing is forgotten, and Smart Triage starts over. Transfers matched between your own accounts stay matched. Your statements aren't touched."),
     );
     d.add_responses(&[("cancel", "Cancel"), ("reset", "Reset & Re-triage")]);
     d.set_response_appearance("reset", adw::ResponseAppearance::Destructive);
@@ -71,7 +71,9 @@ pub fn reset_and_retriage(app: &Rc<App>) {
         if r != "reset" {
             return;
         }
-        let _ = a.db.auto_backup("before-reset");
+        if let Err(e) = a.db.auto_backup("before-reset") {
+            return a.toast(&format!("Couldn't make the backup first, so nothing was reset: {e}"));
+        }
         match a.db.reset_learning(&a.entity_ids()) {
             Ok(n) => {
                 a.toast(&format!("Forgotten — {n} transactions are back in triage"));

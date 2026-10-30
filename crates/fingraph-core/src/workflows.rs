@@ -3,7 +3,7 @@
 //! statement is there (coverage and balance continuity between statements).
 
 use chrono::{Duration, NaiveDate};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -50,7 +50,7 @@ impl Db {
                 return Err(Error("a split line can't be zero".into()));
             }
         }
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         tx.execute("DELETE FROM splits WHERE transaction_id = ?1", [tx_id])?;
         for (i, l) in lines.iter().enumerate() {
             tx.execute(
@@ -194,7 +194,7 @@ impl Db {
     /// Mark these items as paid back by `paid_tx` (a transfer in, now filed under Transfers).
     pub fn record_reimbursement(&self, items: &[OwedItem], paid_tx: i64) -> Result<()> {
         let p = self.transaction(paid_tx)?;
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.sp()?;
         for i in items {
             tx.execute(
                 "INSERT OR REPLACE INTO reimbursements (account_id, fitid, split_seq, paid_account_id, paid_fitid, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
@@ -237,9 +237,11 @@ impl Db {
         let stored = format!("{sha}{ext}");
         let dir = self.attachments_dir();
         std::fs::create_dir_all(&dir)?;
+        db::private(&dir, 0o700);
         let dst = dir.join(&stored);
         if !dst.exists() {
             std::fs::copy(src, &dst)?;
+            db::private(&dst, 0o600);
         }
         let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| stored.clone());
         self.conn.execute(
@@ -257,8 +259,15 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Its file goes too once nothing else is attached to it.
     pub fn detach(&self, attachment_id: i64) -> Result<()> {
+        let stored: Option<String> = self.conn.query_row("SELECT stored FROM attachments WHERE id = ?1", [attachment_id], |r| r.get(0)).optional()?;
         self.conn.execute("DELETE FROM attachments WHERE id = ?1", [attachment_id])?;
+        if let Some(stored) = stored
+            && self.conn.query_row("SELECT COUNT(*) FROM attachments WHERE stored = ?1", [&stored], |r| r.get::<_, i64>(0))? == 0
+        {
+            let _ = std::fs::remove_file(self.attachments_dir().join(stored));
+        }
         Ok(())
     }
 
@@ -268,6 +277,7 @@ impl Db {
         std::fs::create_dir_all(dir)?;
         let mut n = 0;
         let mut seen = HashSet::new();
+        let mut written = HashSet::new();
         for t in rows.iter().filter(|t| t.attachments > 0) {
             if !seen.insert(t.id) {
                 continue;
@@ -275,8 +285,11 @@ impl Db {
             for (k, a) in self.attachments(t.id)?.into_iter().enumerate() {
                 let ext = a.path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
                 let safe: String = t.clean_payee.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect();
-                let name = format!("{} {} {}{}{ext}", t.posted, safe.trim(), t.amount.abs(), if k > 0 { format!(" ({})", k + 1) } else { String::new() });
+                // two receipts that would share a name (same day, payee and amount) both get written
+                let base = format!("{} {} {}", t.posted, safe.trim(), t.amount.abs());
+                let name = (k + 1..).map(|i| if i > 1 { format!("{base} ({i}){ext}") } else { format!("{base}{ext}") }).find(|n| !written.contains(n)).unwrap_or_default();
                 if a.path.exists() {
+                    written.insert(name.clone());
                     std::fs::copy(&a.path, dir.join(name))?;
                     n += 1;
                 }

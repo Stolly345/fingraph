@@ -246,7 +246,7 @@ fn import(app: &Rc<App>) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder().name("import").title("Import").icon_name("document-open-symbolic").build();
 
     let keep = adw::PreferencesGroup::builder().title("Statement Copies").description("Every imported PDF is kept here so it can be rescanned later.").build();
-    let dir = p.statements_dir();
+    let dir = app.db.statements_dir();
     let row = adw::ActionRow::builder().title(glib::markup_escape_text(&dir.display().to_string())).subtitle(human(size_of(&dir))).subtitle_selectable(true).build();
     let open = button("Open");
     let mv = button("Move…");
@@ -257,7 +257,7 @@ fn import(app: &Rc<App>) -> adw::PreferencesPage {
         let w = Rc::downgrade(app);
         open.connect_clicked(move |_| {
             if let Some(a) = w.upgrade() {
-                open_folder(&a, &a.db.prefs().statements_dir());
+                open_folder(&a, &a.db.statements_dir());
             }
         });
     }
@@ -267,7 +267,7 @@ fn import(app: &Rc<App>) -> adw::PreferencesPage {
             let Some(a) = w.upgrade() else { return };
             let row = row.clone();
             pick_folder(&a, "Move Statement Copies To", move |a, to| match a.db.move_statements_dir(&to) {
-                Ok(n) => {
+                Ok((n, to)) => {
                     row.set_title(&glib::markup_escape_text(&to.display().to_string()));
                     a.toast(&format!("Moved {n} statements"));
                 }
@@ -550,7 +550,9 @@ fn workspaces(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPa
                 let count = a.db.transactions(&TxFilter { entity_ids: vec![id], ..Default::default() }).map(|r| r.len()).unwrap_or(0);
                 let dlg = dlg.clone();
                 confirm(&a, &format!("Delete “{n}”?"), &format!("Its accounts, statements, {count} transactions and its rules are removed. A backup is made first when automatic backups are on."), "Delete", move |a| {
-                    let _ = a.db.auto_backup("before-delete-workspace");
+                    if let Err(e) = a.db.auto_backup("before-delete-workspace") {
+                        return a.toast(&format!("Couldn't make the backup first, so nothing was deleted: {e}"));
+                    }
                     match a.db.delete_entity(id) {
                         Ok(()) => a.toast("Workspace deleted"),
                         Err(e) => a.toast(&e.to_string()),
@@ -715,7 +717,9 @@ fn data(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPage {
                 let (Some(a), Some(src)) = (w.upgrade(), res.ok().and_then(|f| f.path())) else { return };
                 let dlg = dlg.clone();
                 confirm(&a, "Restore this backup?", &format!("Everything in FinGraph is replaced by “{}”. Your current ledger is backed up first when automatic backups are on.", src.display()), "Restore", move |a| {
-                    let _ = a.db.auto_backup("before-restore");
+                    if let Err(e) = a.db.auto_backup("before-restore") {
+                        return a.toast(&format!("Couldn't back up your current ledger first, so nothing was restored: {e}"));
+                    }
                     match a.db.restore_from(&src) {
                         Ok(()) => {
                             a.toast("Restored");
@@ -805,9 +809,13 @@ fn erase_dialog(app: &Rc<App>, prefs: &adw::PreferencesDialog) {
         if r != "erase" {
             return;
         }
-        let _ = a.db.auto_backup("before-erase");
-        if pdfs.is_active() {
-            let _ = std::fs::remove_dir_all(a.db.prefs().statements_dir());
+        if let Err(e) = a.db.auto_backup("before-erase") {
+            return a.toast(&format!("Couldn't make the backup first, so nothing was erased: {e}"));
+        }
+        if pdfs.is_active()
+            && let Err(e) = a.db.delete_kept_pdfs()
+        {
+            return a.toast(&format!("Couldn't delete the kept statement PDFs, so nothing was erased: {e}"));
         }
         match a.db.erase_all() {
             Ok(()) => {

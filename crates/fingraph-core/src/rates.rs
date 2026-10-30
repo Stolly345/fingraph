@@ -16,6 +16,8 @@ pub const FRANKFURTER: &str = "https://api.frankfurter.dev";
 pub const FALLBACK_FROM: (i32, u32, u32) = (2024, 3, 2);
 /// At most this many days are fetched one by one from the fallback in one go.
 const FALLBACK_MAX_DAYS: i64 = 120;
+/// The fallback gives up after this many days in a row it couldn't reach (offline: seconds, not an hour).
+const FALLBACK_MAX_MISSES: usize = 3;
 
 /// Rates downloaded for a stretch of days: (day, currency, units per US dollar), and where they came from.
 #[derive(Debug, Clone, Default)]
@@ -26,7 +28,7 @@ pub struct Downloaded {
 
 fn get(url: &str) -> Result<String> {
     let out = Command::new("curl")
-        .args(["-sS", "--fail", "--max-time", "25", "-A", "FinGraph (personal finance; exchange rates)", url])
+        .args(["-q", "-sS", "--fail", "--max-time", "25", "-A", "FinGraph (personal finance; exchange rates)", url])
         .output()
         .map_err(|e| Error(format!("couldn't run curl: {e}")))?;
     if !out.status.success() {
@@ -80,13 +82,18 @@ pub fn download(want: &[Currency], from: NaiveDate, to: NaiveDate) -> Result<Dow
     let start = from.max(NaiveDate::from_ymd_opt(y, m, d).unwrap_or(from));
     let mut rates = Vec::new();
     let mut day = start;
-    while day <= to && (day - start).num_days() < FALLBACK_MAX_DAYS {
+    let mut misses = 0;
+    while day <= to && (day - start).num_days() < FALLBACK_MAX_DAYS && misses < FALLBACK_MAX_MISSES {
         let urls = [
             format!("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@{day}/v1/currencies/usd.json"),
             format!("https://{day}.currency-api.pages.dev/v1/currencies/usd.json"),
         ];
-        if let Some(json) = urls.iter().find_map(|u| get(u).ok()) {
-            rates.extend(parse_fallback(&json, &want));
+        match urls.iter().find_map(|u| get(u).ok()) {
+            Some(json) => {
+                misses = 0;
+                rates.extend(parse_fallback(&json, &want));
+            }
+            None => misses += 1,
         }
         day += Duration::days(1);
     }
