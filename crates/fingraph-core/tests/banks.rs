@@ -421,3 +421,85 @@ fn figures_in_a_detail_line_never_replace_the_amount() {
     let r = MultiPassScanner::new(&profiles::builtins()).scan_tokens(toks).unwrap();
     assert_exact(&r, &[spec]);
 }
+
+/// A line between transactions that doesn't start in the description column — a notice centred on the page, a
+/// remark starting in the date column's margin — is no transaction's next line: it's attached to neither.
+#[test]
+fn lines_outside_the_description_column_attach_to_no_transaction() {
+    let txs = vec![
+        DemoTx::new(d(2026, 1, 5), "POS PURCHASE", dec("-62.10")).memo("KIRK HOME CENTRE"),
+        DemoTx::new(d(2026, 1, 7), "POS PURCHASE", dec("-12.40")).memo("FOSTERS"),
+        DemoTx::new(d(2026, 1, 9), "ELECTRONIC CREDIT", dec("900.00")).memo("PAYROLL"),
+        DemoTx::new(d(2026, 1, 12), "CUC WEB PMT", dec("-210.00")),
+    ];
+    let spec = StatementSpec::new(Bank::Scotiabank, AccountType::Checking, Currency::KYD, "2045", dec("800.00"), (d(2025, 12, 16), d(2026, 1, 15)), txs);
+    let mut toks = demo::render(std::slice::from_ref(&spec));
+    // under FOSTERS' detail line: a notice centred on the page, then a remark starting at the left margin
+    let fosters = toks.iter().find(|t| t.text == "FOSTERS").unwrap().clone();
+    let date = toks.iter().filter(|t| t.page == fosters.page).map(|t| t.x0).fold(f64::MAX, f64::min);
+    let line = |x: f64, y: f64, words: &[&str]| -> Vec<fingraph_core::parser::Token> {
+        let mut x = x;
+        words.iter().map(|w| { let t = fingraph_core::parser::Token::new(fosters.page, x, y, x + 5.0 * w.len() as f64, y + fosters.h(), w); x += 5.0 * w.len() as f64 + 3.0; t }).collect()
+    };
+    toks.extend(line(fosters.x0 + 260.0, fosters.y0 + 4.0, &["PLEASE", "NOTE", "NEW", "HOURS"]));
+    toks.extend(line(date, fosters.y0 + 8.0, &["MEMBER", "DEPOSIT", "INSURANCE"]));
+    let r = MultiPassScanner::new(&profiles::builtins()).scan_tokens(toks).unwrap();
+    assert_exact(&r, std::slice::from_ref(&spec));
+    for t in &r.sections[0].transactions {
+        assert!(!t.memo.contains("HOURS") && !t.memo.contains("INSURANCE") && !t.description.contains("HOURS") && !t.description.contains("INSURANCE"), "{:?} {:?}", t.description, t.memo);
+    }
+}
+
+/// A statement that doesn't say what account it is and prints no running balance is held (a card and a bank
+/// account read its amounts in opposite directions, and both add up) — unless its own lines settle it: salary in,
+/// a fee and an ATM withdrawal out are a bank account's. One such line isn't enough.
+#[test]
+fn an_unstated_account_type_is_settled_by_its_lines_or_held() {
+    let lines: Vec<(&str, &str, &str)> = vec![
+        ("03/02/2026", "PAYROLL ACME LTD", "2,000.00"),
+        ("05/02/2026", "GROCERY MART", "-100.00"),
+        ("09/02/2026", "MONTHLY SERVICE FEE", "-15.00"),
+        ("14/02/2026", "ATM WITHDRAWAL", "-200.00"),
+        ("20/02/2026", "WATER AUTHORITY", "-60.00"),
+    ];
+    let render = |lines: &[(&str, &str, &str)], closing: &str| {
+        let mut t = Vec::new();
+        let mut y = 40.0;
+        let mut put = |x: f64, y: f64, s: &str| {
+            let mut x = x;
+            for w in s.split_whitespace() {
+                t.push(fingraph_core::parser::Token::new(1, x, y, x + 5.0 * w.len() as f64, y + 8.0, w));
+                x += 5.0 * w.len() as f64 + 3.0;
+            }
+        };
+        put(40.0, y, "Harbour Credit Union");
+        y += 14.0;
+        put(40.0, y, "Statement Period: 01/02/2026 to 28/02/2026");
+        y += 14.0;
+        put(40.0, y, "Opening Balance");
+        put(220.0, y, "1,000.00");
+        y += 12.0;
+        put(40.0, y, "Closing Balance");
+        put(220.0, y, closing);
+        y += 20.0;
+        put(40.0, y, "Date");
+        put(120.0, y, "Description");
+        put(420.0, y, "Amount");
+        for (d, desc, a) in lines {
+            y += 12.0;
+            put(40.0, y, d);
+            put(120.0, y, desc);
+            put(460.0 - 5.0 * a.len() as f64, y, a);
+        }
+        t
+    };
+    let read = |toks| MultiPassScanner::new(&[]).scan_tokens(toks).unwrap();
+    let r = read(render(&lines, "2,625.00"));
+    assert!(r.is_reconciled());
+    assert!(r.diagnostics.pass3.layout_notes.is_empty(), "salary, a fee and an ATM withdrawal settle it: {:?}", r.diagnostics.pass3.layout_notes);
+    // only one telling line (the salary): still held
+    let few: Vec<(&str, &str, &str)> = vec![lines[0], ("05/02/2026", "GROCERY MART", "-100.00"), ("20/02/2026", "WATER AUTHORITY", "-60.00")];
+    let r = read(render(&few, "2,840.00"));
+    assert!(r.is_reconciled());
+    assert!(r.diagnostics.pass3.layout_notes.iter().any(|n| n.contains("doesn't say whether it's a card")), "{:?}", r.diagnostics.pass3.layout_notes);
+}

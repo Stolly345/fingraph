@@ -125,7 +125,9 @@ impl<'a> MultiPassScanner<'a> {
     }
 }
 
-static FEE_WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:fees?|service\s+charges?|finance\s+charges?|overdraft\s+charges?)\b").unwrap());
+static FEE_WORDS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:fees?|service\s+charges?|finance\s+charges?|overdraft\s+charges?|interest\s+charged?|purchase\s+interest|cash\s+advance|atm\s+withdrawal)\b").unwrap()
+});
 static PAID_WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bpayment\s*(?:-\s*)?(?:received|thank\s*you)|\bthank\s+you\s+for\s+(?:your\s+)?payment|\bautopay\s+payment").unwrap());
 static PAY_WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:salary|payroll|direct\s+deposit)\b").unwrap());
 
@@ -135,6 +137,27 @@ static PAY_WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:salar
 /// only check that can see it: two or more lines that clearly disagree hold the statement (the type isn't
 /// changed — a person looks).
 fn polarity_note(s: &Section) -> Option<String> {
+    let (card, bank) = polarity_votes(s);
+    let liability = s.account_type.is_liability();
+    let (against, with) = if liability { (bank, card) } else { (card, bank) };
+    (against >= 2 && against > 2 * with).then(|| {
+        let (was, looks) = (s.account_type.label(), if liability { "a bank account" } else { "a credit card" });
+        format!("Read as {was}, but {against} of its lines (fees, payments, salary) move the balance the way {looks}'s would: if it is one, every amount's sign is the wrong way round")
+    })
+}
+
+/// Whether the lines' own wording confirms the account type read: two or more agree, none disagree.
+fn polarity_confirms(s: &Section) -> bool {
+    let (card, bank) = polarity_votes(s);
+    let (against, with) = if s.account_type.is_liability() { (bank, card) } else { (card, bank) };
+    with >= 2 && against == 0
+}
+
+/// Lines whose wording says which way they move a card's balance and a bank account's: (card, bank) votes. A
+/// charge, interest, a cash advance or an ATM withdrawal raises what a card owes and lowers a bank balance; a
+/// payment received does the opposite; salary raises a bank balance. The direction is the printed balance's, so
+/// it doesn't depend on which type the statement was read as.
+fn polarity_votes(s: &Section) -> (usize, usize) {
     let (mut card, mut bank) = (0, 0);
     for t in &s.transactions {
         let text = format!("{} {}", t.description, t.memo);
@@ -147,12 +170,7 @@ fn polarity_note(s: &Section) -> Option<String> {
             bank += 1;
         }
     }
-    let liability = s.account_type.is_liability();
-    let (against, with) = if liability { (bank, card) } else { (card, bank) };
-    (against >= 2 && against > 2 * with).then(|| {
-        let (was, looks) = (s.account_type.label(), if liability { "a bank account" } else { "a credit card" });
-        format!("Read as {was}, but {against} of its lines (fees, payments, salary) move the balance the way {looks}'s would: if it is one, every amount's sign is the wrong way round")
-    })
+    (card, bank)
 }
 
 /// Lines that open with a date and carry an amount, between the table's first and last rows, that no table
@@ -362,7 +380,7 @@ fn layout_notes(meta: &Meta, sections: &[Section], diag: &mut Diagnostics) {
     for s in sections {
         if let Some(note) = polarity_note(s) {
             diag.pass3.layout_notes.push(note);
-        } else if diag.pass1.type_unstated && !s.transactions.is_empty() && s.transactions.iter().all(|t| t.balance.is_none()) {
+        } else if diag.pass1.type_unstated && !s.transactions.is_empty() && s.transactions.iter().all(|t| t.balance.is_none()) && !polarity_confirms(s) {
             // no running balance and no word on what the account is: a card and a bank account read the same
             // amounts in opposite directions, and both add up
             diag.pass3.layout_notes.push(format!(
@@ -707,6 +725,29 @@ fn infer_order(rows: &[Row]) -> Order {
     if month > day { Order::MonthFirst } else { Order::DayFirst }
 }
 
+/// The one day/month order under which the statement is a statement: its period (if printed) spans at most 100
+/// days (a quarter) and every line's leading date falls inside it, give or take a week — or, with no period, the
+/// dates span at most 100 days. `03/01 – 12/01` with lines on `05/01` is January; read the other way it would run
+/// March to December. `None` when both readings fit, or neither: then it stays a guess.
+fn plausible_order(rows: &[Row], fallback_year: i32) -> Option<Order> {
+    let fits = |order: Order| -> bool {
+        let period = rows.iter().find_map(|r| dates::parse_period(&r.text(), order).filter(|(a, b)| (*b - *a).num_days() >= 7));
+        // read the lines without the period, so a date can't quietly flip to fit it
+        let ctx = DateCtx { order, period: None, fallback_year: period.map_or(fallback_year, |p| p.1.year()) };
+        let ds: Vec<NaiveDate> = rows.iter().filter(|r| leading_date(r, &ctx).is_some()).filter_map(|r| dates::parse_first(&r.text(), &ctx)).collect();
+        let (Some(lo), Some(hi)) = (ds.iter().min(), ds.iter().max()) else { return false };
+        match period {
+            Some((a, b)) => (b - a).num_days() <= 100 && *lo >= a - chrono::Duration::days(7) && *hi <= b + chrono::Duration::days(7),
+            None => (*hi - *lo).num_days() <= 100,
+        }
+    };
+    match (fits(Order::DayFirst), fits(Order::MonthFirst)) {
+        (true, false) => Some(Order::DayFirst),
+        (false, true) => Some(Order::MonthFirst),
+        _ => None,
+    }
+}
+
 /// Numeric dates that can only be day-first, only month-first, and that could be either (`03/04`).
 fn order_evidence(rows: &[Row]) -> (usize, usize, usize) {
     let (mut day, mut month, mut either) = (0, 0, 0);
@@ -740,6 +781,18 @@ fn pass1<'p>(scanner: &MultiPassScanner<'p>, rows: &[Row], diag: &mut Diagnostic
     let head: String = p1.iter().enumerate().filter(|(i, _)| first.is_none_or(|f| *i < f) || last.is_some_and(|l| *i > l)).map(|(_, r)| r.text()).collect::<Vec<_>>().join("\n");
     let (profile, scores) = profiles::fingerprint(scanner.profiles, &head, &tokens);
     let mut order = profile.map_or_else(|| infer_order(rows), BankProfile::date_order);
+    // no bank to say how it writes dates, and no date past the 12th to tell: the reading that keeps the statement
+    // a statement (its dates inside a period of a quarter at most) wins; if both or neither do, it's a guess
+    let mut order_unproven = false;
+    if profile.is_none() {
+        let (day, month, either) = order_evidence(rows);
+        if day == 0 && month == 0 && either > 0 {
+            match plausible_order(rows, scanner.fallback_year) {
+                Some(o) => order = o,
+                None => order_unproven = true,
+            }
+        }
+    }
     if v.swap_dates {
         order = if order == Order::DayFirst { Order::MonthFirst } else { Order::DayFirst };
     }
@@ -777,11 +830,7 @@ fn pass1<'p>(scanner: &MultiPassScanner<'p>, rows: &[Row], diag: &mut Diagnostic
     if layout == LayoutKind::CreditCardDRCR {
         account_type = AccountType::CreditCard;
     }
-    // no bank to say how it writes dates, and every numeric date reads both ways (`03/04/2025`): a guess
-    if profile.is_none() {
-        let (day, month, either) = order_evidence(rows);
-        diag.pass1.date_order_unproven = day == 0 && month == 0 && either > 0;
-    }
+    diag.pass1.date_order_unproven = order_unproven;
     // said in so many words? ("Savings Bank" in a name doesn't say what this account is)
     diag.pass1.type_unstated = profile.is_none() && account_type != AccountType::CreditCard && !TYPE_STATED.is_match(&page1);
     let currency = detect_currency(&page1);
@@ -1406,6 +1455,8 @@ struct Parts {
     loose: Vec<Printed>,
     /// Any word outside the table's columns (left/right margins).
     outside: bool,
+    /// Where the description starts on the line (its first word's left edge).
+    desc_x0: Option<f64>,
 }
 
 fn split_row(r: &Row, g: &Geometry) -> Parts {
@@ -1440,7 +1491,10 @@ fn split_row(r: &Row, g: &Geometry) -> Parts {
             Some(ColumnRole::Date) => push(&mut p.date, &w.text),
             Some(ColumnRole::PostDate) => push(&mut p.post, &w.text),
             Some(ColumnRole::Reference) => push(&mut p.reference, &w.text),
-            Some(_) => push(&mut p.desc, &w.text),
+            Some(_) => {
+                p.desc_x0.get_or_insert(w.x0);
+                push(&mut p.desc, &w.text)
+            }
             None => p.outside |= w.text.len() > 3,
         }
     }
@@ -1506,6 +1560,8 @@ struct Building {
     anchor_desc_empty: Vec<bool>,
     anchor_y: Vec<(u32, f64, f64)>,
     refs: Vec<String>,
+    /// Where each transaction's description starts (page, x): the description column's left edge, by example.
+    desc_starts: Vec<(u32, f64)>,
 }
 
 enum Event {
@@ -1535,6 +1591,7 @@ fn new_section(currency: Currency, account_type: AccountType, last4: Option<Stri
         anchor_desc_empty: Vec::new(),
         anchor_y: Vec::new(),
         refs: Vec::new(),
+        desc_starts: Vec::new(),
     }
 }
 
@@ -1728,6 +1785,9 @@ fn pass3(meta: &Meta, rows: &[Row], layout: &Layout, diag: &mut Diagnostics) -> 
                     sign_flexible: flexible && part.len() == 1,
                 });
                 b.anchor_desc_empty.push(desc.is_empty());
+                if let Some(x) = p.desc_x0 {
+                    b.desc_starts.push((r.page, x));
+                }
                 b.anchor_y.push((r.page, y, r.h()));
                 b.refs.push(p.reference.trim().to_string());
                 b.events.push(Event::Anchor(idx));
@@ -1748,6 +1808,19 @@ fn pass3(meta: &Meta, rows: &[Row], layout: &Layout, diag: &mut Diagnostics) -> 
             if !dated || p.loose.is_empty() {
                 b.section.checkpoints.push((r.page, r.yc(), v));
             }
+            continue;
+        }
+        // a description's next line starts in the description column (or a little indented): a line starting in
+        // the margin or centred on the page (a notice, a page footer) belongs to no transaction
+        // (judged on this page's own examples first: a page can sit a little to one side of the others)
+        let off_column = p.desc_x0.is_some_and(|x| {
+            let here: Vec<f64> = b.desc_starts.iter().filter(|s| s.0 == r.page).map(|s| s.1).collect();
+            let mut v = if here.is_empty() { b.desc_starts.iter().map(|s| s.1).collect() } else { here };
+            v.sort_by(f64::total_cmp);
+            !v.is_empty() && (x < v[v.len() / 2] - 2.0 * r.h() || x > v[v.len() / 2] + 12.0 * r.h())
+        });
+        // (it carries no amount — those were dealt with above — so there's nothing to recover from it)
+        if !desc.is_empty() && undated && !p.outside && off_column {
             continue;
         }
         if !desc.is_empty() && undated && !p.outside {

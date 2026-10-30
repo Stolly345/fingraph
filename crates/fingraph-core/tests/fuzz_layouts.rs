@@ -738,10 +738,11 @@ fn generated_statements() {
         let s = generate(seed * 1_000_003 + k);
         let (o, why) = judge(&s);
         *tally.entry(o).or_default() += 1;
-        // unprovable on its own, so held by design: a card that doesn't say so, dates that read both ways, no
-        // opening balance printed (at import the previous statement's closing proves it; there's none here)
+        // unprovable on its own, so held by design: a card that doesn't say so, no opening balance printed (at
+        // import the previous statement's closing proves it; there's none here). Day/month-ambiguous dates are
+        // provable again: the period settles which reading is a statement
         let no_opening = !s.layout.opening_row && !s.layout.summary_box;
-        if !s.layout.card_unmarked && !s.layout.ambiguous_dates && !no_opening {
+        if !s.layout.card_unmarked && !no_opening {
             provable += 1;
             provable_exact += (o == Outcome::Exact) as usize;
         }

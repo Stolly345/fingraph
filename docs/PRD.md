@@ -1,7 +1,7 @@
 # FinGraph — PRD / System Reference
 
-**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.11 `.deb`
-**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Updated:** 2026-10-30 for 0.2.11 · **Status:** in daily personal use; not published
+**Repo:** `~/Projects/fingraph-rs` (Rust 2024, GTK 4 + libadwaita) · **Package:** `fingraph` 0.2.12 `.deb`
+**Owner:** alex · **Doc written:** 2026-10-27 (as built; 0.2.0 budgeting release the same day) · **Updated:** 2026-10-30 for 0.2.12 · **Status:** in daily personal use; not published
 
 > Single source of truth for what FinGraph is, how it's built, and why it behaves the way it does.
 > It replaces the Python/Flet prototype in `~/Projects/FinGraph` (left untouched; its
@@ -388,6 +388,28 @@ Measured: 0 of 10,400 generated statements wrong and passed through; 95–97% of
 harder set again). Under scrambled headings or inflated boxes the dates and amounts of the owner's statements stay
 exact; descriptions can lose a wrapped word or gain a reference number (reported, not failed).
 
+**0.2.12: three upgrades from an outside review** (owner pasted another AI's proposals; built #1, #2, #4 as
+amended, skipped most of #3 — a "date out of order" flag would hold real statements sorted by posting date or
+cheque number, and the two-date check already existed).
+1. **Description column guard.** A description's next line has to start in the description column (judged on the
+   page's own transactions, so a page sitting to one side doesn't count against it): a notice centred on the page
+   or a remark starting in the margin attaches to no transaction. The proposed line-spacing split wasn't built:
+   many statements space every line alike. Shrinking inflated word boxes to the line pitch was tried and reverted:
+   real card pages already have boxes taller than their line spacing and read correctly, so it changed real reads.
+   Under 40% inflated boxes a card's wrapped word moves to the memo (`TOWN | Ref …`); nothing is lost, no amount
+   changes. New real-statement variation: uneven vertical stretch — dates, amounts and descriptions all exact.
+2. **Day/month order by plausibility** (`plausible_order`): when no date is past the 12th, the reading under which
+   the statement is a statement — a period of at most 100 days (quarterly statements included) holding every
+   line's date, ±7 days; or, with no period, dates spanning ≤ 100 days — is taken without a hold; when both or
+   neither fit, it stays held as a guess. Generator: ambiguous-date statements went from 0% to ~70% read exactly
+   (the rest fail on other features combined with them), none wrong.
+4. **Account type settled by its lines** (`polarity_confirms`): a statement that doesn't say what account it is
+   and prints no running balance isn't held when two or more lines' wording agrees with the type read and none
+   disagrees (charges, interest, cash advances, ATM withdrawals, payments received, salary). Little visible effect:
+   a new bank's first statement is held anyway, and a card read as a bank account is contradicted by its own lines,
+   so it stays held.
+Measured: 0 of 10,400 generated statements wrong and passed through; 95.5–96.2% of provable ones read exactly.
+
 **Profiles for unknown banks (Approve):** approving a reconciled statement from a bank with no profile makes one
 (`BankProfile::from_statement`): named and fingerprinted by what the letterhead says (`bank_identifiers`: a
 proper name with Bank/Trust/Credit Union…, and the bank's web address — never an email domain or a merchant's
@@ -661,10 +683,10 @@ Fixes found while testing the guide on the owner's real statements:
 
 ## 10. Packaging & operations
 
-- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.11-1_amd64.deb` (binary, desktop entry with
+- `cargo deb -p fingraph` → `target/debian/fingraph_0.2.12-1_amd64.deb` (binary, desktop entry with
   PDF "Open With", icon, README; depends on poppler-utils, GTK 4, libadwaita; recommends
   tesseract-ocr for picture-only statements).
-- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.11-1_amd64.deb`. The
+- Install: `sudo apt install ~/Projects/fingraph-rs/target/debian/fingraph_0.2.12-1_amd64.deb`. The
   version is bumped for every change to the app: apt skips a same-version `.deb` unless given
   `--reinstall`, and once that made a fix look missing. A docs-only rebuild keeps the version and
   is installed with `--reinstall`.
@@ -752,6 +774,22 @@ Fixes found while testing the guide on the owner's real statements:
 
 | Layout learning (0.2.9) | Owner: make sure it learns new statements out of the box, e.g. if Scotiabank changes its layout. It read unknown banks already, but renamed column headings collapsed a chequing read (3 of 28 rows) and a rebranded letterhead was taken for CNB; the only fix was editing Bank Profiles. Now: page-1 fingerprint, re-reads proven by the balances (including columns from the amounts alone), learn-on-Approve with undo, and a hold when a statement looks different from the account's last one (§6.4) |
 ---
+
+## 12a. Confidence in statement reading (assessed 2026-10-30, 0.2.11; rows updated for 0.2.12)
+
+| Question | Confidence | Basis |
+|---|---|---|
+| Wrong figures counted without anyone seeing them | Very unlikely | Independent nets: every row proven by the balances (coverage, not just totals); each statement must open where the account's last one closed; dated amount lines no table read hold it; ambiguous day/month and card-vs-bank wording are flagged; a new bank or layout is always held once |
+| Amounts right when a statement says Reconciled | ~97%+ | 0 of 10,400 generated statements wrong and passed through after this round's fixes; every distortion of the owner's 12 statements keeps dates and amounts exact |
+| A new bank's first statement reads right | ~60–80% (estimate) | Generator 95–97% of provable statements, but it was tuned alongside the engine; unfamiliar real files have run nearer half to two-thirds. Stricter rules mean more correct reads wait for one approval |
+| Dates right | Medium-good | Transaction/posting order, ambiguous orders settled by the period (or held), rollovers tested — but balances can't prove a date |
+| Descriptions right | Probably | Not checked by anything; off-column lines can't attach (0.2.12); under distorted layouts a wrapped word can move to the memo or a reference number prefix the description |
+| The owner's Scotiabank statements | Very high | Every check passes on all 41 sections; they chain month to month |
+
+Why not higher: every testing round so far found a new way for a wrong read to look proven (false Reconciled,
+a lost first row, a netted line, a silently wrong year, missing sections). All are fixed, but the generator only
+covers failure modes already thought of. What would raise it most: one real PDF per account type from each bank
+in use (Butterfield, RBC, CNB, the Credit Union) — none from RBC or Butterfield has been seen.
 
 ## 13. Outstanding / known limits
 

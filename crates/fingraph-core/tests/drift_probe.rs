@@ -34,7 +34,7 @@ fn rows(r: &ScanResult, f: &Mutate) -> Vec<(String, String, String)> {
 
 /// Same dates and amounts, row for row, and proven: for changes to the page's geometry. Descriptions are compared
 /// and reported (a wrapped word may land on its other line), not required.
-fn same_money(r: &ScanResult, base: &ScanResult) -> bool {
+fn same_money(what: &str, r: &ScanResult, base: &ScanResult) -> bool {
     let money = |r: &ScanResult| {
         let mut v: Vec<(String, String)> = r.sections.iter().flat_map(|s| &s.transactions).map(|t| (t.posted.to_string(), t.amount.to_string())).collect();
         v.sort();
@@ -46,7 +46,12 @@ fn same_money(r: &ScanResult, base: &ScanResult) -> bool {
     if alike * 10 < b.len() * 9 {
         // reported, not failed: distorted geometry can cost a description its wrapped line or prefix it with a
         // reference number, never an amount
-        println!("     (descriptions: {alike}/{} the same)", b.len());
+        println!("     ({what}: descriptions {alike}/{} the same)", b.len());
+        if std::env::var("DRIFT_VERBOSE").is_ok() {
+            for (x, y) in b.iter().zip(&a).filter(|(x, y)| x != y).take(3) {
+                println!("       want {x:?}\n        got {y:?}");
+            }
+        }
     }
     r.is_reconciled() && money(r) == money(base)
 }
@@ -121,10 +126,12 @@ fn drift_probe() {
             ("stretched", t.iter().map(|x| Token { x0: x.x0 * 1.35, x1: x.x1 * 1.35, y0: x.y0 * 0.85, y1: x.y1 * 0.85, ..x.clone() }).collect()),
             ("even pages shifted", t.iter().map(|x| if x.page % 2 == 0 { Token { x0: x.x0 + 18.0, x1: x.x1 + 18.0, y0: x.y0 - 12.0, y1: x.y1 - 12.0, ..x.clone() } } else { x.clone() }).collect()),
             ("taller boxes", t.iter().map(|x| { let g = 0.2 * (x.y1 - x.y0); Token { y0: x.y0 - g, y1: x.y1 + g, ..x.clone() } }).collect()),
+            // line spacing growing down the page (a scan stretched unevenly): every gap a bit wider than the last
+            ("uneven vertical stretch", t.iter().map(|x| { let f = |y: f64| y + 0.0004 * y * y; Token { y0: f(x.y0), y1: f(x.y0) + (x.y1 - x.y0), ..x.clone() } }).collect()),
         ];
         for (what, toks) in geometric {
             let r = MultiPassScanner::new(&all).scan_tokens(toks).unwrap();
-            let ok = same_money(&r, &base);
+            let ok = same_money(what, &r, &base);
             if !ok && std::env::var("DRIFT_VERBOSE").is_ok() {
                 let (a, b) = (rows(&base, &same), rows(&r, &same));
                 println!("     {what}: {} rows vs {}, {:?} read_as {:?} notes {:?}", b.len(), a.len(), r.sections.iter().map(|s| &s.reconciliation).collect::<Vec<_>>(), r.diagnostics.pass3.read_as, r.diagnostics.pass3.layout_notes);
@@ -158,14 +165,14 @@ fn drift_probe() {
             })
             .collect();
         let r = MultiPassScanner::new(&all).scan_tokens(gibberish).unwrap();
-        if std::env::var("DRIFT_VERBOSE").is_ok() && !same_money(&r, &base) {
+        if std::env::var("DRIFT_VERBOSE").is_ok() && !same_money("gibberish", &r, &base) {
             let (a, b) = (rows(&base, &same), rows(&r, &same));
             println!("     gibberish: {} rows vs {}, {:?} read_as {:?} notes {:?}", b.len(), a.len(), r.sections.iter().map(|s| &s.reconciliation).collect::<Vec<_>>(), r.diagnostics.pass3.read_as, r.diagnostics.pass3.layout_notes);
             for (x, y) in a.iter().filter(|x| !b.contains(x)).zip(b.iter().filter(|y| !a.contains(y))).take(3) {
                 println!("       want {x:?}\n        got {y:?}");
             }
         }
-        check(format!("gibberish headings ({k} words)"), same_money(&r, &base));
+        check(format!("gibberish headings ({k} words)"), same_money("gibberish", &r, &base));
         // an OCR-style slip in one amount (`1,234.56` → `1,234,56`): repaired and held, or held — never silently wrong
         let victim = base.sections.iter().flat_map(|s| &s.transactions).nth(2).map(|tx| (tx.page, tx.y, fingraph_core::money::fmt_plain(tx.stmt_amount.abs())));
         if let Some((pg, y, _)) = victim {
@@ -183,7 +190,7 @@ fn drift_probe() {
             let r = MultiPassScanner::new(&all).scan_tokens(slipped).unwrap();
             let silent = r.is_reconciled() && r.diagnostics.pass3.layout_notes.is_empty() && r.sections.iter().all(|s| s.report.derived.is_empty());
             // (the recovered line keeps the garbled figure in its description: the money is what has to match)
-            let repaired = same_money(&r, &base);
+            let repaired = same_money("OCR slip", &r, &base);
             check(format!("OCR slip ({})", if repaired { "repaired, held" } else { "held" }), done && !silent && (repaired || !r.is_reconciled()));
         }
 
@@ -257,5 +264,6 @@ fn rescan_a_ledger_copy() {
     println!("rescanned {n} files, {txs} rows, missing {missing:?}; held before {before:?}");
     assert_eq!(held(&db), before);
 }
+
 
 
