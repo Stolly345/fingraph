@@ -9,12 +9,26 @@ use rust_decimal::Decimal;
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::db::{DocumentRow, TxRow};
-use crate::insights::{add_months, latest_balances, month_start, value};
+use crate::insights::{add_months, latest_balances, month_start, own_accounts, value};
 use crate::rules::{cadence, merchant_stem, payer_key, title_case};
 use crate::{Currency, Fx};
 
 fn month_end(m: NaiveDate) -> NaiveDate {
     add_months(month_start(m), 1).pred_opt().unwrap_or(m)
+}
+
+/// The `k`-th due date after a charge on `prev`: monthly, quarterly and yearly cadences step by calendar months
+/// (the 31st becomes the 28th in February, and stays the 31st where there is one); weekly ones by days.
+pub fn nth_due(prev: NaiveDate, cadence: i64, k: i64) -> NaiveDate {
+    use chrono::Datelike;
+    let months = match cadence {
+        30 => k,
+        91 => 3 * k,
+        365 => 12 * k,
+        _ => return prev + Duration::days(cadence * k),
+    };
+    let m = add_months(month_start(prev), months as i32);
+    m.with_day(prev.day()).unwrap_or_else(|| month_end(m))
 }
 
 fn payee(t: &TxRow) -> String {
@@ -51,7 +65,7 @@ pub fn age_of_money(rows: &[TxRow], docs: &[DocumentRow], ccy: Currency, fx: &Fx
         if let (Some(o), Some((start, _))) = (d.opening, d.period)
             && o > Decimal::ZERO
         {
-            events.push((start, false, fx.convert(o, d.currency, ccy)));
+            events.push((start, false, crate::insights::known(fx, o, d.currency, ccy, start).unwrap_or_default()));
         }
     }
     for t in rows.iter().filter(|t| !t.is_transfer()) {
@@ -207,11 +221,11 @@ pub fn bills_for(rows: &[TxRow], covered: &BTreeMap<i64, NaiveDate>, month: Naiv
         }
         let Some(&prev) = r.dates.iter().rfind(|d| **d < m0) else { continue };
         // the first due date this month or later; cycles skipped before it don't belong to this month
-        let mut due = prev + Duration::days(r.cadence);
         let mut skipped = 0;
+        let mut due = nth_due(prev, r.cadence, 1);
         while due < m0 {
-            due += Duration::days(r.cadence);
             skipped += 1;
+            due = nth_due(prev, r.cadence, skipped + 1);
         }
         // three cycles without a charge: it stopped
         if due > m1 || skipped >= 3 {
@@ -280,8 +294,8 @@ impl Forecast {
 pub fn forecast(rows: &[TxRow], docs: &[DocumentRow], until: NaiveDate) -> Vec<Forecast> {
     let balances = latest_balances(rows, docs);
     let mut accounts: BTreeMap<i64, (&str, Currency)> = BTreeMap::new();
-    for t in rows.iter().filter(|t| !t.account_type.is_liability()) {
-        accounts.insert(t.account_id, (&t.account_name, t.currency));
+    for (id, t) in own_accounts(rows).into_iter().filter(|(_, t)| !t.account_type.is_liability()) {
+        accounts.insert(id, (&t.account_name, t.currency));
     }
     let mut out = Vec::new();
     for (id, (name, ccy)) in accounts {
@@ -305,12 +319,14 @@ pub fn forecast(rows: &[TxRow], docs: &[DocumentRow], until: NaiveDate) -> Vec<F
             if (start - r.last).num_days() > 3 * r.cadence + 5 {
                 continue;
             }
-            let mut d = r.last + Duration::days(r.cadence);
+            let mut k = 1;
+            let mut d = nth_due(r.last, r.cadence, k);
             while d <= until {
                 if d > start {
                     events.push((d, r.payee.clone(), r.amount));
                 }
-                d += Duration::days(r.cadence);
+                k += 1;
+                d = nth_due(r.last, r.cadence, k);
             }
         }
         events.sort_by_key(|e| e.0);
@@ -421,5 +437,43 @@ mod tests {
         let c: Checks = f.iter().map(|a| (a.account_id, (until, a.at(until).unwrap(), a.start.0))).collect();
         db.save_forecast_checks(&c).unwrap();
         assert_eq!(db.forecast_checks(), c);
+    }
+
+    #[test]
+    fn february_still_has_its_monthly_bills() {
+        let ymd = |y, m, dd| NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        let mut rows = Vec::new();
+        // paid on the 1st, and on the last day of the month
+        for (i, (y, m)) in [(2025, 8), (2025, 9), (2025, 10), (2025, 11), (2025, 12), (2026, 1), (2026, 2), (2026, 3)].into_iter().enumerate() {
+            rows.push(crate::insights::tests::row(100 + i as i64, ymd(y, m, 1), "ACME INSURANCE", "-100.00", "Insurance", ""));
+            rows.push(crate::insights::tests::row(200 + i as i64, month_end(ymd(y, m, 1)), "ZED GYM", "-50.00", "Fitness", ""));
+        }
+        let cov: BTreeMap<i64, NaiveDate> = [(1, ymd(2026, 3, 31))].into();
+        let fx = Fx::default();
+        let feb = bills_for(&rows, &cov, ymd(2026, 2, 1), Currency::KYD, &fx);
+        assert_eq!(feb.iter().map(|b| (b.payee.as_str(), b.due, b.state.clone())).collect::<Vec<_>>(), vec![("ACME INSURANCE", ymd(2026, 2, 1), BillState::Paid(vec![ymd(2026, 2, 1)])), ("ZED GYM", ymd(2026, 2, 28), BillState::Paid(vec![ymd(2026, 2, 28)]))]);
+        // without February's charges, both are missed
+        let without: Vec<TxRow> = rows.iter().filter(|t| month_start(t.posted) != ymd(2026, 2, 1)).cloned().collect();
+        assert!(bills_for(&without, &cov, ymd(2026, 2, 1), Currency::KYD, &fx).iter().filter(|b| b.state == BillState::Missed).count() == 2);
+        assert_eq!(nth_due(ymd(2026, 1, 31), 30, 2), ymd(2026, 3, 31));
+    }
+
+    #[test]
+    fn a_charge_flagged_to_the_business_leaves_its_account_at_home() {
+        let (db, _, _) = demo();
+        let ents = db.entities().unwrap();
+        let (personal, biz) = (ents[0].id, ents[1].id);
+        let t = db.transactions(&TxFilter { entity_ids: vec![personal], ..Default::default() }).unwrap().into_iter().find(|t| t.balance.is_some() && t.amount.is_sign_negative() && !t.is_transfer() && !t.account_type.is_liability()).unwrap();
+        let before = forecast(&db.transactions(&TxFilter { entity_ids: vec![biz], ..Default::default() }).unwrap(), &db.documents(&[biz]).unwrap(), t.posted + Duration::days(45));
+        db.set_business(&[t.id], Some(biz)).unwrap();
+        let brows = db.transactions(&TxFilter { entity_ids: vec![biz], ..Default::default() }).unwrap();
+        let bdocs = db.documents(&[biz]).unwrap();
+        let after = forecast(&brows, &bdocs, t.posted + Duration::days(45));
+        assert!(!after.iter().any(|f| f.account_id == t.account_id));
+        assert_eq!(before.len(), after.len());
+        let fx = db.fx().unwrap();
+        let nw = |rows: &[TxRow]| crate::wealth::net_worth_on(&crate::wealth::account_balances(rows, &bdocs), &[], t.posted, Currency::KYD, &fx).net();
+        let without: Vec<TxRow> = brows.iter().filter(|x| x.id != t.id).cloned().collect();
+        assert_eq!(nw(&brows), nw(&without));
     }
 }

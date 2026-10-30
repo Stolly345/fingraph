@@ -108,9 +108,12 @@ pub struct AccountBalances {
 
 /// Every account's verified balances: running balances, then statement closings.
 pub fn account_balances(rows: &[TxRow], docs: &[DocumentRow]) -> BTreeMap<i64, AccountBalances> {
-    let mut by: BTreeMap<i64, AccountBalances> = BTreeMap::new();
+    let mut by: BTreeMap<i64, AccountBalances> = crate::insights::own_accounts(rows)
+        .into_iter()
+        .map(|(a, t)| (a, AccountBalances { name: t.account_name.clone(), currency: t.currency, liability: t.account_type.is_liability(), points: Vec::new() }))
+        .collect();
     for t in rows {
-        let e = by.entry(t.account_id).or_insert_with(|| AccountBalances { name: t.account_name.clone(), currency: t.currency, liability: t.account_type.is_liability(), points: Vec::new() });
+        let Some(e) = by.get_mut(&t.account_id) else { continue };
         if let Some(b) = t.balance {
             e.points.push((t.posted, if e.liability { -b } else { b }));
         }
@@ -154,14 +157,13 @@ impl NetWorth {
 pub fn net_worth_on(accounts: &BTreeMap<i64, AccountBalances>, items: &[ManualItem], d: NaiveDate, ccy: Currency, fx: &Fx) -> NetWorth {
     let (mut assets, mut debts) = (Decimal::ZERO, Decimal::ZERO);
     for a in accounts.values() {
-        if let Some(v) = value_at(&a.points, d) {
-            let v = fx.convert(v, a.currency, ccy);
+        // at that day's rate; an account in a currency with no rate yet is left out, not counted 1:1
+        if let Some(v) = value_at(&a.points, d).and_then(|v| crate::insights::known(fx, v, a.currency, ccy, d)) {
             if v.is_sign_negative() { debts -= v } else { assets += v }
         }
     }
     for i in items {
-        if let Some(v) = value_at(&i.values, d) {
-            let v = fx.convert(v, i.currency, ccy);
+        if let Some(v) = value_at(&i.values, d).and_then(|v| crate::insights::known(fx, v, i.currency, ccy, d)) {
             if i.liability { debts += v } else { assets += v }
         }
     }
@@ -300,7 +302,8 @@ pub fn progress(g: &Goal, balance: Option<Decimal>, entries: Decimal, today: Nai
     // what's come in since the goal was made, against the plan's pace
     let gained = if g.paydown { done } else { done - g.start_value };
     let elapsed = months_between(g.created, today).max(0);
-    let finish = (g.monthly > Decimal::ZERO).then(|| add_months(month_start(today), (remaining / g.monthly).ceil().try_into().unwrap_or(0)));
+    // more than a century away (or no plan) is never
+    let finish = (g.monthly > Decimal::ZERO).then(|| (remaining / g.monthly).ceil()).and_then(|m| i32::try_from(m).ok()).filter(|m| *m <= 1200).map(|m| add_months(month_start(today), m));
     let needed = g.target_date.map(|t| {
         let left = months_between(today, t).max(1);
         (remaining / Decimal::from(left)).round_dp(2)
@@ -424,8 +427,10 @@ fn payoff_gives_up_when_interest_outruns_payments() {
     assert_eq!(payoff(&d, Decimal::from(200), Strategy::Avalanche), None);
 }
 
+static INTEREST: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)\binterest\b").unwrap());
+
 /// A card or loan's interest rate from its statements: the interest charged over its last three
-/// months of statements, as a yearly percentage of what's owed now. `None` without interest charges.
+/// months of statements (fewer when there are fewer), as a yearly percentage of what's owed now. `None` without interest charges.
 pub fn estimate_apr(rows: &[TxRow], account_id: i64, owed: Decimal) -> Option<Decimal> {
     if owed <= Decimal::ZERO {
         return None;
@@ -433,13 +438,19 @@ pub fn estimate_apr(rows: &[TxRow], account_id: i64, owed: Decimal) -> Option<De
     let mine: Vec<&TxRow> = rows.iter().filter(|t| t.account_id == account_id).collect();
     let last = mine.iter().map(|t| t.posted).max()?;
     let since = add_months(month_start(last), -2);
-    let interest: Decimal = mine
+    let window: Vec<&&TxRow> = mine.iter().filter(|t| t.posted >= since).collect();
+    // interest only: its own sub-categories or the word, not the fees filed beside it in "Bank Fees & Interest"
+    let interest: Decimal = window
         .iter()
-        .filter(|t| t.posted >= since && t.amount.is_sign_negative())
-        .filter(|t| t.category_name.as_deref().is_some_and(|c| c.contains("Interest")) || format!("{} {}", t.raw_description, t.memo).to_uppercase().contains("INTEREST"))
+        .filter(|t| t.amount.is_sign_negative())
+        .filter(|t| matches!(t.category_name.as_deref(), Some("Credit Card Interest" | "Loan Interest")) || INTEREST.is_match(&format!("{} {}", t.raw_description, t.memo)))
         .map(|t| -t.amount)
         .sum();
-    (!interest.is_zero()).then(|| (interest / Decimal::from(3) / owed * Decimal::from(1200)).round_dp(1))
+    // a month's worth per statement read (at most the three), else per calendar month seen
+    let docs: std::collections::BTreeSet<i64> = window.iter().filter_map(|t| t.document_id).collect();
+    let months = if docs.is_empty() { window.iter().map(|t| month_start(t.posted)).collect::<std::collections::BTreeSet<_>>().len() } else { docs.len() };
+    let months = Decimal::from(months.clamp(1, 3));
+    (!interest.is_zero()).then(|| (interest / months / owed * Decimal::from(1200)).round_dp(1))
 }
 
 #[cfg(test)]
@@ -553,5 +564,25 @@ mod tests {
         // a card that charged interest once, months ago, has no rate to go on
         let card = acc.iter().find(|(_, a)| a.liability && a.name.contains("Card")).unwrap();
         assert_eq!(estimate_apr(&rows, *card.0, d("1000")), None);
+    }
+
+    #[test]
+    fn interest_is_interest_and_one_statement_is_one_month() {
+        let mut fee = crate::insights::tests::row(1, ymd(2026, 9, 10), "ANNUAL FEE", "-95.00", "Bank Fees & Interest", "");
+        fee.account_id = 7;
+        assert_eq!(estimate_apr(&[fee.clone()], 7, d("2000")), None);
+        let mut int = crate::insights::tests::row(2, ymd(2026, 10, 14), "INTEREST CHARGE", "-50.00", "Credit Card Interest", "");
+        (int.account_id, int.document_id) = (7, Some(1));
+        assert_eq!(estimate_apr(&[int.clone()], 7, d("3000")), Some(d("20.0")));
+        // a fee beside it doesn't count, and three statements are three months
+        let more: Vec<TxRow> = [(3, 8, 14, 2), (4, 9, 14, 3)].into_iter().map(|(id, m, dd, doc)| TxRow { id, posted: ymd(2026, m, dd), document_id: Some(doc), ..int.clone() }).collect();
+        assert_eq!(estimate_apr(&[vec![fee, int], more].concat(), 7, d("3000")), Some(d("20.0")));
+    }
+
+    #[test]
+    fn a_goal_a_lifetime_away_is_at_risk() {
+        let g = Goal { id: 0, name: "x".into(), paydown: false, target: d("50000"), currency: Currency::KYD, target_date: Some(ymd(2027, 1, 1)), monthly: d("0.01"), account_id: None, start_value: Decimal::ZERO, created: ymd(2026, 1, 1) };
+        let p = progress(&g, None, Decimal::ZERO, ymd(2026, 10, 1));
+        assert_eq!((p.status, p.finish), (GoalStatus::AtRisk, None));
     }
 }

@@ -93,10 +93,13 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         let selected = selected.clone();
         Rc::new(move |a: &Rc<App>| -> Vec<TxRow> {
             let (from, to) = a.range();
+            // an account's file holds all its rows, including ones flagged to another workspace's business
+            let ids = a.entity_ids();
             a.db
-                .transactions(&TxFilter { entity_ids: a.entity_ids(), from: Some(from), to: Some(to), account_id: selected().map(|x| x.id), ..Default::default() })
+                .transactions(&TxFilter { from: Some(from), to: Some(to), account_id: selected().map(|x| x.id), ..Default::default() })
                 .unwrap_or_default()
                 .into_iter()
+                .filter(|t| ids.is_empty() || ids.contains(&t.account_entity_id))
                 .rev()
                 .collect()
         })

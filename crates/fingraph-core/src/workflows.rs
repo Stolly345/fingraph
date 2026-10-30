@@ -92,18 +92,26 @@ impl Db {
                 }
                 continue;
             };
+            // same-workspace lines share the statement's figure by running total, so they add up to it to the cent
+            let mut cum = (Decimal::ZERO, Decimal::ZERO);
             for (seq, l) in ls {
                 let mut r = t.clone();
                 r.split_seq = Some(*seq);
                 r.amount = l.amount;
                 r.business_entity_id = l.business_entity_id;
                 r.entity_id = l.business_entity_id.unwrap_or(t.account_entity_id);
+                let share = (r.entity_id == t.entity_id && !t.amount.is_zero()).then(|| {
+                    let before = cum.1;
+                    cum.0 += l.amount;
+                    cum.1 = round2(t.amount_entity * cum.0 / t.amount);
+                    cum.1 - before
+                });
                 if !wanted.is_empty() && !wanted.contains(&r.entity_id) {
                     continue;
                 }
                 r.entity_currency = bases.get(&r.entity_id).copied().unwrap_or(t.entity_currency);
                 // same workspace: keep the statement's own exchange rate; another: convert
-                r.amount_entity = if r.entity_id == t.entity_id && !t.amount.is_zero() { round2(t.amount_entity * l.amount / t.amount) } else { db::entity_amount(&fx, l.amount, t.currency, r.entity_currency, None, t.posted) };
+                r.amount_entity = share.unwrap_or_else(|| db::entity_amount(&fx, l.amount, t.currency, r.entity_currency, None, t.posted));
                 r.category_id = l.category_id;
                 (r.category_name, r.category_kind) = match l.category_id.and_then(|c| cats.get(&c)) {
                     Some((n, k)) => (Some(n.clone()), Some(*k)),
@@ -500,5 +508,17 @@ mod tests {
         let docs = db.documents(&[]).unwrap();
         assert!(!prior_covered(&docs, (d(2026, 7, 1), d(2026, 7, 31)), (d(2026, 6, 1), d(2026, 6, 30))));
         assert!(prior_covered(&docs, (d(2026, 9, 1), d(2026, 9, 30)), (d(2026, 8, 1), d(2026, 8, 31))));
+    }
+
+    #[test]
+    fn split_lines_add_up_to_the_cent() {
+        let db = Db::open_in_memory().unwrap();
+        db.load_demo().unwrap();
+        let t = db.transactions(&TxFilter::default()).unwrap().into_iter().find(|t| t.currency != t.entity_currency && t.transfer_peer.is_none() && t.amount < Decimal::from(-3)).unwrap();
+        let third = (t.amount / Decimal::from(3)).round_dp(2);
+        let lines: Vec<SplitLine> = [third, third, t.amount - third - third].into_iter().map(|amount| SplitLine { amount, ..Default::default() }).collect();
+        db.set_splits(t.id, &lines).unwrap();
+        let got: Decimal = db.transactions(&TxFilter { split_lines: true, ..Default::default() }).unwrap().iter().filter(|r| r.id == t.id).map(|r| r.amount_entity).sum();
+        assert_eq!(got, t.amount_entity);
     }
 }
