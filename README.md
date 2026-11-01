@@ -1,6 +1,25 @@
+<div align="center">
+
+<img src="packaging/dev.fingraph.FinGraph.svg" width="112" alt="FinGraph icon">
+
 # FinGraph
 
-A local-first ledger and budget for Cayman bank statements, in Rust with GTK 4 and libadwaita.
+**A local-first ledger and budget for Cayman bank statements.**
+
+Drop in the PDF statements your bank gives you; FinGraph reads every line, proves it against the
+statement's own balances, and shows where the money goes. Nothing leaves your computer.
+
+![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
+![Linux: .deb, .rpm, Arch](https://img.shields.io/badge/linux-.deb%20%7C%20.rpm%20%7C%20Arch-FCC624?logo=linux&logoColor=black)
+![GTK4 + libadwaita](https://img.shields.io/badge/GTK4-libadwaita-4A86CF?logo=gnome&logoColor=white)
+![Written in Rust](https://img.shields.io/badge/written%20in-Rust-B7410E?logo=rust&logoColor=white)
+![KYD and USD](https://img.shields.io/badge/currencies-KYD%20%7C%20USD%20%2B%20any-2EA44F)
+
+<img src="docs/screenshots/overview.png" width="900" alt="Overview: headline numbers, charts, and the Review banner">
+
+</div>
+
+## Why FinGraph
 
 Cayman banks don't offer live feeds to budgeting apps, so FinGraph works from the PDF statements you
 download once a month. A 5-pass scanner reads each statement and proves it against its own
@@ -8,10 +27,28 @@ balances. Your rules, a directory of Cayman businesses and Smart Triage then sor
 transactions. On top of that sit a budget, a forecast for the weeks between statements, and your
 net worth, in KYD or USD, across personal and business workspaces.
 
-Nothing leaves the computer. Everything lives in `~/.local/share/fingraph/`: the ledger, kept copies
-of your statements and backups.
+Everything lives in `~/.local/share/fingraph/`: the ledger, kept copies of your statements and
+backups. The one optional network use, off until you switch it on, downloads daily exchange rates
+(only currency codes and dates are sent).
 
-![Overview: five headline numbers, six charts, and the Review banner](docs/screenshots/overview.png)
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/budget.png" alt="Budget: this month against the plan"></td>
+<td width="50%"><img src="docs/screenshots/transactions.png" alt="Transactions with search, filters and bulk actions"></td>
+</tr>
+<tr>
+<td align="center"><sub>A budget filled from what you actually spend</sub></td>
+<td align="center"><sub>Every transaction, searchable, with inline categories</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/statements.png" alt="Statements: coverage by month and reconciliation"></td>
+<td width="50%"><img src="docs/screenshots/review.png" alt="To Review: one card per merchant"></td>
+</tr>
+<tr>
+<td align="center"><sub>Every statement reconciled to the cent, gaps by month</sub></td>
+<td align="center"><sub>Smart Triage: answer once per merchant</sub></td>
+</tr>
+</table>
 
 *Every screenshot here uses the built-in demo data (simulated statements for made-up accounts),
 never a real ledger.*
@@ -138,8 +175,6 @@ searches transactions and Ctrl+O imports.
 - **Re-reading.** **Rescan All** (Preferences, or Rules & Categories) re-reads every kept
   statement. Your edits are kept, and it backs up first.
 
-![Statements: coverage by month, reconciliation per statement, and one waiting for approval](docs/screenshots/statements.png)
-
 ### Sorts transactions
 
 The steps are tried in this order:
@@ -152,8 +187,6 @@ The steps are tried in this order:
 5. Whatever's left goes to **To Review**. There's one card per merchant with every charge listed;
    answer it once and the answer is applied to past and future statements. Suggestions come from
    how you filed similar charges.
-
-![To Review: one card per merchant, with every charge listed](docs/screenshots/review.png)
 
 ### Keeps money apart
 
@@ -185,8 +218,6 @@ The steps are tried in this order:
   - **Set-asides** for yearly and quarterly bills (Budget → Non-Monthly Bills).
   - **Watchlists** cap a merchant (Amazon CI$ 150).
 
-![Budget: this month against the plan, and fixed vs variable expenses](docs/screenshots/budget.png)
-
 - **Monthly Close** takes you through the month once its statements are in. It checks they're all
   there, sorts what's new, settles the budget, ticks off the regular bills (paid, missed, or not on
   a statement yet), updates goals, and ends with a summary.
@@ -205,13 +236,18 @@ The steps are tried in this order:
   - **debt payoff:** highest rate first vs smallest balance first, with rates read from your
     interest charges
 
-![Outlook: estimated balances until the next statement](docs/screenshots/outlook.png)
-
-![Net Worth over time, with what you own and owe](docs/screenshots/networth.png)
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/outlook.png" alt="Outlook: estimated balances until the next statement"></td>
+<td width="50%"><img src="docs/screenshots/networth.png" alt="Net Worth over time"></td>
+</tr>
+<tr>
+<td align="center"><sub>Outlook: balances until the next statement</sub></td>
+<td align="center"><sub>Net Worth: what you own and owe, over time</sub></td>
+</tr>
+</table>
 
 ### Transactions and the Combined Statement
-
-![Transactions: search, filters, inline categories, and bulk actions](docs/screenshots/transactions.png)
 
 ![Combined Statement: chosen accounts month by month with one running balance](docs/screenshots/statement.png)
 
