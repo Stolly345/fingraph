@@ -63,7 +63,7 @@ Download the package for your distro from the
 | Ubuntu 26.04+, Debian 13 | `sudo apt install ./fingraph_0.2.15-1_amd64.deb` (use `apt`, not `dpkg -i`, so dependencies come too) |
 | Fedora 42+ | `sudo dnf install ./fingraph-0.2.15-1.x86_64.rpm` |
 | openSUSE Tumbleweed | `sudo zypper install --allow-unsigned-rpm ./fingraph-0.2.15-1.x86_64.rpm` |
-| Arch | `git clone https://github.com/Stolly345/fingraph && cd fingraph/packaging/aur && makepkg -si` |
+| Arch | `sudo pacman -S --needed git base-devel && git clone https://github.com/Stolly345/fingraph && cd fingraph/packaging/aur && makepkg -si` |
 
 All four are tested installing and starting in clean containers. You need GTK 4.14 and
 libadwaita 1.6 or newer, so Debian 12 and Ubuntu 24.04 are too old.
