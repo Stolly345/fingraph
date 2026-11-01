@@ -239,7 +239,7 @@ fn real_statements_import_without_layout_holds() {
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("statement_"))
-        .map(|p| (MultiPassScanner::new(&profiles).scan_pdf(&p).unwrap(), p))
+        .map(|p| (MultiPassScanner::new(&profiles).scan_file(&p).unwrap(), p))
         .collect();
     scans.sort_by_key(|s| s.0.period);
     for (i, (scan, p)) in scans.iter().enumerate() {

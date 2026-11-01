@@ -7,6 +7,7 @@
 //! 5. `reconcile::heal` — re-scan the skipped lines between a failing pair of rows, then report what's left.
 
 pub mod dates;
+pub mod exports;
 pub mod multipass;
 pub mod profiles;
 pub mod reconcile;

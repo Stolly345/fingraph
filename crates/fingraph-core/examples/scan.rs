@@ -9,7 +9,7 @@ fn main() {
     let scanner = MultiPassScanner::new(&profiles);
     for path in args.iter().filter(|a| !a.starts_with("--")) {
         println!("== {path}");
-        let r = match scanner.scan_pdf(path.as_ref()) {
+        let r = match scanner.scan_file(path.as_ref()) {
             Ok(r) => r,
             Err(e) => {
                 println!("  error: {e}");

@@ -59,7 +59,7 @@ fn online_samples() {
     println!("{:<44} {:>6} {:>9} {:>5}  read", "statement", "rows", "answer", "match");
     for pdf in &pdfs {
         let name = pdf.file_name().unwrap().to_string_lossy().into_owned();
-        let r = match MultiPassScanner::new(&profiles).scan_pdf(pdf) {
+        let r = match MultiPassScanner::new(&profiles).scan_file(pdf) {
             Ok(r) => r,
             Err(e) => {
                 println!("{name:<44} ERROR {e}");

@@ -7,6 +7,6 @@ Exec=fingraph %F
 Icon=dev.fingraph.FinGraph
 Terminal=false
 Categories=Office;Finance;GTK;
-MimeType=application/pdf;
+MimeType=application/pdf;text/csv;application/x-ofx;application/vnd.intu.qfx;
 Keywords=bank;statement;ledger;budget;Cayman;Butterfield;Scotiabank;CNB;RBC;credit union;
 StartupNotify=true

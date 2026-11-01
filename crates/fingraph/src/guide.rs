@@ -469,7 +469,7 @@ fn download(g: &G, app: &Rc<App>) {
     l.append(&icon_row(
         "x-office-document-symbolic",
         "The PDF statement — not a spreadsheet or “transaction history”",
-        "The statement prints the opening and closing balance; that's how FinGraph proves no transaction was missed. Exports (CSV, Excel) and on-screen history printouts don't have them.",
+        "The statement prints the opening and closing balance; that's how FinGraph proves no transaction was missed. On-screen history printouts don't have them. If your bank only offers a download (RBC: CSV or OFX), import that — prefer OFX, which has the closing balance — and check each one before approving it.",
     ));
     l.append(&icon_row(
         "x-office-calendar-symbolic",

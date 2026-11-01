@@ -24,7 +24,7 @@ pub fn reconciliation_pill(r: &Reconciliation, ccy: Currency) -> gtk::Label {
 
 pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let list = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
-    let import = gtk::Button::builder().label("Import PDFs…").css_classes(["suggested-action", "pill"]).action_name("win.import").build();
+    let import = gtk::Button::builder().label("Import Statements…").css_classes(["suggested-action", "pill"]).action_name("win.import").build();
     let target = dim("");
     let top = gtk::Box::builder().spacing(12).build();
     let intro = gtk::Box::builder().orientation(gtk::Orientation::Vertical).hexpand(true).build();
@@ -37,7 +37,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let drop_hint = adw::StatusPage::builder()
         .icon_name("document-open-symbolic")
         .title("Drop bank statements here")
-        .description("PDF statements from Butterfield, Scotiabank, Cayman National, RBC or the CICSA Credit Union. Each is read five times over and checked against its own balances.")
+        .description("PDF statements from Butterfield, Scotiabank, Cayman National, RBC or the CICSA Credit Union, or a CSV / OFX download where that's all the bank gives. Each is checked against its own balances.")
         .build();
     body.append(&drop_hint);
     // coverage: one glance tells you which statement you forgot to download
@@ -270,11 +270,19 @@ fn fill_coverage(app: &Rc<App>, grid: &gtk::Grid, breaks: &gtk::Box) {
     }
 }
 
+/// What can be imported: PDF statements and the CSV / OFX downloads some banks (RBC) give instead.
+const STATEMENT_EXTS: [&str; 5] = ["pdf", "csv", "ofx", "qfx", "qbo"];
+
+pub fn is_statement(p: &std::path::Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| STATEMENT_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
 pub fn choose_files(app: &Rc<App>) {
     let filter = gtk::FileFilter::new();
-    filter.set_name(Some("PDF statements"));
-    filter.add_mime_type("application/pdf");
-    filter.add_suffix("pdf");
+    filter.set_name(Some("Statements (PDF, CSV, OFX, QFX)"));
+    for ext in STATEMENT_EXTS {
+        filter.add_suffix(ext);
+    }
     let filters = gio::ListStore::new::<gtk::FileFilter>();
     filters.append(&filter);
     let fd = gtk::FileDialog::builder().title("Import Statements").modal(true).filters(&filters).build();
@@ -297,9 +305,9 @@ pub type OnEach = Rc<dyn Fn(&str, Result<(&ScanResult, &db::ImportReport), Strin
 /// `on_done` replaces the summary toast and the jump to triage (the Getting Started guide runs
 /// those steps itself).
 pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnEach>, on_done: Option<crate::Refresh>) {
-    let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))).collect();
+    let paths: Vec<PathBuf> = paths.into_iter().filter(|p| is_statement(p)).collect();
     if paths.is_empty() {
-        app.toast("Only PDF statements can be imported");
+        app.toast("Only PDF statements or CSV / OFX / QFX downloads can be imported");
         return;
     }
     let entity = match app.import_entity() {
@@ -321,7 +329,7 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
             let p2 = p.clone();
             let scanned = gio::spawn_blocking(move || -> Result<(ScanResult, String), String> {
                 let sha = db::file_sha256(&p2).map_err(|e| e.to_string())?;
-                let r = MultiPassScanner::new(&profiles).scan_pdf(&p2).map_err(|e| e.to_string())?;
+                let r = MultiPassScanner::new(&profiles).scan_file(&p2).map_err(|e| e.to_string())?;
                 Ok((r, sha))
             })
             .await
@@ -462,6 +470,8 @@ fn sweep(app: &Rc<App>, dir: &std::path::Path) {
 
 /// Every PDF in a folder and the folders inside it (people file statements by bank or by year). Links
 /// aren't followed (a link to a parent would loop), and it stops 8 folders down or at 5,000 PDFs.
+// ponytail: the watched folder reads PDFs only; CSV/OFX downloads (and FinGraph's own exports, which look
+// just like them) are imported only when picked or dropped
 pub fn pdfs_in(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut todo = vec![(dir.to_path_buf(), 0)];
@@ -520,7 +530,7 @@ fn check(app: &Rc<App>, paths: Vec<PathBuf>) {
             let (profiles, p2) = (profiles.clone(), p.clone());
             let r = gio::spawn_blocking(move || -> Result<(ScanResult, String), String> {
                 let sha = db::file_sha256(&p2).map_err(|e| e.to_string())?;
-                let scan = MultiPassScanner::new(&profiles).scan_pdf(&p2).map_err(|e| e.to_string())?;
+                let scan = MultiPassScanner::new(&profiles).scan_file(&p2).map_err(|e| e.to_string())?;
                 Ok((scan, sha))
             })
             .await
@@ -643,7 +653,7 @@ pub fn rescan_all(app: &Rc<App>) {
                     continue;
                 };
                 let profiles = profiles.clone();
-                let scan = gio::spawn_blocking(move || MultiPassScanner::new(&profiles).scan_pdf(&path).map_err(|e| e.to_string())).await.unwrap_or_else(|_| Err("scanner crashed".into()));
+                let scan = gio::spawn_blocking(move || MultiPassScanner::new(&profiles).scan_file(&path).map_err(|e| e.to_string())).await.unwrap_or_else(|_| Err("scanner crashed".into()));
                 let Some(a) = w.upgrade() else { return };
                 match scan.and_then(|s| a.db.replace_statement(entity, &name, &sha, &s).map_err(|e| e.to_string())) {
                     Ok(rep) => {

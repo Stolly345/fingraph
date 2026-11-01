@@ -448,6 +448,30 @@ serialised as the ISO code, so existing ledgers needed no change.
   statements now read as INR, SGD, EUR, HKD + USD; the `$`-only ones are noted. The owner's ledger: every converted
   amount identical after migration and Rescan All.
 
+### 6.6 Bank downloads: CSV, OFX, QFX (2026-10-31)
+
+RBC gives CSV/OFX downloads, and a tester's RBC file was refused ("Only PDF statements can be imported").
+`parser/exports.rs` reads them into the same `ScanResult` as a PDF (`MultiPassScanner::scan_file`
+checks the file contents: `%PDF` → PDF scanner; `OFXHEADER`/`<OFX>` → OFX; anything else text-like → CSV),
+so account matching, holds and dedup are unchanged. One section per account number + currency: RBC's CSV
+puts every account in one file (`Account Type, Account Number, Transaction Date, Cheque Number,
+Description 1, Description 2, CAD$, USD$`). CSV columns are found from their headings; amounts are taken as
+signed for the account holder (money out negative, cards too); newest-first files are reversed; numeric
+dates are day-first only if a day past the 12th proves it (otherwise a note holds the import). A Balance column
+→ reconciled from it (row 1 unproven); none → Unverified (NoBalances hold, or the previous statement's closing
+proves it). OFX gives the closing (`LEDGERBAL`) only. Kept copies are still `<sha>.pdf` whatever they hold.
+The watched folder stays PDF-only (FinGraph's own CSV/OFX exports look like bank downloads); FinGraph's
+CSV export is refused outright. Unverified until a real RBC download is tried.
+
+Tested 2026-10-31 before commit: the ofxparse corpus (real anonymised bank/card OFX 1.x and 2.x files;
+investment/sign-on-only files are refused), 14 awkward hand-made files, ledger behaviour, and the GUI. Found and
+fixed: CDATA/entity values in OFX; two unnumbered accounts merged (group key now number + type + currency);
+Amex-style cards printing purchases positive (no balances + mostly positive → flipped, with a note); Windows-1252
+text; account/currency lines above the header; binary `.csv` errors. **Rescan All rule changed for every
+statement:** an approved section that re-reads the same (same verdict, no new notes) stays approved; before,
+NoBalances/OffLayout re-held it, which un-approved every download (and every approved no-balance PDF) on each
+rescan. Checked on a copy of the real ledger: 33 files, 1,067 counted rows, identical before/after.
+
 ## 7. Categorisation pipeline
 
 Applied on import, in this order; earlier steps win.

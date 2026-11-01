@@ -1451,7 +1451,7 @@ impl Db {
     }
 
     /// `approved`: sections (by index) already approved before a rescan, which only a new mismatch holds again.
-    fn import_scan_reviewed(&self, entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult, targets: &[Target], approved: &[usize]) -> Result<ImportReport> {
+    fn import_scan_reviewed(&self, entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult, targets: &[Target], approved: &[(usize, bool)]) -> Result<ImportReport> {
         if nothing_read(scan) {
             return Err(Error(nothing_read_reason(scan).into()));
         }
@@ -1506,12 +1506,16 @@ impl Db {
             }
             let s = s.as_ref();
             let mut why = Self::review_reasons(profile, scan, s);
-            if broken && !approved.contains(&si) {
+            let was = approved.iter().find(|a| a.0 == si);
+            if broken && was.is_none() {
                 why.push(Review::Continuity);
             }
-            if approved.contains(&si) {
+            match was {
+                // approved before and reads the same: stays approved
+                Some((_, true)) => why.clear(),
                 // approved before: only what this read found wrong holds it again
-                why.retain(|r| matches!(r, Review::Mismatch | Review::NoBalances | Review::OffLayout));
+                Some((_, false)) => why.retain(|r| matches!(r, Review::Mismatch | Review::NoBalances | Review::OffLayout)),
+                None => {}
             }
             // the bank changed its layout: this one looks different from the account's statement before it
             let mut diagnostics = std::borrow::Cow::Borrowed(&scan.diagnostics);
@@ -1519,7 +1523,7 @@ impl Db {
                 diagnostics.to_mut().pass3.layout_notes.extend(continuity);
             }
             let changes = self.previous_layout(account_id, scan.period.map(|p| p.1))?.map(|o| scan.diagnostics.observed.changes_from(&o)).unwrap_or_default();
-            if !changes.is_empty() && !approved.contains(&si) {
+            if !changes.is_empty() && was.is_none() {
                 why.push(Review::LayoutChanged);
                 let notes = &mut diagnostics.to_mut().pass3.layout_notes;
                 notes.extend(changes.iter().map(|c| format!("Since this account's previous statement: {c}")));
@@ -1757,11 +1761,11 @@ impl Db {
     /// if it was, unless it stops adding up.
     pub fn replace_statement(&self, entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult) -> Result<ImportReport> {
         // deleted while a Rescan All was running: not brought back
-        let old: Vec<(i64, bool, String, String)> = {
+        let old: Vec<(i64, bool, String, String, i64, String)> = {
             let mut st = self.conn.prepare(
-                "SELECT d.account_id, d.review_hold, a.account_number_masked, a.currency FROM documents d JOIN accounts a ON a.id = d.account_id WHERE d.sha256_hash = ?1 ORDER BY d.section_index",
+                "SELECT d.account_id, d.review_hold, a.account_number_masked, a.currency, d.id, d.reconciliation_status FROM documents d JOIN accounts a ON a.id = d.account_id WHERE d.sha256_hash = ?1 ORDER BY d.section_index",
             )?;
-            st.query_map([sha256], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?
+            st.query_map([sha256], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?.collect::<rusqlite::Result<_>>()?
         };
         if old.is_empty() {
             return Err(Error("that statement is no longer in FinGraph".into()));
@@ -1771,7 +1775,7 @@ impl Db {
         let mut used = vec![false; old.len()];
         for (si, s) in scan.sections.iter().enumerate() {
             let masked = s.account_last4.as_ref().map(|l| format!("••{l}")).unwrap_or_default();
-            let free = |i: usize, o: &(i64, bool, String, String)| !used[i] && o.3 == s.currency.code();
+            let free = |i: usize, o: &(i64, bool, String, String, i64, String)| !used[i] && o.3 == s.currency.code();
             // an unnumbered section you put in an account by hand: the same place in the statement
             let hit = old.iter().enumerate().position(|(i, o)| free(i, o) && o.2 == masked).or_else(|| (s.account_last4.is_none() && old.get(si).is_some_and(|o| free(si, o))).then_some(si));
             if let Some(i) = hit {
@@ -1780,7 +1784,10 @@ impl Db {
                     *t = Target::Existing(old[i].0);
                 }
                 if !old[i].1 {
-                    approved.push(si);
+                    // approved as it read then: a re-read that finds nothing new stays approved (a download never has balances)
+                    let notes = self.document_report(old[i].4).map(|d| d.0.pass3.layout_notes).unwrap_or_default();
+                    let same = Reconciliation::from_db(&old[i].5) == s.reconciliation && scan.diagnostics.pass3.layout_notes.iter().all(|n| notes.contains(n));
+                    approved.push((si, same));
                 }
             }
         }
@@ -1809,7 +1816,7 @@ impl Db {
     /// One transaction: the `old` statements go, `scan` comes in, hand edits are put back. Any error
     /// leaves the ledger as it was.
     #[allow(clippy::too_many_arguments)]
-    fn swap(&self, old: &[String], entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult, targets: &[Target], approved: &[usize]) -> Result<ImportReport> {
+    fn swap(&self, old: &[String], entity_id: i64, filename: &str, sha256: &str, scan: &ScanResult, targets: &[Target], approved: &[(usize, bool)]) -> Result<ImportReport> {
         // what you changed by hand, by transaction fingerprint, so a rescan doesn't lose it
         struct Kept {
             account: i64,
@@ -1961,7 +1968,7 @@ impl Db {
                 missing.push(name);
                 continue;
             };
-            let scan = scanner.scan_pdf(&path)?;
+            let scan = scanner.scan_file(&path)?;
             txs += self.replace_statement(entity, &name, &sha, &scan)?.inserted;
             n += 1;
         }
@@ -2173,7 +2180,7 @@ impl Db {
         let mut n = 0;
         for (sha, name, entity, account) in held {
             let Some(pdf) = self.stored_pdf(&sha, &name) else { continue };
-            let Ok(scan) = scanner.scan_pdf(&pdf) else { continue };
+            let Ok(scan) = scanner.scan_file(&pdf) else { continue };
             if scan.profile_slug.as_deref() != Some(p.slug.as_str()) {
                 continue;
             }
@@ -2204,7 +2211,7 @@ impl Db {
         let mut n = 0;
         for (sha, name, entity) in held {
             let Some(pdf) = self.stored_pdf(&sha, &name) else { continue };
-            let Ok(scan) = scanner.scan_pdf(&pdf) else { continue };
+            let Ok(scan) = scanner.scan_file(&pdf) else { continue };
             self.replace_statement(entity, &name, &sha, &scan)?;
             n += 1;
         }
@@ -2797,7 +2804,7 @@ impl Db {
             // simulated statements: no new layout or OCR to confirm, only a mismatch holds one back
             let sha = format!("demo-{sha}");
             let targets = self.plan_import(&sha, &scan)?.default_targets();
-            let all: Vec<usize> = (0..scan.sections.len()).collect();
+            let all: Vec<(usize, bool)> = (0..scan.sections.len()).map(|i| (i, false)).collect();
             n += self.import_scan_reviewed(ent, &doc.filename, &sha, &scan, &targets, &all)?.inserted;
         }
         // a few answers already learned, so triage starts with the interesting merchants
