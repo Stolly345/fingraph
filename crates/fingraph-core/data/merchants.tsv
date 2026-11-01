@@ -1,0 +1,645 @@
+# FinGraph merchant directory: Cayman businesses and common online services.
+# KEYWORDS<TAB>Name<TAB>Category[<TAB>fallback] — keywords are matched as whole words against the statement text
+# (case, apostrophes and punctuation ignored; a trailing S is allowed). Alternatives are separated
+# by |. When several entries match, the one with the longest keyword wins, so
+# "FOSTERS PHARMACY" beats "FOSTERS". Categories must exist in FinGraph's category list.
+# `fallback` marks a payment platform (GOOGLE, APPLE.COM/BILL): it applies only when no other entry matches.
+# One entry per service: entries are treated as one merchant across spellings, so a rule for one
+# applies to every keyword in its entry.
+# Never add a generic word on its own (MARKET, CAYMAN, GRILL, CAMANA BAY): it would catch other merchants.
+
+# ── Groceries & liquor
+FOSTERS FOOD FAIR|FOSTERS FOOD|FOSTERS	Foster's	Groceries
+KIRK MARKET	Kirk Market	Groceries
+HURLEYS	Hurley's Marketplace	Groceries
+COST U LESS|COSTULESS	Cost-U-Less	Groceries
+PRICED RIGHT	Priced Right	Groceries
+CHISHOLM	Chisholm's	Groceries
+SHOPRIGHT|SHOP RIGHT	Shopright	Groceries
+MCRUSS|MC RUSS	McRuss Grocery	Groceries
+BRAC SUPERMARKET	Brac Supermarket	Groceries
+BOBBYS SUPERMARKET	Bobby's Supermarket	Groceries
+PRIVATEERS MARKET	Privateer's Market	Groceries
+LITTLE CAYMAN MERCANTILE	Little Cayman Mercantile	Groceries
+FRESH HARVEST	Fresh Harvest	Groceries
+JACQUES SCOTT	Jacques Scott	Liquor
+BLACKBEARD	Blackbeard's	Liquor
+BIG DADDY	Big Daddy's	Liquor
+TORTUGA RUM|TORTUGA LIQUOR|TORTUGA DUTY FREE	Tortuga Rum Company	Liquor
+CAYMAN SPIRITS|SEVEN FATHOMS	Cayman Spirits Co.	Liquor
+CAYMAN DISTRIBUTORS	Cayman Distributors	Liquor
+
+# ── Pharmacies & health
+HEALTH CARE PHARMACY|HEALTHCARE PHARMACY|HEALTHCARE PHARM	Health Care Pharmacy	Pharmacy
+ISLAND PHARMACY|ISLAND PHARMACIES|ISLAND PHARM	Island Pharmacies	Pharmacy
+FOSTERS PHARMACY|FOSTERS PHARM	Foster's Pharmacy	Pharmacy
+KIRK PHARMACY	Kirk Pharmacy	Pharmacy
+CAYMAN DRUG	Cayman Drug	Pharmacy
+STRAND PHARMACY|STRAND PHARM	Strand Pharmacy	Pharmacy
+FIDELITY PHARMACY|FIDELITY PHARM	Fidelity Pharmacy	Pharmacy
+BAYSHORE PHARM	Bayshore Pharmacy	Pharmacy
+PHARMACARE	Pharmacare	Pharmacy
+DRUG STOP|DRUGSTOP	Drug Stop	Pharmacy
+BRAC PHARMACY	Brac Pharmacy	Pharmacy
+HEALTH CITY	Health City Cayman Islands	Doctor & Dental
+DOCTORS HOSPITAL	Doctors Hospital	Doctor & Dental
+HEALTH SERVICES AUTH|HEALTH SERVICES AUTHORITY|CAYMAN ISLANDS HOSPITAL|HSA	Health Services Authority	Doctor & Dental
+CHRISSIE TOMLINSON	Chrissie Tomlinson Memorial Hospital	Doctor & Dental
+CAYMAN CLINIC	Cayman Clinic	Doctor & Dental
+INTEGRATED CARE	Integrated Care	Doctor & Dental
+WOMENS HEALTH	Women's Health Centre	Doctor & Dental
+SEVEN MILE DENTAL	Seven Mile Dental	Doctor & Dental
+CAYMAN DENTAL	Cayman Dental	Doctor & Dental
+PREMIER DENTAL	Premier Dental	Doctor & Dental
+CAYMAN HEART	Cayman Heart Centre	Doctor & Dental
+HELIX HEALTHCARE	Helix Healthcare	Doctor & Dental
+EYEWORKS	Eyeworks	Optical
+CAYMAN OPTICAL	Cayman Optical	Optical
+
+# ── Hardware, home & shopping
+A L THOMPSON|AL THOMPSON|ALTHOMPSON|A L THOMPSONS	A.L. Thompson's	Repairs & Maintenance
+A L THOMPSON BUILDING	A.L. Thompson's	Repairs & Maintenance
+KIRK HOME CENTRE|KIRK HOME CENTER|KIRK HOME	Kirk Home Centre	Home & Garden
+COX LUMBER	Cox Lumber	Repairs & Maintenance
+ISLAND PLUMBING	Island Plumbing Supplies	Repairs & Maintenance
+UNCLE BOB	Uncle Bob's	Repairs & Maintenance
+BUILDERS MART	Builders Mart	Repairs & Maintenance
+CAYMAN BUILDING SUPPLY|CAYMAN BUILDING SUPPL	Cayman Building Supply	Repairs & Maintenance
+HURRICANE SUPPLY	Hurricane Supply	Repairs & Maintenance
+SCOTTS INDUSTRIES	Scott's Industries	Repairs & Maintenance
+ISLAND ELECTRIC	Island Electric Supply	Repairs & Maintenance
+VIP APPLIANCE	VIP Appliance Service	Repairs & Maintenance
+BON BON	Bon Bon	Home & Garden
+APPLIANCE DEPOT	Appliance Depot	Appliances
+WEST INDIES APPLIANCE	West Indies Appliances	Appliances
+FURNITURE GALLERY	Furniture Gallery	Furniture & Decor
+BEDROOM CENTRE	Bedroom Centre	Furniture & Decor
+MERRENS	Merren's Furniture	Furniture & Decor
+THE POOL STORE|POOL STORE	The Pool Store	Home & Garden
+KIRK FREEPORT	Kirk Freeport	Shopping
+CAYMAN COMPUTER	Cayman Computer	Electronics
+RADIO SHACK|RADIOSHACK	Radio Shack	Electronics
+CELLULAR WORLD	Cellular World	Electronics
+BOOK NOOK|BOOKNOOK	Book Nook	Shopping
+BOOKS & BOOKS|BOOKS AND BOOKS	Books & Books	Shopping
+HOBBIES & BOOKS|HOBBIES AND BOOKS	Hobbies & Books	Shopping
+DIRECT BUSINESS SUPPL	Direct Business Supplies	Office Supplies
+CAYMAN OFFICE SUPPL	Cayman Office Supplies	Office Supplies
+SHOE DEPOT	Shoe Depot	Clothing & Shoes
+ELITE SHOES	Elite Shoes	Clothing & Shoes
+LOCAL LOGIC	Local Logic	Clothing & Shoes
+ARABUS	Arabus	Clothing & Shoes
+WATERCOLORS	Watercolors	Clothing & Shoes
+SPORTS SUPREMO	Sports Supremo	Shopping
+
+# ── Amazon: the store is shopping, its digital services are subscriptions
+AMAZON|AMZN|AMAZON COM|AMZN COM|AMAZON MKTPL|AMZN MKTP|AMAZON MKTPLACE|AMAZON MARKETPLACE	Amazon	Online Shopping
+AMAZON DIGIT|AMAZON DIGITAL|AMZN DIGITAL|AMAZON DIGITAL SVCS	Amazon Digital	Subscriptions & Digital
+AMAZON PRIME|AMZN PRIME|PRIME MEMBERSHIP	Amazon Prime	Subscriptions & Digital
+PRIME VIDEO|PRIMEVIDEO	Prime Video	Subscriptions & Digital
+KINDLE|KINDLE UNLTD|KINDLE UNLIMITED	Kindle	Subscriptions & Digital
+AUDIBLE	Audible	Subscriptions & Digital
+
+# ── Pets
+ISLAND VETERINARY|ISLAND VET	Island Veterinary Services	Vet
+CAYMAN ANIMAL HOSPITAL	Cayman Animal Hospital	Vet
+ALL CREATURES	All Creatures Veterinary	Vet
+CAYMAN VETERINARY|CAYMAN VET	Cayman Veterinary Clinic	Vet
+HUMANE SOCIETY	Cayman Islands Humane Society	Vet
+PET PARADISE	Pet Paradise	Pet Food & Supplies
+
+# ── Utilities (electricity, water, propane, phone/internet/TV)
+CUC|C U C|CARIBBEAN UTILITIES|CARIBBEAN UTIL	Caribbean Utilities Company	Electricity
+BRAC POWER|CAYMAN BRAC POWER|CBPL	Cayman Brac Power & Light	Electricity
+WATER AUTHORITY|WATER AUTH	Water Authority	Water
+CONSOLIDATED WATER|CAYMAN WATER	Consolidated Water	Water
+HOME GAS|HOMEGAS	Home Gas	Gas
+CLEAN GAS|CLEANGAS	Clean Gas	Gas
+LOGIC|LOGIC COMMUNICATIONS|WESTTEL|WESTSTAR	Logic	Phone & Internet
+FLOW|CABLE & WIRELESS|CABLE AND WIRELESS	Flow	Phone & Internet
+C3|C3 CAYMAN|C3 PURE FIBRE	C3	Phone & Internet
+DIGICEL	Digicel	Phone & Internet
+INFINITY BROADBAND	Infinity Broadband	Phone & Internet
+
+# ── Fuel
+RUBIS	Rubis	Fuel
+AA RUBIS|AA RED BAY|AA REDBAY|AA SEVEN MILE|AA 7 MILE	AA Rubis	Fuel
+SOL PETROLEUM|SOL CAYMAN|ESSO	Sol / Esso	Fuel
+TEXACO	Texaco	Fuel
+HELL GAS|HELL SERVICE	Hell Gas Station	Fuel
+SAVANNAH RUBIS	Savannah Rubis	Fuel
+EASTERN AVE RUBIS	Eastern Avenue Rubis	Fuel
+WALKERS ROAD RUBIS|WALKERS RD RUBIS	Walkers Road Rubis	Fuel
+OASIS BATABANO	Oasis Rubis Batabano	Fuel
+
+# ── Insurance
+CAYMAN FIRST	Cayman First Insurance	Health Insurance
+HEALTH ASSURE	Cayman First HealthAssure	Health Insurance
+BRITISH CAYMANIAN|BRITCAY|BRIT CAY	British Caymanian Insurance	Insurance
+CINICO	CINICO	Health Insurance
+ISLAND HERITAGE	Island Heritage Insurance	Home Insurance
+SAGICOR	Sagicor	Life Insurance
+FIDELITY INSURANCE|FIDELITY INS	Fidelity Insurance	Insurance
+FIS INSURANCE|FIS INSURANCEBROKERS|FIS INS	FIS Insurance Brokers	Insurance
+AON CAYMAN|AON	Aon Cayman	Insurance
+SAXON INSURANCE	Saxon Insurance	Insurance
+HAMLIN MAGEE	Hamlin-Magee Insurance	Insurance
+MASSY UNITED|MASSY INSURANCE|UNITED INSURANCE	Massy United Insurance	Insurance
+GUARDIAN GENERAL|GUARDIAN INSURANCE|GUARDIAN LIFE	Guardian Group	Insurance
+GENERAL INSURANCE	General Insurance Company	Insurance
+BAF INSURANCE	BAF Insurance	Insurance
+ALLIED INSURANCE	Allied Insurance Brokers	Insurance
+INSURANCE BROKERS LTD	Insurance Brokers Ltd	Insurance
+AIG	AIG	Insurance
+BUPA	Bupa Global	Health Insurance
+CIGNA	Cigna	Health Insurance
+BRITISH AMERICAN INS	British American Insurance	Life Insurance
+COLONIAL LIFE	Colonial Insurance	Life Insurance
+CUNA MUTUAL|CUNA	CUNA Mutual	Life Insurance
+
+# ── Government & fees
+GENERAL REGISTRY|GEN REGISTRY	General Registry	Government & Fees
+DVDL|VEHICLE LICENSING|VEHICLE & DRIVERS	DVDL	Vehicle Licensing
+CUSTOMS & BORDER|CUSTOMS AND BORDER|CUSTOMS	Customs & Border Control	Import Duty
+WORC|WORK PERMIT|IMMIGRATION	WORC / Immigration	Work Permits & Immigration
+LANDS & SURVEY|LANDS AND SURVEY	Lands & Survey	Stamp Duty
+CAYMAN ISLANDS GOVERNMENT|CI GOVT	Cayman Islands Government	Government & Fees
+DEPT OF PLANNING|PLANNING DEPT|CENTRAL PLANNING	Department of Planning	Government & Fees
+CIAA|AIRPORTS AUTHORITY	Cayman Islands Airports Authority	Government & Fees
+PORT AUTHORITY	Port Authority	Government & Fees
+JUDICIAL ADMIN|CAYMAN COURTS	Courts Office	Government & Fees
+RCIPS|POLICE CLEARANCE	RCIPS	Government & Fees
+POSTAL SERVICE|CI POSTAL|POST OFFICE	Cayman Islands Postal Service	Government & Fees
+ENVIRONMENTAL HEALTH	Department of Environmental Health	Government & Fees
+PASSPORT	Passport & Corporate Services	Government & Fees
+OFREG	OfReg	Government & Fees
+
+# ── Restaurants, cafés, takeaway
+BURGER KING	Burger King	Takeaway & Delivery
+KFC|KENTUCKY FRIED	KFC	Takeaway & Delivery
+WENDYS	Wendy's	Takeaway & Delivery
+DOMINOS	Domino's Pizza	Takeaway & Delivery
+PIZZA HUT	Pizza Hut	Takeaway & Delivery
+SUBWAY	Subway	Takeaway & Delivery
+POPEYES	Popeyes	Takeaway & Delivery
+TACO BELL	Taco Bell	Takeaway & Delivery
+FIVE GUYS	Five Guys	Takeaway & Delivery
+PAPA JOHN	Papa John's	Takeaway & Delivery
+CHIPOTLE	Chipotle	Takeaway & Delivery
+PANDA EXPRESS	Panda Express	Takeaway & Delivery
+CHICKEN CHICKEN	Chicken! Chicken!	Takeaway & Delivery
+MARLEY JERK	Marley Jerk Centre	Takeaway & Delivery
+FUJIYAMA	Fujiyama	Takeaway & Delivery
+TACO CUBANO	Taco Cubano	Takeaway & Delivery
+AL LA KEBAB|ALLAKEBAB	Al La Kebab	Takeaway & Delivery
+WOK STAR|WOKSTAR	Wok Star	Takeaway & Delivery
+EAT CAYMAN|EATCAYMAN	Eat Cayman	Takeaway & Delivery
+LETS EAT	Let's Eat	Takeaway & Delivery
+NOMMI	Nommi	Takeaway & Delivery
+CAYMAN EATS	Cayman Eats	Takeaway & Delivery
+DUNKIN	Dunkin'	Coffee & Snacks
+STARBUCKS	Starbucks	Coffee & Snacks
+TIM HORTONS	Tim Hortons	Coffee & Snacks
+COSTA COFFEE	Costa Coffee	Coffee & Snacks
+DAIRY QUEEN	Dairy Queen	Coffee & Snacks
+CINNABON	Cinnabon	Coffee & Snacks
+HAAGEN DAZS|HAAGEN	Häagen-Dazs	Coffee & Snacks
+GELATO & CO|GELATO AND CO	Gelato & Co	Coffee & Snacks
+ICE CREAM DREAM	Ice Cream Dream	Coffee & Snacks
+CAPTAINS BAKERY	Captain's Bakery & Grill	Coffee & Snacks
+CAYMAN COFFEE	Cayman Coffee	Coffee & Snacks
+CAFE DEL SOL	Cafe del Sol	Coffee & Snacks
+CAFE NAMASTE	Cafe Namaste	Coffee & Snacks
+COFFEE BOUTIQUE	Coffee Boutique	Coffee & Snacks
+JESSIES JUICE	Jessie's Juice Bar	Coffee & Snacks
+ISLAND NATURALS	Island Naturals	Coffee & Snacks
+BIG BENS	Big Ben's Bakery	Coffee & Snacks
+ZIPPY SMOOTHIES	Zippy Smoothies	Coffee & Snacks
+CRACKED CONCH	The Cracked Conch	Restaurants
+MICHAELS GENUINE	Michael's Genuine Food & Drink	Restaurants
+BROOKLYN PIZZA	Brooklyn Pizza & Pasta	Restaurants
+HELENS KITCHEN	Helen's Kitchen	Restaurants
+BENTO	Bento	Restaurants
+FLAVORS	Flavors	Restaurants
+CALYPSO GRILL	Calypso Grill	Restaurants
+GRAND OLD HOUSE	Grand Old House	Restaurants
+PAPPAGALLO|PAPAGALLO	Ristorante Pappagallo	Restaurants
+AGUA CAYMAN|AGUA REST	Agua	Restaurants
+MORGANS HARBOUR|MORGANS SEAFOOD	Morgan's	Restaurants
+RACKAMS	Rackam's	Restaurants
+THE WHARF|WHARF REST	The Wharf	Restaurants
+TUKKA	Tukka	Restaurants
+OVER THE EDGE	Over the Edge	Restaurants
+HERITAGE KITCHEN	Heritage Kitchen	Restaurants
+VIVO CAFE|VIVO	Vivo	Restaurants
+ABACUS	Abacus	Restaurants
+CRAFT FOOD	Craft Food & Beverage Co	Restaurants
+COCCOLOBA	Coccoloba	Restaurants
+BLUE BY ERIC	Blue by Eric Ripert	Restaurants
+TAIKUN	Taikun	Restaurants
+MIZU	Mizu	Restaurants
+ORTANIQUE	Ortanique	Restaurants
+LUCA CAYMAN|LUCA REST	Luca	Restaurants
+LOBSTER POT	Lobster Pot	Restaurants
+CASANOVA	Casanova by the Sea	Restaurants
+GUY HARVEY	Guy Harvey's Island Grill	Restaurants
+BREEZES BY THE BAY	Breezes by the Bay	Restaurants
+MARGARITAVILLE	Margaritaville	Restaurants
+HARD ROCK	Hard Rock Cafe	Restaurants
+BAR CENTRAL	Bar Central	Restaurants
+SEA HARVEST	Sea Harvest	Restaurants
+EAGLE RAYS	Eagle Ray's	Restaurants
+KAIBO	Kaibo	Restaurants
+RUM POINT|RUMPOINT	Rum Point Club	Restaurants
+STARFISH POINT	Starfish Point	Restaurants
+LUIGIS	Luigi's	Restaurants
+CHAMPION HOUSE	Champion House	Restaurants
+THE BRASSERIE|BRASSERIE	The Brasserie	Restaurants
+YOSHI SUSHI	Yoshi Sushi	Restaurants
+EAST END SEAFOOD	East End Seafood	Restaurants
+ANCHOR & ROPE|ANCHOR AND ROPE	Anchor & Rope	Restaurants
+NORMAS	Norma's	Restaurants
+DUKES SEAFOOD	Duke's Seafood & Rib Shack	Restaurants
+LONE STAR	Lone Star Bar & Grill	Restaurants
+CALICO JACK	Calico Jack's	Restaurants
+MACABUCA	Macabuca	Restaurants
+COPPER FALLS	Copper Falls Steakhouse	Restaurants
+BOMBAY BRASSERIE	Bombay Brasserie	Restaurants
+TAJ MAHAL	Taj Mahal	Restaurants
+THAI ORCHID	Thai Orchid	Restaurants
+GOLDEN PAGODA	Golden Pagoda	Restaurants
+CHEESEBURGER REEF	Cheeseburger Reef	Restaurants
+DUPPYS	Duppy's	Restaurants
+MANGO TREE	Mango Tree	Restaurants
+GREEN BAMBOO	Green Bamboo	Restaurants
+OCEAN CLUB	Ocean Club	Restaurants
+GEORGE TOWN YACHT|YACHT CLUB	George Town Yacht Club	Restaurants
+PANCHOS	Pancho's	Restaurants
+SAPORE	Sapore	Restaurants
+LIGHTHOUSE REST	The Lighthouse	Restaurants
+AL FRESCO	Al Fresco	Restaurants
+HUNGRY IGUANA	Hungry Iguana	Restaurants
+TIKI BEACH	Tiki Beach	Restaurants
+GREEN TURTLE	Green Turtle	Restaurants
+BLACK PEARL	Black Pearl	Restaurants
+SOUTHERN CROSS	Southern Cross Club	Restaurants
+PIRATES POINT	Pirates Point	Restaurants
+BRAC REEF	Brac Reef Beach Resort	Restaurants
+CIMBOCO	Cimboco	Restaurants
+POPEYES RED BAY	Popeyes	Takeaway & Delivery
+
+# ── Auto
+CAYMAN AUTOMOTIVE	Cayman Automotive	Car Payment
+ANDYS AUTO	Andy's Auto Group	Car Payment
+MOTOR MART	Motor Mart	Car Payment
+AUTOMAX	AutoMax	Car Payment
+DOWNTOWN MOTORS	Downtown Motors	Car Payment
+ARCH & GODFREY|ARCH AND GODFREY	Arch & Godfrey	Car Payment
+BRITISH CAYMANIAN MOTORS	British Caymanian Motors	Car Payment
+ISLAND MOTORS	Island Motors	Car Payment
+WHEELS OF CAYMAN	Wheels of Cayman	Car Payment
+AUTO SPA	Auto Spa	Vehicle Maintenance
+MIDAS	Midas	Vehicle Maintenance
+NAPA	NAPA Auto Parts	Vehicle Maintenance
+CARQUEST	Carquest	Vehicle Maintenance
+AUTOZONE|AUTO ZONE	AutoZone	Vehicle Maintenance
+TYRE MART|TIRE MART	Tyre Mart	Vehicle Maintenance
+TIRE WORLD|TYRE WORLD	Tire World	Vehicle Maintenance
+AUTO ELECTRIC	Auto Electric	Vehicle Maintenance
+WASH DEPOT	Wash Depot	Vehicle Maintenance
+ANDYS RENT	Andy's Rent a Car	Car Rental
+AVIS	Avis	Car Rental
+BUDGET RENT|BUDGET CAR	Budget Rent a Car	Car Rental
+HERTZ	Hertz	Car Rental
+THRIFTY	Thrifty	Car Rental
+ECONOMY CAR|ECONOMY RENT	Economy Car Rental	Car Rental
+MARSHALLS RENT	Marshall's Rent a Car	Car Rental
+DOLLAR RENT	Dollar Rent a Car	Car Rental
+ALAMO	Alamo	Car Rental
+NATIONAL CAR	National Car Rental	Car Rental
+ENTERPRISE RENT	Enterprise Rent-A-Car	Car Rental
+SIXT	Sixt	Car Rental
+CAYMAN CABS	Cayman Cabs	Taxi & Rideshare
+CHARLIES TAXI|CHARLIES SUPER CAB	Charlie's Super Cabs	Taxi & Rideshare
+FLOW TAXI|FLOWTAXI	Flow Taxi	Taxi & Rideshare
+UBER	Uber	Taxi & Rideshare
+UBER EATS|UBEREATS	Uber Eats	Takeaway & Delivery
+LYFT	Lyft	Taxi & Rideshare
+CAMANA BAY PARK	Camana Bay Parking	Parking
+
+# ── Fitness, beauty, spa
+WORLD GYM	World Gym	Gym & Sports
+ANYTIME FITNESS|ANYTIME WELLNESS|ANYTIME WELL	Anytime Fitness	Gym & Sports
+REVOLUTION FIT|REVOLUTION GYM	Revolution	Gym & Sports
+FIT FACTORY	Fit Factory	Gym & Sports
+CROSSFIT	CrossFit	Gym & Sports
+F45	F45 Training	Gym & Sports
+ORANGETHEORY	Orangetheory	Gym & Sports
+SOUTH SOUND SQUASH	South Sound Squash Club	Gym & Sports
+NORTH SOUND GOLF|BRITANNIA GOLF	Golf Club	Gym & Sports
+SALON SAVVY	Salon Savvy	Hair & Beauty
+BLOW DRY BAR	Blow Dry Bar	Hair & Beauty
+SEPHORA	Sephora	Hair & Beauty
+HIBISCUS SPA	Hibiscus Spa	Spa & Massage
+HEAVENLY SPA	Heavenly Spa	Spa & Massage
+LOTUS SPA	Lotus Spa	Spa & Massage
+
+# ── Schools & childcare
+CAYMAN PREP	Cayman Prep & High School	School Fees & Tuition
+ST IGNATIUS	St. Ignatius Catholic School	School Fees & Tuition
+CAYMAN INTERNATIONAL SCH|CAYMAN INTERNATIONAL SCHOOL	Cayman International School	School Fees & Tuition
+TRIPLE C	Triple C School	School Fees & Tuition
+GRACE CHRISTIAN	Grace Christian Academy	School Fees & Tuition
+TRUTH FOR YOUTH	Truth for Youth School	School Fees & Tuition
+CAYMAN ACADEMY	Cayman Academy	School Fees & Tuition
+ST GEORGES	St. George's School	School Fees & Tuition
+CAYMAN LEARNING CENTRE	Cayman Learning Centre	School Fees & Tuition
+MONTESSORI BY THE SEA	Montessori by the Sea	Childcare & Nanny
+MONTESSORI	Montessori School	Childcare & Nanny
+LITTLE TROOPERS	Little Troopers Preschool	Childcare & Nanny
+WEE CARE	Wee Care Nursery	Childcare & Nanny
+
+# ── Entertainment, travel, hotels
+REGAL CAMANA|REGAL CINEMA	Regal Camana Bay	Events & Tickets
+STINGRAY CITY	Stingray City Tours	Events & Tickets
+RED SAIL	Red Sail Sports	Hobbies
+DIVETECH|DIVE TECH	Divetech	Hobbies
+SUNSET HOUSE	Sunset House	Restaurants
+DON FOSTERS	Don Foster's Dive	Hobbies
+OCEAN FRONTIERS	Ocean Frontiers	Hobbies
+TURTLE CENTRE|CAYMAN TURTLE	Cayman Turtle Centre	Events & Tickets
+BOTANIC PARK	QE II Botanic Park	Events & Tickets
+NATIONAL GALLERY	National Gallery	Events & Tickets
+TICKETMASTER	Ticketmaster	Events & Tickets
+CAYMAN AIRWAYS	Cayman Airways	Flights
+AMERICAN AIR|AMERICAN AIRLINES|AA COM	American Airlines	Flights
+JETBLUE	JetBlue	Flights
+DELTA AIR|DELTA COM	Delta	Flights
+BRITISH AIRWAYS|BRITISH AIR	British Airways	Flights
+WESTJET	WestJet	Flights
+AIR CANADA	Air Canada	Flights
+SOUTHWEST AIR|SOUTHWES	Southwest	Flights
+UNITED AIR|UNITED COM	United	Flights
+COPA AIR	Copa Airlines	Flights
+RITZ CARLTON	Ritz-Carlton Grand Cayman	Hotels
+KIMPTON|SEAFIRE	Kimpton Seafire	Hotels
+WESTIN	Westin Grand Cayman	Hotels
+MARRIOTT	Marriott	Hotels
+GRAND CAYMAN BEACH SUITES	Grand Cayman Beach Suites	Hotels
+HOLIDAY INN	Holiday Inn	Hotels
+COMFORT SUITES	Comfort Suites	Hotels
+SUNSHINE SUITES	Sunshine Suites	Hotels
+WYNDHAM	Wyndham	Hotels
+HYATT	Hyatt	Hotels
+COMPASS POINT	Compass Point	Hotels
+
+# ── Home services
+MOLLY MAID	Molly Maid	Cleaning
+MERRY MAIDS	Merry Maids	Cleaning
+ORKIN	Orkin	Pest Control
+TERMINIX	Terminix	Pest Control
+CAYMAN PEST	Cayman Pest Control	Pest Control
+BUG BUSTERS|BUGBUSTERS	Bug Busters	Pest Control
+PURGE WASTE WATER	Purge Waste Water	Repairs & Maintenance
+POLAR AIR	Polar Air	Repairs & Maintenance
+
+# ── Online retailers & marketplaces
+WALMART|WAL MART|WALMART COM	Walmart	Shopping
+TARGET|TARGET COM|TARGET CORP	Target	Shopping
+COSTCO|COSTCO WHSE|COSTCO COM	Costco	Shopping
+SAMS CLUB|SAMSCLUB	Sam's Club	Shopping
+BEST BUY|BESTBUY|BESTBUY COM	Best Buy	Electronics
+NEWEGG	Newegg	Electronics
+B&H PHOTO|BH PHOTO|B H PHOTO	B&H Photo	Electronics
+APPLE STORE|APPLE ONLINE STORE	Apple Store	Electronics
+DELL	Dell	Electronics
+HOME DEPOT|HOMEDEPOT	The Home Depot	Home & Garden
+LOWES|LOWE S	Lowe's	Home & Garden
+WAYFAIR	Wayfair	Furniture & Decor
+IKEA	IKEA	Furniture & Decor
+OVERSTOCK	Overstock	Furniture & Decor
+BED BATH	Bed Bath & Beyond	Home & Garden
+EBAY	eBay	Online Shopping
+ETSY	Etsy	Online Shopping
+TEMU	Temu	Online Shopping
+SHEIN	Shein	Clothing & Shoes
+ALIEXPRESS|ALIBABA	AliExpress	Online Shopping
+WISH COM	Wish	Online Shopping
+CHEWY|CHEWY COM	Chewy	Pet Food & Supplies
+ZAPPOS	Zappos	Clothing & Shoes
+NORDSTROM	Nordstrom	Clothing & Shoes
+MACYS	Macy's	Clothing & Shoes
+OLD NAVY	Old Navy	Clothing & Shoes
+GAP COM|GAP STORE	Gap	Clothing & Shoes
+H&M|H M HENNES|HM COM	H&M	Clothing & Shoes
+ZARA	Zara	Clothing & Shoes
+NIKE|NIKE COM	Nike	Clothing & Shoes
+ADIDAS	Adidas	Clothing & Shoes
+ASOS	ASOS	Clothing & Shoes
+SEPHORA COM	Sephora	Hair & Beauty
+ULTA	Ulta Beauty	Hair & Beauty
+CVS|CVS PHARMACY	CVS	Pharmacy
+WALGREENS	Walgreens	Pharmacy
+IHERB	iHerb	Health & Fitness
+VITACOST	Vitacost	Health & Fitness
+MYUS|MYUS COM	MyUS	Shipping & Freight
+SHIPITO	Shipito	Shipping & Freight
+ARAMEX	Aramex	Shipping & Freight
+FEDEX	FedEx	Shipping & Freight
+UPS STORE|UPS COM	UPS	Shipping & Freight
+DHL	DHL	Shipping & Freight
+TROPICAL SHIPPING|TROPICAL SHIP	Tropical Shipping	Shipping & Freight
+AEROPOST	Aeropost	Shipping & Freight
+CARIBEX	Caribex	Shipping & Freight
+HYDE SHIPPING	Hyde Shipping	Shipping & Freight
+SEABOARD MARINE|SEABOARD	Seaboard Marine	Shipping & Freight
+CROWLEY	Crowley	Shipping & Freight
+CAYMAN FREIGHT	Cayman Freight Services	Shipping & Freight
+SHOPIFY	Shopify store	Online Shopping
+SQUARESPACE	Squarespace	Subscriptions & Digital
+WIX COM|WIX	Wix	Subscriptions & Digital
+GODADDY	GoDaddy	Subscriptions & Digital
+NAMECHEAP	Namecheap	Subscriptions & Digital
+
+# ── Google: Google Play / plain GOOGLE are fallbacks, so the service named after them wins
+GOOGLE|GOOGLE COM|GOOGLE PLAY|GOOGLE PAY	Google	Subscriptions & Digital	fallback
+GOOGLE ONE|GOOGLE STORAGE|GOOGLE ONE AI	Google One	Subscriptions & Digital
+GOOGLE WORKSPACE|GSUITE|G SUITE|GOOGLE GSUITE	Google Workspace	Subscriptions & Digital
+YOUTUBE|YOUTUBEPREMIUM|YOUTUBE PREMIUM|YOUTUBE MUSIC|YOUTUBE TV|YOUTUBETV	YouTube	Subscriptions & Digital
+GOOGLE FI|GOOGLE FIBER	Google Fi	Phone & Internet
+GOOGLE NEST|NEST AWARE	Google Nest Aware	Subscriptions & Digital
+FITBIT	Fitbit Premium	Subscriptions & Digital
+GOOGLE CLOUD|GCP	Google Cloud	Subscriptions & Digital
+GOOGLE DOMAINS	Google Domains	Subscriptions & Digital
+GOOGLE ADS|ADWORDS	Google Ads	Advertising & Marketing
+GOOGLE GEMINI|GEMINI	Google Gemini	Subscriptions & Digital
+GOOGLE STORE	Google Store	Electronics
+
+# ── Apple: APPLE.COM/BILL is the App Store / iCloud / Apple One
+APPLE COM|APPLE COM BILL|ITUNES	Apple	Subscriptions & Digital	fallback
+ICLOUD|APPLE ICLOUD	Apple iCloud+	Subscriptions & Digital
+APPLE MUSIC	Apple Music	Subscriptions & Digital
+APPLE TV	Apple TV+	Subscriptions & Digital
+APPLE ONE	Apple One	Subscriptions & Digital
+APPLE ARCADE	Apple Arcade	Subscriptions & Digital
+
+# ── Microsoft & Amazon services
+MICROSOFT|MSFT|MICROSOFT 365|OFFICE 365|MS 365	Microsoft 365	Subscriptions & Digital
+XBOX|XBOX LIVE|GAME PASS	Xbox Game Pass	Subscriptions & Digital
+ONEDRIVE	OneDrive	Subscriptions & Digital
+OUTLOOK	Outlook	Subscriptions & Digital
+AMAZON WEB SERVICES|AWS	Amazon Web Services	Subscriptions & Digital
+TWITCH	Twitch	Subscriptions & Digital
+
+# ── VPNs & privacy
+NORDVPN|NORD VPN|NORDSEC|NORD SECURITY	NordVPN	Subscriptions & Digital
+EXPRESSVPN|EXPRESS VPN	ExpressVPN	Subscriptions & Digital
+SURFSHARK	Surfshark	Subscriptions & Digital
+PROTONVPN|PROTON VPN	Proton VPN	Subscriptions & Digital
+PROTON|PROTON AG|PROTONMAIL|PROTON MAIL	Proton	Subscriptions & Digital
+CYBERGHOST	CyberGhost	Subscriptions & Digital
+PRIVATE INTERNET ACCESS|PIA VPN|PRIVATEINTERNETACCESS	Private Internet Access	Subscriptions & Digital
+IPVANISH	IPVanish	Subscriptions & Digital
+MULLVAD	Mullvad VPN	Subscriptions & Digital
+WINDSCRIBE	Windscribe	Subscriptions & Digital
+ATLAS VPN	Atlas VPN	Subscriptions & Digital
+HOTSPOT SHIELD	Hotspot Shield	Subscriptions & Digital
+TUNNELBEAR	TunnelBear	Subscriptions & Digital
+PUREVPN	PureVPN	Subscriptions & Digital
+INCOGNI	Incogni	Subscriptions & Digital
+DELETEME|DELETE ME	DeleteMe	Subscriptions & Digital
+AURA COM	Aura	Subscriptions & Digital
+NORTON|NORTONLIFELOCK|GEN DIGITAL	Norton	Subscriptions & Digital
+MCAFEE	McAfee	Subscriptions & Digital
+BITDEFENDER	Bitdefender	Subscriptions & Digital
+MALWAREBYTES	Malwarebytes	Subscriptions & Digital
+KASPERSKY	Kaspersky	Subscriptions & Digital
+1PASSWORD|ONEPASSWORD	1Password	Subscriptions & Digital
+LASTPASS	LastPass	Subscriptions & Digital
+BITWARDEN	Bitwarden	Subscriptions & Digital
+DASHLANE	Dashlane	Subscriptions & Digital
+
+# ── Email & productivity
+YAHOO|YAHOO MAIL	Yahoo Mail	Subscriptions & Digital
+FASTMAIL	Fastmail	Subscriptions & Digital
+ZOHO	Zoho	Subscriptions & Digital
+TUTANOTA|TUTA	Tuta Mail	Subscriptions & Digital
+HEY COM|HEY EMAIL	HEY	Subscriptions & Digital
+AOL	AOL	Subscriptions & Digital
+GMX	GMX	Subscriptions & Digital
+ICLOUD MAIL	iCloud Mail	Subscriptions & Digital
+SUPERHUMAN	Superhuman	Subscriptions & Digital
+HEINLEIN HOSTING|MAILBOX ORG	Mailbox.org	Subscriptions & Digital
+NOTION	Notion	Subscriptions & Digital
+EVERNOTE	Evernote	Subscriptions & Digital
+TODOIST	Todoist	Subscriptions & Digital
+DROPBOX	Dropbox	Subscriptions & Digital
+BOX COM	Box	Subscriptions & Digital
+ZOOM|ZOOM US|ZOOM COM	Zoom	Subscriptions & Digital
+SLACK	Slack	Subscriptions & Digital
+CANVA	Canva	Subscriptions & Digital
+GRAMMARLY	Grammarly	Subscriptions & Digital
+DOCUSIGN	DocuSign	Subscriptions & Digital
+ADOBE|ADOBE SYSTEMS|ADOBE INC	Adobe	Subscriptions & Digital
+AUTODESK	Autodesk	Subscriptions & Digital
+QUICKBOOKS|INTUIT	QuickBooks	Subscriptions & Digital
+XERO	Xero	Subscriptions & Digital
+LINKEDIN	LinkedIn	Subscriptions & Digital
+GITHUB	GitHub	Subscriptions & Digital
+JETBRAINS	JetBrains	Subscriptions & Digital
+DIGITALOCEAN|DIGITAL OCEAN	DigitalOcean	Subscriptions & Digital
+CLOUDFLARE	Cloudflare	Subscriptions & Digital
+BACKBLAZE	Backblaze	Subscriptions & Digital
+SIMPLEFIN	SimpleFIN	Subscriptions & Digital
+SIGNAL	Signal	Subscriptions & Digital
+TELEGRAM	Telegram	Subscriptions & Digital
+WHATSAPP	WhatsApp	Subscriptions & Digital
+
+# ── AI
+ANTHROPIC|CLAUDE AI	Anthropic (Claude)	Subscriptions & Digital
+OPENAI|CHATGPT	OpenAI (ChatGPT)	Subscriptions & Digital
+MIDJOURNEY	Midjourney	Subscriptions & Digital
+PERPLEXITY	Perplexity	Subscriptions & Digital
+CURSOR|ANYSPHERE	Cursor	Subscriptions & Digital
+ELEVENLABS	ElevenLabs	Subscriptions & Digital
+RECRAFT	Recraft	Subscriptions & Digital
+GITHUB COPILOT	GitHub Copilot	Subscriptions & Digital
+
+# ── Streaming, music, news, reading
+NETFLIX	Netflix	Subscriptions & Digital
+HBO|HBOMAX|HBO MAX|MAX COM	HBO Max	Subscriptions & Digital
+DISNEY|DISNEYPLUS|DISNEY PLUS	Disney+	Subscriptions & Digital
+HULU|HLU	Hulu	Subscriptions & Digital
+DISCOVERY|DISCOVERYDI|DISCOVERY PLUS	Discovery+	Subscriptions & Digital
+PARAMOUNT|PARAMOUNTPLUS	Paramount+	Subscriptions & Digital
+PEACOCK	Peacock	Subscriptions & Digital
+ESPN|ESPN PLUS	ESPN+	Subscriptions & Digital
+DAZN	DAZN	Subscriptions & Digital
+FUBO|FUBOTV	Fubo	Subscriptions & Digital
+SLING	Sling TV	Subscriptions & Digital
+CRUNCHYROLL	Crunchyroll	Subscriptions & Digital
+STARZ	Starz	Subscriptions & Digital
+SHOWTIME	Showtime	Subscriptions & Digital
+BRITBOX	BritBox	Subscriptions & Digital
+NFL GAME PASS|NFLPLUS|NFL PLUS	NFL+	Subscriptions & Digital
+NBA LEAGUE PASS|NBA COM	NBA League Pass	Subscriptions & Digital
+SPOTIFY	Spotify	Subscriptions & Digital
+TIDAL	Tidal	Subscriptions & Digital
+DEEZER	Deezer	Subscriptions & Digital
+PANDORA	Pandora	Subscriptions & Digital
+SIRIUSXM|SIRIUS XM	SiriusXM	Subscriptions & Digital
+SOUNDCLOUD	SoundCloud	Subscriptions & Digital
+PATREON	Patreon	Subscriptions & Digital
+SUBSTACK	Substack	Subscriptions & Digital
+MEDIUM COM	Medium	Subscriptions & Digital
+NYTIMES|NY TIMES|NEW YORK TIMES	New York Times	Subscriptions & Digital
+WSJ|WALL STREET JOURNAL|DOW JONES	Wall Street Journal	Subscriptions & Digital
+WASHINGTON POST|WAPO	Washington Post	Subscriptions & Digital
+ECONOMIST	The Economist	Subscriptions & Digital
+BLOOMBERG	Bloomberg	Subscriptions & Digital
+CAYMAN COMPASS	Cayman Compass	Subscriptions & Digital
+SCRIBD|EVERAND	Scribd	Subscriptions & Digital
+KOBO	Kobo	Subscriptions & Digital
+DUOLINGO	Duolingo	Subscriptions & Digital
+MASTERCLASS	MasterClass	Subscriptions & Digital
+COURSERA	Coursera	Books & Courses
+UDEMY	Udemy	Books & Courses
+SKILLSHARE	Skillshare	Books & Courses
+CALM COM	Calm	Subscriptions & Digital
+HEADSPACE	Headspace	Subscriptions & Digital
+STRAVA	Strava	Subscriptions & Digital
+PELOTON	Peloton	Subscriptions & Digital
+MYFITNESSPAL	MyFitnessPal	Subscriptions & Digital
+FLIGHTRADAR24|FLIGHTRADAR	Flightradar24	Subscriptions & Digital
+FOREFLIGHT	ForeFlight	Subscriptions & Digital
+
+# ── Games
+STEAMPOWERED|STEAM GAMES|STEAM PURCHASE|STEAMGAMES	Steam	Hobbies
+PLAYSTATION|SONY INTERACTIVE|PSN	PlayStation	Subscriptions & Digital
+NINTENDO	Nintendo	Hobbies
+EPIC GAMES	Epic Games	Hobbies
+ROBLOX	Roblox	Hobbies
+EA COM|ELECTRONIC ARTS	EA	Hobbies
+BLIZZARD|BATTLE NET	Blizzard	Hobbies
+
+# ── Delivery & rides abroad
+DOORDASH	DoorDash	Takeaway & Delivery
+GRUBHUB	Grubhub	Takeaway & Delivery
+INSTACART	Instacart	Groceries
+
+# ── Travel booking
+BOOKING COM	Booking.com	Hotels
+AIRBNB	Airbnb	Hotels
+VRBO	Vrbo	Hotels
+EXPEDIA	Expedia	Flights
+HOTELS COM	Hotels.com	Hotels
+PRICELINE	Priceline	Hotels
+AGODA	Agoda	Hotels
+KAYAK	Kayak	Flights
+TRIP COM	Trip.com	Flights
+
+# ── Income
+SALARY|DIR PAY	Salary	Salary
+RENT RECEIVED	Rent	Rental Income
+DIVIDEND	Dividend	Interest & Dividends
+INTEREST PAID	Interest	Interest & Dividends

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=FinGraph
+GenericName=Personal Finance
+Comment=Read Cayman bank statements, prove them to the cent, and see where the money goes
+Exec=fingraph %F
+Icon=dev.fingraph.FinGraph
+Terminal=false
+Categories=Office;Finance;GTK;
+MimeType=application/pdf;
+Keywords=bank;statement;ledger;budget;Cayman;Butterfield;Scotiabank;CNB;RBC;credit union;
+StartupNotify=true

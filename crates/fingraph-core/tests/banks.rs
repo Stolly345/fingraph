@@ -1,0 +1,507 @@
+//! Simulated statements for all five Cayman banks through the full 5-pass scanner.
+
+use chrono::NaiveDate;
+use fingraph_core::demo::{self, Bank, DemoTx, StatementSpec};
+use fingraph_core::parser::{MultiPassScanner, ScanResult, profiles};
+use fingraph_core::{AccountType, Currency, Decimal, Reconciliation};
+
+fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(y, m, day).unwrap()
+}
+fn dec(s: &str) -> Decimal {
+    s.parse().unwrap()
+}
+fn scan(specs: &[StatementSpec]) -> ScanResult {
+    let p = profiles::builtins();
+    MultiPassScanner::new(&p).scan_tokens(demo::render(specs)).unwrap()
+}
+/// Every section reconciled, and every transaction exactly as generated (date, ledger amount).
+fn assert_exact(r: &ScanResult, specs: &[StatementSpec]) {
+    assert_eq!(r.sections.len(), specs.len(), "sections");
+    for (s, spec) in r.sections.iter().zip(specs) {
+        assert_eq!(s.reconciliation, Reconciliation::Reconciled, "{:?} {:?}\n{:#?}", spec.bank, spec.account_type, s.report);
+        assert_eq!(s.currency, spec.currency);
+        assert_eq!(s.account_type, spec.account_type);
+        assert_eq!(s.account_last4.as_deref(), Some(spec.last4.as_str()));
+        let got: Vec<(NaiveDate, Decimal)> = s.transactions.iter().map(|t| (t.effective.unwrap_or(t.posted), t.amount)).collect();
+        let want: Vec<(NaiveDate, Decimal)> = spec.txs.iter().map(|t| (t.date, t.amount)).collect();
+        assert_eq!(got, want);
+    }
+}
+
+#[test]
+fn butterfield_chequing_ddmmyyyy_with_fx_memo() {
+    let txs = vec![
+        DemoTx::new(d(2026, 8, 3), "SALARY HARBOUR FREIGHT", dec("2480.15")),
+        DemoTx::new(d(2026, 8, 5), "POS FOSTER'S FOOD FAIR", dec("-84.12")),
+        DemoTx::new(d(2026, 8, 7), "VISA PURCHASE AMAZON.COM", dec("-121.80")).memo("USD 145.00 @ 0.84000"),
+        DemoTx::new(d(2026, 8, 12), "CUC WEB PMT", dec("-231.40")),
+    ];
+    let spec = StatementSpec::new(Bank::Butterfield, AccountType::Checking, Currency::KYD, "4821", dec("1500.00"), (d(2026, 8, 1), d(2026, 8, 31)), txs);
+    let r = scan(std::slice::from_ref(&spec));
+    assert_eq!(r.profile_slug.as_deref(), Some("butterfield_ky"));
+    assert_exact(&r, &[spec]);
+    let amazon = &r.sections[0].transactions[2];
+    assert_eq!(amazon.memo, "USD 145.00 @ 0.84000");
+    assert_eq!(amazon.fx_original, Some((Currency::USD, dec("145.00"))));
+    assert!(r.sections[0].report.segments.iter().all(|s| s.ok) && r.sections[0].report.segments.len() == 4);
+}
+
+#[test]
+fn butterfield_card_cr_suffix_and_posting_date() {
+    let txs = vec![
+        DemoTx::new(d(2026, 8, 2), "HBO MAX HBOMAX.COM", dec("-15.99")),
+        DemoTx::new(d(2026, 8, 9), "PAYMENT RECEIVED - THANK YOU", dec("500.00")),
+        DemoTx::new(d(2026, 8, 14), "CRACKED CONCH WEST BAY", dec("-96.00")).memo("KYD 80.00 @ 1.2000"),
+    ];
+    let spec = StatementSpec::new(Bank::Butterfield, AccountType::CreditCard, Currency::USD, "7710", dec("612.40"), (d(2026, 8, 1), d(2026, 8, 31)), txs);
+    let r = scan(std::slice::from_ref(&spec));
+    assert_exact(&r, std::slice::from_ref(&spec));
+    let t = &r.sections[0].transactions;
+    assert_eq!(t[0].posted, d(2026, 8, 3), "ledger date is the posting date");
+    assert_eq!(t[1].stmt_amount, dec("-500.00"), "CR lowers what's owed");
+    assert_eq!(t[2].fx_original, Some((Currency::KYD, dec("80.00"))));
+    assert_eq!(r.sections[0].closing, Some(dec("612.40") + dec("15.99") - dec("500.00") + dec("96.00")));
+}
+
+#[test]
+fn scotiabank_dateless_rows_roll_over_december_to_january() {
+    let txs = vec![
+        DemoTx::new(d(2025, 12, 18), "POS PURCHASE", dec("-62.10")).memo("KIRK HOME CENTRE 0021"),
+        DemoTx::new(d(2025, 12, 31), "ELECTRONIC CREDIT", dec("2480.15")).memo("HARBOUR FREIGHT DIR PAY CR SALARY"),
+        DemoTx::new(d(2026, 1, 2), "CUC WEB PMT", dec("-210.00")).memo("CARIBBEAN UTILITIES CO"),
+        DemoTx::new(d(2026, 1, 15), "SERVICE CHARGE", dec("-13.00")),
+    ];
+    let spec = StatementSpec::new(Bank::Scotiabank, AccountType::Checking, Currency::KYD, "2045", dec("800.00"), (d(2025, 12, 16), d(2026, 1, 15)), txs);
+    let r = scan(std::slice::from_ref(&spec));
+    assert_eq!(r.profile_slug.as_deref(), Some("scotiabank_ky"));
+    assert_eq!(r.period, Some((d(2025, 12, 16), d(2026, 1, 15))));
+    assert_exact(&r, &[spec]);
+    assert_eq!(r.sections[0].transactions[0].memo, "KIRK HOME CENTRE 0021");
+}
+
+#[test]
+fn scotiabank_card_two_line_fx_memo() {
+    let txs = vec![
+        DemoTx::new(d(2026, 8, 20), "MARLEY JERK CENTRE GEORGE TOWN", dec("-18.36")).memo("KYD 15.00 @ 1.2240"),
+        DemoTx::new(d(2026, 8, 21), "INTERNET - CARD PAYMENT", dec("1000.00")),
+        DemoTx::new(d(2026, 9, 2), "C.U.C GEORGE TOWN", dec("-283.55")),
+    ];
+    let spec = StatementSpec::new(Bank::Scotiabank, AccountType::CreditCard, Currency::USD, "9063", dec("1250.00"), (d(2026, 8, 17), d(2026, 9, 15)), txs);
+    let r = scan(std::slice::from_ref(&spec));
+    assert_exact(&r, std::slice::from_ref(&spec));
+    assert_eq!(r.sections[0].transactions[0].fx_original, Some((Currency::KYD, dec("15.00"))));
+}
+
+#[test]
+fn cnb_overdrawn_balances_kyd_and_usd() {
+    let txs = vec![
+        DemoTx::new(d(2026, 8, 1), "RENT RECEIVED UNIT A", dec("2400.00")),
+        DemoTx::new(d(2026, 8, 6), "A.L. THOMPSON'S", dec("-2600.00")),
+        DemoTx::new(d(2026, 8, 9), "MONTHLY ACCOUNT FEE", dec("-15.00")),
+        DemoTx::new(d(2026, 8, 20), "RENT RECEIVED UNIT B", dec("2150.00")),
+    ];
+    // goes overdrawn (DR) after the second row
+    let kyd = StatementSpec::new(Bank::Cnb, AccountType::Checking, Currency::KYD, "6120", dec("100.00"), (d(2026, 8, 1), d(2026, 8, 31)), txs.clone());
+    let r = scan(std::slice::from_ref(&kyd));
+    assert_eq!(r.profile_slug.as_deref(), Some("cnb_ky"));
+    assert_exact(&r, std::slice::from_ref(&kyd));
+    assert_eq!(r.sections[0].transactions[1].balance, Some(dec("-100.00")));
+    let usd = StatementSpec::new(Bank::Cnb, AccountType::Checking, Currency::USD, "6121", dec("3100.00"), (d(2026, 8, 1), d(2026, 8, 31)), txs);
+    assert_exact(&scan(std::slice::from_ref(&usd)), &[usd]);
+}
+
+#[test]
+fn rbc_rows_inherit_the_date_above_and_sparse_balances_verify() {
+    let txs = vec![
+        DemoTx::new(d(2026, 8, 3), "TRANSFER FROM SCOTIABANK", dec("500.00")),
+        DemoTx::new(d(2026, 8, 3), "BRANCH DEPOSIT", dec("40.00")),
+        DemoTx::new(d(2026, 8, 3), "BILL PAYMENT HOME GAS", dec("-88.10")),
+        DemoTx::new(d(2026, 8, 30), "INTEREST PAID", dec("2.15")),
+        DemoTx::new(d(2026, 8, 30), "MONTHLY FEE", dec("-5.00")),
+    ];
+    let spec = StatementSpec::new(Bank::Rbc, AccountType::Savings, Currency::KYD, "3390", dec("2500.00"), (d(2026, 8, 1), d(2026, 8, 31)), txs);
+    let r = scan(std::slice::from_ref(&spec));
+    assert_eq!(r.profile_slug.as_deref(), Some("rbc_ky"));
+    assert_exact(&r, &[spec]);
+    assert_eq!(r.diagnostics.pass3.inherited_dates, 3);
+    // balances printed only on each day's last row: two stretches, plus the closing row
+    assert!(r.sections[0].report.segments.iter().all(|s| s.ok));
+}
+
+#[test]
+fn cicsa_share_and_loan_sections() {
+    let shares = StatementSpec::new(Bank::Cicsa, AccountType::ShareAccount, Currency::KYD, "1002", dec("6200.00"), (d(2025, 12, 1), d(2025, 12, 31)), vec![
+        DemoTx::new(d(2025, 12, 15), "PAYROLL DEDUCTION SHARES", dec("300.00")).memo("PAYROLL SPLIT HARBOUR FREIGHT"),
+        DemoTx::new(d(2025, 12, 20), "DIVIDEND POSTING 2025", dec("279.00")),
+    ]);
+    let loan = StatementSpec::new(Bank::Cicsa, AccountType::Loan, Currency::KYD, "1003", dec("18450.00"), (d(2025, 12, 1), d(2025, 12, 31)), vec![
+        DemoTx::new(d(2025, 12, 3), "LOAN PAYMENT - THANK YOU", dec("450.00")),
+        DemoTx::new(d(2025, 12, 29), "LOAN INTEREST", dec("-138.38")),
+    ]);
+    let r = scan(&[shares.clone(), loan.clone()]);
+    assert_eq!(r.profile_slug.as_deref(), Some("cicsa_cu_ky"));
+    assert_exact(&r, &[shares, loan]);
+    assert_eq!(r.sections[1].closing, Some(dec("18138.38")), "payments lower the loan balance");
+}
+
+#[test]
+fn a_page_break_split_row_is_joined_across_the_header() {
+    let mut txs: Vec<DemoTx> = (1..=60).map(|i| DemoTx::new(d(2026, 8, 1 + (i % 28)), &format!("PURCHASE {i}"), Decimal::new(-(1000 + i as i64 * 37), 2))).collect();
+    txs.sort_by_key(|t| t.date);
+    let mut spec = StatementSpec::new(Bank::Butterfield, AccountType::Checking, Currency::KYD, "4821", dec("9000.00"), (d(2026, 8, 1), d(2026, 8, 31)), txs);
+    spec.split_row = Some(41);
+    let r = scan(std::slice::from_ref(&spec));
+    let s = &r.sections[0];
+    // the dated half at the foot of one page waits for its amount under the next page's header (the
+    // CNB rule), so Pass 3 joins it and Pass 5 has nothing left to recover
+    assert_eq!(s.report.rescans, 0, "{:#?}", s.report);
+    assert!(!s.transactions[41].recovered);
+    assert_eq!(s.transactions[41].description, spec.txs[41].description);
+    assert_exact(&r, &[spec]);
+}
+
+#[test]
+fn pass5_recovers_an_amount_that_drifted_out_of_its_column() {
+    let txs = vec![
+        DemoTx::new(d(2026, 8, 3), "SALARY", dec("2480.15")),
+        DemoTx::new(d(2026, 8, 5), "KIRK MARKET", dec("-84.12")),
+        DemoTx::new(d(2026, 8, 9), "CUC WEB PMT", dec("-231.40")),
+    ];
+    let mut spec = StatementSpec::new(Bank::Cnb, AccountType::Checking, Currency::KYD, "6120", dec("500.00"), (d(2026, 8, 1), d(2026, 8, 31)), txs);
+    spec.drift_row = Some(1);
+    let r = scan(std::slice::from_ref(&spec));
+    let s = &r.sections[0];
+    assert_eq!(s.report.recovered.len(), 1, "{:#?}", s.report);
+    assert_exact(&r, &[spec]);
+}
+
+#[test]
+fn unsigned_single_column_signs_are_healed_from_the_balance() {
+    // a deposit statement whose one amount column prints no signs: Pass 4 decides from Bal[i] - Bal[i-1]
+    let txs = vec![DemoTx::new(d(2026, 8, 3), "SALARY", dec("1000.00")), DemoTx::new(d(2026, 8, 5), "RENT", dec("-400.00"))];
+    let spec = StatementSpec::new(Bank::Cnb, AccountType::Checking, Currency::KYD, "6120", dec("100.00"), (d(2026, 8, 1), d(2026, 8, 31)), txs);
+    // CNB's one Amount column, with its trailing minus signs taken away
+    let tokens: Vec<_> = demo::render(std::slice::from_ref(&spec)).into_iter().filter(|t| t.text != "-").collect();
+    let p = profiles::builtins();
+    let r = MultiPassScanner::new(&p).scan_tokens(tokens).unwrap();
+    let s = &r.sections[0];
+    assert_eq!(s.reconciliation, Reconciliation::Reconciled, "{:#?}", s.report);
+    assert_eq!(s.transactions.iter().map(|t| t.amount).collect::<Vec<_>>(), vec![dec("1000.00"), dec("-400.00")]);
+    assert_eq!(s.report.sign_heals.len(), 1);
+}
+
+#[test]
+fn a_whole_demo_year_reconciles() {
+    for doc in demo::demo_documents() {
+        let p = profiles::builtins();
+        let r = MultiPassScanner::new(&p).scan_tokens(doc.tokens.clone()).unwrap();
+        if doc.specs[0].garble_row.is_some() {
+            // unreadable amount: an honest discrepancy, with the line waiting in the inspector
+            let s = &r.sections[0];
+            let want = doc.specs[0].txs[0].amount;
+            assert_eq!(s.reconciliation, Reconciliation::Discrepancy(want), "{:#?}", s.report);
+            assert!(s.report.skipped.iter().any(|l| l.text.contains("1,") && l.date == Some(doc.specs[0].txs[0].date)), "{:#?}", s.report.skipped);
+            continue;
+        }
+        assert_exact(&r, &doc.specs);
+    }
+}
+
+/// Your own statements, if present (never copied into the repo): `cargo test -- --ignored real`.
+#[test]
+#[ignore]
+fn real_statements_reconcile() {
+    let dir = fingraph_core::data_dir().join("documents");
+    let p = profiles::builtins();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if e.path().extension().is_some_and(|x| x == "pdf") && e.file_name().to_string_lossy().starts_with("statement_") {
+            let r = MultiPassScanner::new(&p).scan_pdf(&e.path()).unwrap();
+            assert!(r.is_reconciled(), "{}", e.path().display());
+        }
+    }
+}
+
+/// Cayman National's real layout (from a redacted Feb 2026 statement; names and amounts here are made up):
+/// a typewriter font, `DD/MM` dates, one Amount column with a trailing minus for money out, the date on a
+/// description's first line and the amount + balance on its last, a row split by the page break, and the
+/// summary amounts on an `as of` line under their labels.
+#[test]
+fn cnb_real_layout_multiline_rows_and_page_split() {
+    let p = profiles::builtins();
+    let r = MultiPassScanner::new(&p).scan_tokens(cnb_sample()).unwrap();
+    assert!(r.diagnostics.pass3.layout_notes.is_empty(), "{:?}", r.diagnostics.pass3.layout_notes);
+    assert_eq!(r.diagnostics.pass3.joined_rows, 3);
+    cnb_sample_checks(&r);
+}
+
+/// A statement that breaks its bank's declared layout says which rule it broke. Here the amounts still
+/// add up under the saved layout (each amount lands on the line before it), so the balance check alone
+/// would pass with wrong descriptions: the layout note catches it, and a re-read without the saved rules
+/// gets the descriptions right (and says so, so the statement is still held for a look).
+#[test]
+fn a_layout_mismatch_names_the_rule() {
+    let mut p = profiles::builtins();
+    let cnb = p.iter_mut().find(|p| p.slug == "cnb_ky").unwrap();
+    cnb.layout.row_shape = profiles::RowShape::AmountFirst;
+    cnb.layout.opening = vec!["opening balance".into()];
+    let r = MultiPassScanner::new(&p).scan_tokens(cnb_sample()).unwrap();
+    let notes = r.diagnostics.pass3.layout_notes.join("\n");
+    assert!(notes.contains("dated line(s) had no amount"), "{notes}");
+    assert!(notes.contains("opening balance wasn't under any of this bank's own labels"), "{notes}");
+    assert!(notes.contains("didn't read with CNB's saved layout"), "{notes}");
+    assert_eq!(r.sections[0].reconciliation, Reconciliation::Reconciled);
+    assert_eq!(r.sections[0].transactions[1].description, "POS Purchase SAMPLE GROCERY GEORGE TOWN KY");
+}
+
+fn cnb_sample() -> Vec<fingraph_core::parser::Token> {
+    use fingraph_core::parser::Token;
+    const CW: f64 = 4.8; // Courier at 8pt
+    let mut toks = Vec::new();
+    let mut put = |page: u32, y: f64, x: f64, text: &str, gap: f64| {
+        let mut x = x;
+        for w in text.split_whitespace() {
+            let wd = w.chars().count() as f64 * CW;
+            toks.push(Token::new(page, x, y, x + wd, y + 8.0, w));
+            x += wd + gap * CW;
+        }
+    };
+    let (date, desc, amt, bal) = (60.0, 160.0, 425.0, 520.0);
+    let right = |text: &str, edge: f64| edge - text.chars().count() as f64 * CW;
+    put(1, 40.0, 60.0, "CAYMAN NATIONAL", 1.0);
+    put(1, 40.0, 390.0, "Account Statement", 1.0);
+    put(1, 60.0, 390.0, "Cayman National Bank Ltd.", 1.0);
+    put(1, 72.0, 390.0, "Tel +1 345 949 4655 | caymannational.com", 1.0);
+    put(1, 180.0, 300.0, "PERIODIC STATEMENT", 1.0);
+    put(1, 192.0, 300.0, "Date: 31/03/2026", 1.0);
+    put(1, 204.0, 300.0, "Period: 01/03/2026 to 31/03/2026", 1.0);
+    put(1, 214.0, 50.0, "CUSTOMER COPY", 1.0);
+    put(1, 400.0, 95.0, "ACCOUNT #: SV - 0001234", 1.0);
+    put(1, 420.0, 78.0, "Currency: KYD", 1.0);
+    put(1, 500.0, 64.0, "Beginning Balance", 1.0);
+    put(1, 514.0, 64.0, "as of 01/03/26", 1.0);
+    put(1, 514.0, right("1,000.00", 288.0), "1,000.00", 1.0);
+    put(1, 514.0, 335.0, "Interest Paid YTD", 1.0);
+    put(1, 514.0, right("0.00", 518.0), "0.00", 1.0);
+    // the typewriter spacing splits a label into several cells
+    put(1, 526.0, 76.0, "Deposits & Other Cred", 2.0);
+    put(1, 526.0, right("1,500.00", 288.0), "1,500.00", 1.0);
+    put(1, 526.0, 335.0, "Interest Earned", 1.0);
+    put(1, 526.0, right("0.01", 518.0), "0.01", 1.0);
+    put(1, 538.0, 76.0, "Cheques & Other Debit", 2.0);
+    put(1, 538.0, right("236.50", 288.0), "236.50", 1.0);
+    put(1, 538.0, 335.0, "Average Balance", 1.0);
+    put(1, 538.0, right("1,100.00", 518.0), "1,100.00", 1.0);
+    put(1, 556.0, 64.0, "Ending Balance", 1.0);
+    put(1, 570.0, 64.0, "as of 31/03/26", 1.0);
+    put(1, 570.0, right("2,263.50", 288.0), "2,263.50", 1.0);
+    put(1, 570.0, 325.0, "Annual Percentage", 1.0);
+    put(1, 600.0, 57.0, "Transaction Information", 1.0);
+    for (page, hy) in [(1, 620.0), (2, 232.0)] {
+        put(page, hy, date, "Date", 1.0);
+        put(page, hy, 95.0, "Cheque #", 1.0);
+        put(page, hy, desc, "Description", 1.0);
+        put(page, hy, 372.0, "Amount", 1.0);
+        put(page, hy, 472.0, "Balance", 1.0);
+    }
+    // (page, date, description, amount + balance): the amount sits on a description's last line, and
+    // the numbers line up with the minus hanging to their right
+    let lines = [
+        (1, "02/03", "Govt Stamp Duty Fees", Some(("10.75 -", "989.25"))),
+        (1, "03/03", "POS Purchase SAMPLE GROCERY", None),
+        (1, "", "GEORGE TOWN KY", Some(("45.50 -", "943.75"))),
+        (1, "03/03", "POS Transaction Fee", Some(("0.25 -", "943.50"))),
+        (1, "05/03", "EXAMPLE EMPLOYER LTD", None),
+        (1, "", "Dir Pay Mar", None),
+        (1, "", "26 Salary", Some(("1,500.00", "2,443.50"))),
+        (1, "06/03", "POS Purchase", None),
+        (2, "", "EXAMPLE STORE GRAND", Some(("180.00 -", "2,263.50"))),
+    ];
+    let (mut y, mut page) = (620.0, 1);
+    for (pg, dt, text, money) in lines {
+        if pg != page {
+            put(1, 760.0, 280.0, "Page 1", 1.0);
+            put(2, 40.0, 60.0, "CAYMAN NATIONAL", 1.0);
+            put(2, 196.0, 345.0, "31/03/2026", 1.0);
+            put(2, 214.0, 57.0, "Transaction Information", 1.0);
+            (y, page) = (232.0, pg);
+        }
+        y += 11.8;
+        if !dt.is_empty() {
+            put(pg, y, date, dt, 1.0);
+        }
+        put(pg, y, desc, text, 1.0);
+        if let Some((a, b)) = money {
+            let edge = if a.ends_with('-') { amt } else { amt - 2.0 * CW };
+            put(pg, y, right(a, edge), a, 1.0);
+            put(pg, y, right(b, bal), b, 1.0);
+        }
+    }
+    put(2, 760.0, 280.0, "Page 2", 1.0);
+
+    toks
+}
+
+fn cnb_sample_checks(r: &ScanResult) {
+    assert_eq!(r.profile_slug.as_deref(), Some("cnb_ky"));
+    assert_eq!(r.period, Some((d(2026, 3, 1), d(2026, 3, 31))));
+    let s = &r.sections[0];
+    assert_eq!(s.reconciliation, Reconciliation::Reconciled, "{:#?}", s.report);
+    assert_eq!(s.account_type, AccountType::Savings);
+    assert_eq!((s.opening, s.closing), (Some(dec("1000.00")), Some(dec("2263.50"))));
+    assert_eq!((s.total_debits, s.total_credits), (Some(dec("236.50")), Some(dec("1500.00"))));
+    let got: Vec<(NaiveDate, Decimal, &str)> = s.transactions.iter().map(|t| (t.posted, t.amount, t.description.as_str())).collect();
+    assert_eq!(
+        got,
+        vec![
+            (d(2026, 3, 2), dec("-10.75"), "Govt Stamp Duty Fees"),
+            (d(2026, 3, 3), dec("-45.50"), "POS Purchase SAMPLE GROCERY GEORGE TOWN KY"),
+            (d(2026, 3, 3), dec("-0.25"), "POS Transaction Fee"),
+            (d(2026, 3, 5), dec("1500.00"), "EXAMPLE EMPLOYER LTD Dir Pay Mar 26 Salary"),
+            (d(2026, 3, 6), dec("-180.00"), "POS Purchase EXAMPLE STORE GRAND"),
+        ]
+    );
+    assert!(s.report.skipped.is_empty(), "{:#?}", s.report.skipped);
+}
+
+/// Anonymised layout samples of real statements (Bank Profiles → Test PDF → Save Layout Sample), kept in
+/// `tests/fixtures/private/` and never committed. Each must be recognised as its bank, reconcile to the
+/// cent and match its bank's declared layout. Approving a statement in a new layout also keeps a sample, in
+/// `<data dir>/layout_samples/`: those are read with your ledger's profiles (what they learned), from a
+/// copy of the ledger. `cargo test -p fingraph-core -- --ignored layout_samples`
+#[test]
+#[ignore]
+fn private_layout_samples() {
+    let json_in = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+        let mut v: Vec<_> = std::fs::read_dir(dir).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|e| e == "json")).collect()).unwrap_or_default();
+        v.sort();
+        v
+    };
+    let builtin = profiles::builtins();
+    let data = fingraph_core::data_dir();
+    let tmp = std::env::temp_dir().join(format!("fingraph-samples-{}.db", std::process::id()));
+    let learned = std::fs::copy(data.join("ledger.db"), &tmp).ok().and_then(|_| fingraph_core::db::Db::open(&tmp).ok()).and_then(|db| db.profiles().ok()).unwrap_or_else(|| builtin.clone());
+    let _ = std::fs::remove_file(&tmp);
+    let sets = [(json_in(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/private")), &builtin), (json_in(&data.join("layout_samples")), &learned)];
+    let mut failed = Vec::new();
+    for (files, p) in sets {
+        for f in &files {
+            let s: fingraph_core::parser::LayoutSample = serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
+            let r = MultiPassScanner::new(p).scan_tokens(s.tokens).unwrap();
+            let ok = r.profile_slug == s.bank && r.is_reconciled() && r.diagnostics.pass3.layout_notes.is_empty();
+            let n: usize = r.sections.iter().map(|s| s.transactions.len()).sum();
+            println!("{} {:?}: {n} transactions, {:?}, notes {:?}", f.file_name().unwrap().to_string_lossy(), r.profile_slug, r.sections.iter().map(|s| &s.reconciliation).collect::<Vec<_>>(), r.diagnostics.pass3.layout_notes);
+            if !ok {
+                failed.push(f.file_name().unwrap().to_string_lossy().into_owned());
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{failed:?}");
+}
+
+/// Figures inside a description's detail line, right up against the money column, that add up to the
+/// transaction's own amount (`100.00` + `25.00` under a `125.00` row): the row keeps its own amount, and the two
+/// figures are never taken for transactions.
+#[test]
+fn figures_in_a_detail_line_never_replace_the_amount() {
+    let txs = vec![
+        DemoTx::new(d(2026, 1, 5), "POS PURCHASE", dec("-125.00")).memo("SPLIT ORDER"),
+        DemoTx::new(d(2026, 1, 9), "ELECTRONIC CREDIT", dec("900.00")).memo("PAYROLL"),
+        DemoTx::new(d(2026, 1, 12), "CUC WEB PMT", dec("-210.00")),
+    ];
+    let spec = StatementSpec::new(Bank::Scotiabank, AccountType::Checking, Currency::KYD, "2045", dec("800.00"), (d(2025, 12, 16), d(2026, 1, 15)), txs);
+    let mut toks = demo::render(std::slice::from_ref(&spec));
+    // the detail line under the 125.00 row: two figures ending 20 points left of the amounts' column
+    let memo = toks.iter().find(|t| t.text == "SPLIT").unwrap().clone();
+    let amount = toks.iter().find(|t| t.text.contains("125.00")).unwrap().clone();
+    for (k, f) in ["100.00", "25.00"].iter().enumerate() {
+        let x1 = amount.x0 - 20.0 - k as f64 * 40.0;
+        toks.push(fingraph_core::parser::Token::new(memo.page, x1 - 30.0, memo.y0, x1, memo.y1, f));
+    }
+    let r = MultiPassScanner::new(&profiles::builtins()).scan_tokens(toks).unwrap();
+    assert_exact(&r, &[spec]);
+}
+
+/// A line between transactions that doesn't start in the description column — a notice centred on the page, a
+/// remark starting in the date column's margin — is no transaction's next line: it's attached to neither.
+#[test]
+fn lines_outside_the_description_column_attach_to_no_transaction() {
+    let txs = vec![
+        DemoTx::new(d(2026, 1, 5), "POS PURCHASE", dec("-62.10")).memo("KIRK HOME CENTRE"),
+        DemoTx::new(d(2026, 1, 7), "POS PURCHASE", dec("-12.40")).memo("FOSTERS"),
+        DemoTx::new(d(2026, 1, 9), "ELECTRONIC CREDIT", dec("900.00")).memo("PAYROLL"),
+        DemoTx::new(d(2026, 1, 12), "CUC WEB PMT", dec("-210.00")),
+    ];
+    let spec = StatementSpec::new(Bank::Scotiabank, AccountType::Checking, Currency::KYD, "2045", dec("800.00"), (d(2025, 12, 16), d(2026, 1, 15)), txs);
+    let mut toks = demo::render(std::slice::from_ref(&spec));
+    // under FOSTERS' detail line: a notice centred on the page, then a remark starting at the left margin
+    let fosters = toks.iter().find(|t| t.text == "FOSTERS").unwrap().clone();
+    let date = toks.iter().filter(|t| t.page == fosters.page).map(|t| t.x0).fold(f64::MAX, f64::min);
+    let line = |x: f64, y: f64, words: &[&str]| -> Vec<fingraph_core::parser::Token> {
+        let mut x = x;
+        words.iter().map(|w| { let t = fingraph_core::parser::Token::new(fosters.page, x, y, x + 5.0 * w.len() as f64, y + fosters.h(), w); x += 5.0 * w.len() as f64 + 3.0; t }).collect()
+    };
+    toks.extend(line(fosters.x0 + 260.0, fosters.y0 + 4.0, &["PLEASE", "NOTE", "NEW", "HOURS"]));
+    toks.extend(line(date, fosters.y0 + 8.0, &["MEMBER", "DEPOSIT", "INSURANCE"]));
+    let r = MultiPassScanner::new(&profiles::builtins()).scan_tokens(toks).unwrap();
+    assert_exact(&r, std::slice::from_ref(&spec));
+    for t in &r.sections[0].transactions {
+        assert!(!t.memo.contains("HOURS") && !t.memo.contains("INSURANCE") && !t.description.contains("HOURS") && !t.description.contains("INSURANCE"), "{:?} {:?}", t.description, t.memo);
+    }
+}
+
+/// A statement that doesn't say what account it is and prints no running balance is held (a card and a bank
+/// account read its amounts in opposite directions, and both add up) — unless its own lines settle it: salary in,
+/// a fee and an ATM withdrawal out are a bank account's. One such line isn't enough.
+#[test]
+fn an_unstated_account_type_is_settled_by_its_lines_or_held() {
+    let lines: Vec<(&str, &str, &str)> = vec![
+        ("03/02/2026", "PAYROLL ACME LTD", "2,000.00"),
+        ("05/02/2026", "GROCERY MART", "-100.00"),
+        ("09/02/2026", "MONTHLY SERVICE FEE", "-15.00"),
+        ("14/02/2026", "ATM WITHDRAWAL", "-200.00"),
+        ("20/02/2026", "WATER AUTHORITY", "-60.00"),
+    ];
+    let render = |lines: &[(&str, &str, &str)], closing: &str| {
+        let mut t = Vec::new();
+        let mut y = 40.0;
+        let mut put = |x: f64, y: f64, s: &str| {
+            let mut x = x;
+            for w in s.split_whitespace() {
+                t.push(fingraph_core::parser::Token::new(1, x, y, x + 5.0 * w.len() as f64, y + 8.0, w));
+                x += 5.0 * w.len() as f64 + 3.0;
+            }
+        };
+        put(40.0, y, "Harbour Credit Union");
+        y += 14.0;
+        put(40.0, y, "Statement Period: 01/02/2026 to 28/02/2026");
+        y += 14.0;
+        put(40.0, y, "Currency: KYD");
+        y += 14.0;
+        put(40.0, y, "Opening Balance");
+        put(220.0, y, "1,000.00");
+        y += 12.0;
+        put(40.0, y, "Closing Balance");
+        put(220.0, y, closing);
+        y += 20.0;
+        put(40.0, y, "Date");
+        put(120.0, y, "Description");
+        put(420.0, y, "Amount");
+        for (d, desc, a) in lines {
+            y += 12.0;
+            put(40.0, y, d);
+            put(120.0, y, desc);
+            put(460.0 - 5.0 * a.len() as f64, y, a);
+        }
+        t
+    };
+    let read = |toks| MultiPassScanner::new(&[]).scan_tokens(toks).unwrap();
+    let r = read(render(&lines, "2,625.00"));
+    assert!(r.is_reconciled());
+    assert!(r.diagnostics.pass3.layout_notes.is_empty(), "salary, a fee and an ATM withdrawal settle it: {:?}", r.diagnostics.pass3.layout_notes);
+    // only one telling line (the salary): still held
+    let few: Vec<(&str, &str, &str)> = vec![lines[0], ("05/02/2026", "GROCERY MART", "-100.00"), ("20/02/2026", "WATER AUTHORITY", "-60.00")];
+    let r = read(render(&few, "2,840.00"));
+    assert!(r.is_reconciled());
+    assert!(r.diagnostics.pass3.layout_notes.iter().any(|n| n.contains("doesn't say whether it's a card")), "{:?}", r.diagnostics.pass3.layout_notes);
+}

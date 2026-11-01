@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["crates/fingraph-core", "crates/fingraph"]
+
+[workspace.package]
+version = "0.2.15"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[profile.release]
+# keep function names so crash.log backtraces are readable
+strip = "debuginfo"

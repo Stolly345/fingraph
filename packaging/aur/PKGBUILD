@@ -1,0 +1,28 @@
+# Maintainer: Stolly345 <114888417+Stolly345@users.noreply.github.com>
+# Repackages the release .deb (the same binary as the .deb/.rpm; built on Ubuntu 26.04).
+# New release: set pkgver, sha256sum of the uploaded .deb, then `makepkg --printsrcinfo > .SRCINFO`.
+pkgname=fingraph-bin
+pkgver=0.2.15
+pkgrel=1
+pkgdesc="Local-first ledger and statement scanner for Cayman bank statements"
+arch=('x86_64')
+url="https://github.com/Stolly345/fingraph"
+license=('MIT OR Apache-2.0')
+depends=('gtk4' 'libadwaita' 'glib2' 'cairo' 'pango' 'graphene' 'glibc' 'libgcc' 'poppler')
+optdepends=('tesseract: reads scanned (picture-only) statements'
+            'tesseract-data-eng: English data for tesseract'
+            'curl: daily exchange rates (when switched on)')
+provides=('fingraph')
+conflicts=('fingraph')
+# prebuilt, already stripped release binary
+options=('!debug' '!strip')
+source=("https://github.com/Stolly345/fingraph/releases/download/v${pkgver}/fingraph_${pkgver}-1_amd64.deb")
+sha256sums=('b5c954fbca2eb9c43d85e7dec1bf67565dd6feec60433539863fbe43f77b7b4a')
+
+package() {
+    bsdtar -xf data.tar.* -C "$pkgdir"
+    # Arch keeps licences in /usr/share/licenses and has no use for Debian's copyright file
+    install -d "$pkgdir/usr/share/licenses/$pkgname"
+    mv "$pkgdir"/usr/share/doc/fingraph/LICENSE-{MIT,APACHE} "$pkgdir/usr/share/licenses/$pkgname/"
+    rm -f "$pkgdir/usr/share/doc/fingraph/copyright"
+}

@@ -1,0 +1,68 @@
+[package]
+name = "fingraph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Local-first ledger and statement scanner for Cayman bank statements"
+
+[dependencies]
+fingraph-core = { path = "../fingraph-core" }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_6"] }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rust_decimal = "1"
+
+[package.metadata.deb]
+name = "fingraph"
+maintainer = "Stolly345 <114888417+Stolly345@users.noreply.github.com>"
+copyright = "2026, Alex Stoll"
+extended-description = """\
+FinGraph reads PDF bank statements from the Cayman banks (Butterfield, Scotiabank, \
+Cayman National, RBC and the CICSA Credit Union) with a five-pass scanner that \
+proves every statement against its own running and closing balances, learns your \
+merchants through Smart Triage, and charts income, spending, subscriptions and \
+bank fees across personal and business workspaces in any currency. Statements and \
+the ledger stay in ~/.local/share/fingraph. The one optional network use, off until \
+switched on, downloads daily exchange rates (only currency codes and dates are sent)."""
+section = "utils"
+priority = "optional"
+# pdftotext -bbox gives the scanner every word with its position
+depends = "$auto, poppler-utils"
+# tesseract reads scanned statements; curl downloads exchange rates (when switched on)
+recommends = "tesseract-ocr, curl"
+assets = [
+    ["target/release/fingraph", "usr/bin/", "755"],
+    ["../../packaging/dev.fingraph.FinGraph.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/dev.fingraph.FinGraph.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../README.md", "usr/share/doc/fingraph/README.md", "644"],
+    ["../../LICENSE-MIT", "usr/share/doc/fingraph/LICENSE-MIT", "644"],
+    ["../../LICENSE-APACHE", "usr/share/doc/fingraph/LICENSE-APACHE", "644"],
+]
+
+# `cargo generate-rpm -p crates/fingraph` after `cargo build --release`. Library requirements come
+# from the binary's sonames (auto-req), so no distro package names to keep in step.
+[package.metadata.generate-rpm]
+name = "fingraph"
+summary = "Local-first ledger and statement scanner for Cayman bank statements"
+release = "1"
+assets = [
+    { source = "target/release/fingraph", dest = "/usr/bin/fingraph", mode = "755" },
+    { source = "../../packaging/dev.fingraph.FinGraph.desktop", dest = "/usr/share/applications/dev.fingraph.FinGraph.desktop", mode = "644" },
+    { source = "../../packaging/dev.fingraph.FinGraph.svg", dest = "/usr/share/icons/hicolor/scalable/apps/dev.fingraph.FinGraph.svg", mode = "644" },
+    { source = "../../README.md", dest = "/usr/share/doc/fingraph/README.md", mode = "644", doc = true },
+    { source = "../../LICENSE-MIT", dest = "/usr/share/licenses/fingraph/LICENSE-MIT", mode = "644" },
+    { source = "../../LICENSE-APACHE", dest = "/usr/share/licenses/fingraph/LICENSE-APACHE", mode = "644" },
+]
+auto-req = "builtin"
+
+[package.metadata.generate-rpm.requires]
+# a file, not a package name: Fedora calls it poppler-utils, openSUSE poppler-tools
+"/usr/bin/pdftotext" = "*"
+# GTK dlopens GLES (so auto-req misses it); minimal Fedora installs lack it and abort at startup
+"libGLESv2.so.2()(64bit)" = "*"
+
+# weak: dnf installs them by default and skips any a distro doesn't have
+[package.metadata.generate-rpm.recommends]
+tesseract = "*"
+curl = "*"
