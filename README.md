@@ -23,7 +23,9 @@ statement's own balances, and shows where the money goes. Nothing leaves your co
 
 Cayman banks don't offer live feeds to budgeting apps, so FinGraph works from the PDF statements you
 download once a month. A 5-pass scanner reads each statement and proves it against its own
-balances. Your rules, a directory of Cayman businesses and Smart Triage then sort the
+balances. Where a bank only gives a download (RBC's CSV or OFX), FinGraph imports that too, one
+account per account in the file, and holds it for you to check, since a download prints no opening
+balance to prove it with. Your rules, a directory of Cayman businesses and Smart Triage then sort the
 transactions. On top of that sit a budget, a forecast for the weeks between statements, and your
 net worth, in KYD or USD, across personal and business workspaces.
 
@@ -285,7 +287,7 @@ bring one up to accuracy:
 |---|---|
 | `crates/fingraph-core` | No GUI. Scanner (`parser/`: profiles, multipass, dates, reconcile, OCR), ledger and import rules (`db.rs`), rules and triage (`rules.rs`), learning (`learn.rs`), directory (`merchants.rs`, `data/merchants.tsv`), splits, reimbursements, attachments and coverage (`workflows.rs`), `insights.rs`, `budget.rs`, `outlook.rs`, `wealth.rs`, exports, preferences, demo statements |
 | `crates/fingraph` | The app, one file per page or dialog: `dashboard`, `wealth`, `budget`, `close`, `outlook`, `transactions`, `statement`, `statements`, `changes`, `rules`, `review`, `account`, `export`, `directory`, `profiles`, `preferences`, `guide`, `wizard`, `split`, `owed`, `txedit`. Cairo charts are in `charts.rs`; the shell, sidebar, menu and shared helpers are in `main.rs` |
-| `packaging/` | Desktop entry (PDF "Open With"), icon, Arch PKGBUILD |
+| `packaging/` | Desktop entry (PDF/CSV/OFX "Open With"), icon, Arch PKGBUILD |
 
 ## Adding businesses
 

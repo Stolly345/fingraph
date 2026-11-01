@@ -216,7 +216,7 @@ fn real_statements_reconcile() {
     let p = profiles::builtins();
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         if e.path().extension().is_some_and(|x| x == "pdf") && e.file_name().to_string_lossy().starts_with("statement_") {
-            let r = MultiPassScanner::new(&p).scan_pdf(&e.path()).unwrap();
+            let r = MultiPassScanner::new(&p).scan_file(&e.path()).unwrap();
             assert!(r.is_reconciled(), "{}", e.path().display());
         }
     }

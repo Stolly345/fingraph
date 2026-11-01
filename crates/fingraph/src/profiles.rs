@@ -118,7 +118,7 @@ fn run_scan(app: &Rc<App>, path: PathBuf, only: Option<BankProfile>, then: impl 
     };
     let w = Rc::downgrade(app);
     crate::spawn_guarded(w.clone(), async move {
-        let r = gio::spawn_blocking(move || MultiPassScanner::new(&profiles).scan_pdf(&path).map_err(|e| e.to_string())).await.unwrap_or_else(|_| Err("scanner crashed".into()));
+        let r = gio::spawn_blocking(move || MultiPassScanner::new(&profiles).scan_file(&path).map_err(|e| e.to_string())).await.unwrap_or_else(|_| Err("scanner crashed".into()));
         let Some(a) = w.upgrade() else { return };
         match r {
             Ok(r) => then(&a, r),

@@ -328,3 +328,79 @@ fn rates_that_cannot_be_right_are_not_kept() {
     assert_eq!(db.store_rates(&bad, "hostile").unwrap(), 0);
     assert_eq!(db.store_rates(&[(day.succ_opt().unwrap(), gbp, dec("0.78"))], "test").unwrap(), 1);
 }
+
+/// A friend's RBC download (three accounts in one CSV) was refused, and its PDF version merged every account into one.
+#[test]
+fn an_rbc_csv_download_imports_as_separate_held_accounts() {
+    let dir = tempfile_dir("rbc-csv");
+    let p = dir.join("rbc.csv");
+    std::fs::write(
+        &p,
+        "\"Account Type\",\"Account Number\",\"Transaction Date\",\"Cheque Number\",\"Description 1\",\"Description 2\",\"CAD$\",\"USD$\"\n\
+         Savings,01234-5550001,10/2/2026,,PAYROLL,,,2480.15\n\
+         Chequing,01234-5550002,10/3/2026,,GROCERY,,-82.10,\n\
+         Visa,4510********7788,10/5/2026,,FUEL,,-45.00,\n",
+    )
+    .unwrap();
+    let db = Db::open_in_memory().unwrap();
+    let e = db.create_entity("Personal", EntityKind::Personal, Currency::KYD).unwrap();
+    let s = MultiPassScanner::new(&db.profiles().unwrap()).scan_file(&p).unwrap();
+    db.import_auto(e, "rbc.csv", &fingraph_core::db::file_sha256(&p).unwrap(), &s).unwrap();
+    let mut accts: Vec<(String, AccountType)> = db.accounts().unwrap().into_iter().map(|a| (a.account_number_masked, a.account_type)).collect();
+    accts.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(accts.len(), 3, "{accts:?}");
+    assert!(accts.iter().any(|a| a.1 == AccountType::CreditCard));
+    // no balances in the download: nothing counts until someone approves it
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM documents WHERE review_hold = 1"), 3);
+}
+
+fn tempfile_dir(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("fingraph-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+const RBC_HEADER: &str = "\"Account Type\",\"Account Number\",\"Transaction Date\",\"Cheque Number\",\"Description 1\",\"Description 2\",\"CAD$\",\"USD$\"\n";
+
+fn import_download(db: &Db, e: i64, dir: &std::path::Path, name: &str, body: &str) -> fingraph_core::db::ImportReport {
+    let p = dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    let sha = fingraph_core::db::file_sha256(&p).unwrap();
+    let s = MultiPassScanner::new(&db.profiles().unwrap()).scan_file(&p).unwrap();
+    let r = db.import_auto(e, name, &sha, &s).unwrap();
+    db.keep_pdf(&p, &sha).unwrap();
+    r
+}
+
+/// Downloads overlap (first half of the month, then all of it); a download never has balances, and approving
+/// it must survive Rescan All; the next month's OFX is proven by the last statement's closing balance.
+#[test]
+fn downloads_dedupe_stay_approved_and_chain() {
+    let dir = tempfile_dir("downloads");
+    let db = Db::open(&dir.join("ledger.db")).unwrap();
+    let e = db.create_entity("Personal", EntityKind::Personal, Currency::KYD).unwrap();
+    let row = |d: &str, what: &str, amt: &str| format!("Savings,01234-5550001,{d},,{what},,,{amt}\n");
+    let half = format!("{RBC_HEADER}{}{}{}", row("10/2/2026", "PAYROLL", "2480.15"), row("10/14/2026", "COFFEE", "-4.50"), row("10/14/2026", "COFFEE", "-4.50"));
+    let whole = format!("{half}{}", row("10/28/2026", "RENT", "-1200.00"));
+    for (name, body) in [("oct1-15.csv", &half), ("oct1-31.csv", &whole)] {
+        for id in import_download(&db, e, &dir, name, body).document_ids {
+            db.approve_document(id).unwrap();
+        }
+    }
+    // two coffees the same day are two coffees; the overlap isn't counted twice
+    assert_eq!(all(&db).len(), 4);
+    db.rescan_all().unwrap();
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM documents WHERE review_hold = 1"), 0);
+    assert_eq!(all(&db).len(), 4);
+
+    let sep = "Date,Description,Amount,Balance,Account Number,Currency,Account Type\n2026-09-01,Pay,1000.00,1500.00,99887766,USD,Chequing\n2026-09-30,Shop,-100.00,1400.00,99887766,USD,Chequing\n";
+    for id in import_download(&db, e, &dir, "sep.csv", sep).document_ids {
+        db.approve_document(id).unwrap();
+    }
+    let ofx = |close: &str| format!("OFXHEADER:100\n<OFX><STMTRS><CURDEF>USD<BANKACCTFROM><ACCTID>99887766<ACCTTYPE>CHECKING</BANKACCTFROM><BANKTRANLIST><DTSTART>20261001<DTEND>20261031<STMTTRN><DTPOSTED>20261005<TRNAMT>-50.00<NAME>FUEL</STMTTRN></BANKTRANLIST><LEDGERBAL><BALAMT>{close}</LEDGERBAL></STMTRS></OFX>");
+    let status = |r: &fingraph_core::db::ImportReport| -> String { db.conn.query_row("SELECT reconciliation_status FROM documents WHERE id = ?1", [r.document_ids[0]], |x| x.get(0)).unwrap() };
+    assert_eq!(status(&import_download(&db, e, &dir, "oct.ofx", &ofx("1350.00"))), "Reconciled");
+    // a row missing from the download: the closing balance doesn't follow
+    assert_ne!(status(&import_download(&db, e, &dir, "oct-short.ofx", &ofx("1300.00"))), "Reconciled");
+    std::fs::remove_dir_all(&dir).ok();
+}

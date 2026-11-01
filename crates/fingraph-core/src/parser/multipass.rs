@@ -23,7 +23,11 @@ impl<'a> MultiPassScanner<'a> {
         MultiPassScanner { profiles, fallback_year: chrono::Local::now().year() }
     }
 
-    pub fn scan_pdf(&self, path: &Path) -> Result<ScanResult> {
+    /// A statement file: a PDF, or a bank's CSV / OFX / QFX download.
+    pub fn scan_file(&self, path: &Path) -> Result<ScanResult> {
+        if let Some(r) = super::exports::read(path, self.profiles) {
+            return r;
+        }
         let (tokens, ocr) = super::page_tokens(path)?;
         let decimals = money::infer_decimals(tokens.iter().map(|t| t.text.as_str()));
         let mut r = self.scan_tokens(tokens)?;
