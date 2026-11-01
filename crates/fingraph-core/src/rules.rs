@@ -179,7 +179,7 @@ static NOISE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 });
 
 /// Who a payment is from or to, ignoring reference numbers: a bank that prints a new reference on
-/// every deposit ("100000727, ISLAND AIR DIR PAY") still reads as one payer. For spotting rhythms
+/// every deposit ("100004512, HARBOUR FREIGHT DIR PAY") still reads as one payer. For spotting rhythms
 /// (pay, bills); rules keep matching on `merchant_stem`.
 pub fn payer_key(raw: &str, memo: &str) -> String {
     let stem = merchant_stem(raw, memo);
@@ -433,8 +433,8 @@ mod tests {
         assert_eq!(merchant_stem("PAYPAL *HBOMAX HELP.HBOMA4029357733 US", ""), "HBOMAX HELP");
         assert_eq!(merchant_stem("SQ *CRACKED CONCH WEST BAY", ""), "CRACKED CONCH");
         assert_eq!(merchant_stem("CUC WEB PMT", "CARIBBEAN UTILITIES CO"), "CUC");
-        assert_eq!(merchant_stem("MOBILE OB TRF DR", "TRF TO: VIP APPLIANCE SERVIC BANK OF BUTTERFIELD INTL"), "VIP APPLIANCE SERVIC");
-        assert_eq!(merchant_stem("KIRK MARKET/BACK-UP 1, GEORGE TOWN", "Ref 1694275484"), "KIRK MARKET BACK UP");
+        assert_eq!(merchant_stem("MOBILE OB TRF DR", "TRF TO: ACME APPLIANCE SERVIC BANK OF BUTTERFIELD INTL"), "ACME APPLIANCE SERVIC");
+        assert_eq!(merchant_stem("KIRK MARKET/BACK-UP 1, GEORGE TOWN", "Ref 1234567890"), "KIRK MARKET BACK UP");
         assert_eq!(title_case("FOSTER'S FOOD FAIR"), "Foster's Food Fair");
         assert_eq!(known_merchant("CUC", "CUC WEB PMT").0, "Caribbean Utilities Company");
     }
@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn truncated_names_are_one_merchant() {
         let stem = |m: &str| merchant_stem("POS PURCHASE", m);
-        let (a, b, c) = (stem("PAYPAL *DISCOVERYDI HELP.4029357733 US"), stem("PAYPAL *DISCOVERYDI HEL 4029357733 US"), merchant_stem("PAYPAL *DISCOVERYDI HE, 4029357733 (9.35 KYD)", ""));
+        let (a, b, c) = (stem("PAYPAL *DISCOVERYDI HELP.4029357733 US"), stem("PAYPAL *DISCOVERYDI HEL 4029357733 US"), merchant_stem("PAYPAL *DISCOVERYDI HE, 4029357733 (9.90 KYD)", ""));
         assert!(same_merchant(&a, &b) && same_merchant(&a, &c) && same_merchant(&b, &c), "{a} / {b} / {c}");
         assert!(same_merchant("HBO MAX HBOMAX.COM", "HBOMAX HELP"));
         assert!(!same_merchant("KIRK MARKET", "KIRK HOME CENTRE"));
@@ -454,16 +454,16 @@ mod tests {
         // a rule for one Amazon service doesn't capture the others
         let pv = Rule { pattern: "PRIME VIDEO CHANNELS".into(), ..Default::default() };
         assert!(!pv.matches("AMAZON DIGITAL SVCS, AMZN.COM/BILL", ""));
-        assert!(!pv.matches("AUDIBLE*E47R01203, AMZN.COM/BILL", ""));
+        assert!(!pv.matches("AUDIBLE*A12B34567, AMZN.COM/BILL", ""));
         assert!(!r.matches("POS PURCHASE", "KIRK MARKET"));
         // and triage asks once
         let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
-        let t = |id, date, memo: &str| TriageInput { id, entity_id: 1, posted: date, raw: "POS PURCHASE".into(), memo: memo.into(), amount: "-9.42".parse().unwrap(), currency: Currency::KYD, account: "Chq".into() };
+        let t = |id, date, memo: &str| TriageInput { id, entity_id: 1, posted: date, raw: "POS PURCHASE".into(), memo: memo.into(), amount: "-9.99".parse().unwrap(), currency: Currency::KYD, account: "Chq".into() };
         let g = triage_groups(&[t(1, d(5, 28), "PAYPAL *DISCOVERYDI HELP.4029357733 US"), t(2, d(7, 28), "PAYPAL *DISCOVERYDI HELP.4029357733 US"), t(3, d(8, 31), "PAYPAL *DISCOVERYDI HEL 4029357733 US")]);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].count, 3);
         assert_eq!(g[0].suggested_payee, "Discovery+");
-        assert_eq!(payer_key("ELECTRONIC CREDIT", "100000727, Island Air Dir Pay Cr"), payer_key("ELECTRONIC CREDIT", "100000928, Island Air Dir Pay Cr"));
+        assert_eq!(payer_key("ELECTRONIC CREDIT", "100004512, Harbour Freight Dir Pay Cr"), payer_key("ELECTRONIC CREDIT", "100004513, Harbour Freight Dir Pay Cr"));
         assert_eq!(g[0].kind, TriageKind::Subscription);
     }
 

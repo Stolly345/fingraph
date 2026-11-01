@@ -9,8 +9,7 @@ transactions. On top of that sit a budget, a forecast for the weeks between stat
 net worth, in KYD or USD, across personal and business workspaces.
 
 Nothing leaves the computer. Everything lives in `~/.local/share/fingraph/`: the ledger, kept copies
-of your statements and backups. The full product and system reference is
-[`docs/PRD.md`](docs/PRD.md).
+of your statements and backups.
 
 ![Overview: five headline numbers, six charts, and the Review banner](docs/screenshots/overview.png)
 
@@ -19,20 +18,35 @@ never a real ledger.*
 
 ## Install
 
-```sh
-sudo apt install poppler-utils tesseract-ocr libgtk-4-dev libadwaita-1-dev
-cargo deb -p fingraph
-sudo apt install ./target/debian/fingraph_0.2.13-1_amd64.deb
-```
+Download the package for your distro from the
+[latest release](https://github.com/Stolly345/fingraph/releases/latest):
 
-Or run it from source with `cargo run -p fingraph --release`.
+| Distro | Install |
+|---|---|
+| Ubuntu 26.04+, Debian 13 | `sudo apt install ./fingraph_0.2.15-1_amd64.deb` (use `apt`, not `dpkg -i`, so dependencies come too) |
+| Fedora 42+ | `sudo dnf install ./fingraph-0.2.15-1.x86_64.rpm` |
+| openSUSE Tumbleweed | `sudo zypper install --allow-unsigned-rpm ./fingraph-0.2.15-1.x86_64.rpm` |
+| Arch | `git clone https://github.com/Stolly345/fingraph && cd fingraph/packaging/aur && makepkg -si` |
 
-- `poppler-utils` is required: `pdftotext` gives the scanner every word with its position.
-- `tesseract-ocr` is recommended. It reads statements that are only pictures, such as redacted or
+All four are tested installing and starting in clean containers. You need GTK 4.14 and
+libadwaita 1.6 or newer, so Debian 12 and Ubuntu 24.04 are too old.
+
+- `pdftotext` (poppler) is required: it gives the scanner every word with its position. The
+  packages pull it in.
+- `tesseract` is recommended. It reads statements that are only pictures, such as redacted or
   scanned ones.
 
-Same-version `.deb`s need `sudo apt install --reinstall …`, so every release gets a new version
-number.
+### From source
+
+```sh
+sudo apt install poppler-utils tesseract-ocr libgtk-4-dev libadwaita-1-dev
+cargo run -p fingraph --release
+```
+
+Packages: `cargo build --release`, then `cargo deb -p fingraph --no-build` and
+`cargo generate-rpm -p crates/fingraph`. For Arch, put the new version and the .deb's sha256 in
+`packaging/aur/PKGBUILD` and run `makepkg --printsrcinfo > .SRCINFO`. Same-version `.deb`s need
+`sudo apt install --reinstall …`, so every release gets a new version number.
 
 ## Getting started
 
@@ -229,16 +243,13 @@ bring one up to accuracy:
    `crates/fingraph-core/tests/fixtures/private/`, which git ignores, and become tests.
 3. Approve the first import after comparing it with the PDF.
 
-The details are in the PRD, §6.3.
-
 ## Code layout
 
 | Path | What |
 |---|---|
 | `crates/fingraph-core` | No GUI. Scanner (`parser/`: profiles, multipass, dates, reconcile, OCR), ledger and import rules (`db.rs`), rules and triage (`rules.rs`), learning (`learn.rs`), directory (`merchants.rs`, `data/merchants.tsv`), splits, reimbursements, attachments and coverage (`workflows.rs`), `insights.rs`, `budget.rs`, `outlook.rs`, `wealth.rs`, exports, preferences, demo statements |
 | `crates/fingraph` | The app, one file per page or dialog: `dashboard`, `wealth`, `budget`, `close`, `outlook`, `transactions`, `statement`, `statements`, `changes`, `rules`, `review`, `account`, `export`, `directory`, `profiles`, `preferences`, `guide`, `wizard`, `split`, `owed`, `txedit`. Cairo charts are in `charts.rs`; the shell, sidebar, menu and shared helpers are in `main.rs` |
-| `packaging/` | Desktop entry (PDF "Open With") and icon |
-| `docs/PRD.md` | Product and system reference, decisions log, known limits |
+| `packaging/` | Desktop entry (PDF "Open With"), icon, Arch PKGBUILD |
 
 ## Adding businesses
 
@@ -292,3 +303,7 @@ That uses a scratch ledger. Never point `FINGRAPH_DB` at your real one.
 The README screenshots in `docs/screenshots/` were taken this way from a fresh demo ledger, with
 **Fill From My Spending** pressed on Budget (`FINGRAPH_CLICK="Fill From My Spending"`) so the budget
 has something in it.
+
+## License
+
+MIT or Apache-2.0, at your option ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)).

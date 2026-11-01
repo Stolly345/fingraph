@@ -468,12 +468,14 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     content.append(&gtk::ScrolledWindow::builder().child(&table).vexpand(true).build());
     content.append(&bar);
 
+    // set while the page refreshes: its own dropdown rebuilds must not queue another refresh (0.2.14 looped forever)
+    let busy = Rc::new(std::cell::Cell::new(false));
     let refresh: crate::Refresh = {
         let w = Rc::downgrade(app);
+        let busy = busy.clone();
         let (store, account_dd, category_dd, search, account_ids, filter_cats, summary, focus_bar, cat_names, cat_ids, cat_menu_box, cat_pop) =
             (store.clone(), account_dd.clone(), category_dd.clone(), search.clone(), account_ids.clone(), filter_cats.clone(), summary.clone(), focus_bar.clone(), cat_names.clone(), cat_ids.clone(), cat_menu_box.clone(), cat_pop.clone());
         let selected_rows = selected_rows.clone();
-        let busy = Rc::new(std::cell::Cell::new(false));
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
             if busy.get() {
@@ -572,8 +574,12 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     }
     // through the app's refresh, which keeps a bug in this page from closing the app
     for dd in [&account_dd, &category_dd] {
-        let w = Rc::downgrade(app);
-        dd.connect_selected_notify(move |_| w.upgrade().iter().for_each(App::refresh));
+        let (w, busy) = (Rc::downgrade(app), busy.clone());
+        dd.connect_selected_notify(move |_| {
+            if !busy.get() {
+                w.upgrade().iter().for_each(App::refresh);
+            }
+        });
     }
     {
         let w = Rc::downgrade(app);

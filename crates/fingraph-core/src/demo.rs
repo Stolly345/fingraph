@@ -479,7 +479,7 @@ pub fn demo_documents() -> Vec<DemoDoc> {
 
         // ---------------- Scotiabank chequing (KYD)
         let mut t = Vec::new();
-        t.push(DemoTx::new(scot.0 + Duration::days(0), "ELECTRONIC CREDIT", dec("2720.64")).memo("ISLAND AIR DIR PAY CR SALARY"));
+        t.push(DemoTx::new(scot.0 + Duration::days(0), "ELECTRONIC CREDIT", dec("2480.15")).memo("HARBOUR FREIGHT DIR PAY CR SALARY"));
         let cuc_base = rng.cents(175, 235);
         let cuc = if last { (cuc_base * dec("1.34")).round_dp(2) } else { cuc_base };
         t.push(DemoTx::new(scot.0 + Duration::days(3), "CUC WEB PMT", -cuc).memo("CARIBBEAN UTILITIES CO"));
@@ -494,7 +494,7 @@ pub fn demo_documents() -> Vec<DemoDoc> {
             t.push(DemoTx::new(scot.0 + Duration::days(11), "POS PURCHASE", -rng.cents(60, 420)).memo("KIRK HOME CENTRE 0021"));
         }
         t.push(DemoTx::new(scot.0 + Duration::days(12), "ABM WITHDRAWAL", -dec("100.00")).memo("*BNS CAMANA BAY"));
-        t.push(DemoTx::new(scot.0 + Duration::days(14), "ELECTRONIC CREDIT", dec("2720.64")).memo("ISLAND AIR DIR PAY CR SALARY"));
+        t.push(DemoTx::new(scot.0 + Duration::days(14), "ELECTRONIC CREDIT", dec("2480.15")).memo("HARBOUR FREIGHT DIR PAY CR SALARY"));
         t.push(DemoTx::new(d(y, m, 1), "PC TRANSFER DEBIT", -pay_kyd).memo("TRANSFER TO BUTTERFIELD VISA 7710"));
         t.push(DemoTx::new(scot.0 + Duration::days(16), "PC TRANSFER DEBIT", -dec("500.00")).memo("TRANSFER TO RBC SAVINGS 3390"));
         t.push(DemoTx::new(scot.0 + Duration::days(17), "MOBILE OB TRF DR", -dec("450.00")).memo("TRF TO: CICSA CREDIT UNION LOAN 1003"));
@@ -551,7 +551,7 @@ pub fn demo_documents() -> Vec<DemoDoc> {
         docs.push(DemoDoc { filename: format!("RBC_Savings_3390_{y}-{m:02}.pdf"), workspace: "Personal", tokens: render(std::slice::from_ref(&spec)), specs: vec![spec] });
 
         // ---------------- CICSA credit union: shares + loan in one statement
-        let mut st = vec![DemoTx::new(d(y, m, 15), "PAYROLL DEDUCTION SHARES", dec("300.00")).memo("PAYROLL SPLIT ISLAND AIR")];
+        let mut st = vec![DemoTx::new(d(y, m, 15), "PAYROLL DEDUCTION SHARES", dec("300.00")).memo("PAYROLL SPLIT HARBOUR FREIGHT")];
         if m == 12 {
             st.push(DemoTx::new(d(y, m, 20), "DIVIDEND POSTING 2025", (shares * dec("0.045")).round_dp(2)));
         }

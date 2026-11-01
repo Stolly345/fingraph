@@ -183,22 +183,22 @@ mod tests {
         assert_eq!(name("A.L. THOMPSON'S, GEORGETOWN"), Some(("A.L. Thompson's", "Repairs & Maintenance")));
         assert_eq!(name("FOSTER'S CAMANA BAY, GRAND CAYMAN"), Some(("Foster's", "Groceries")));
         assert_eq!(name("FOSTERS PHARMACY SAVANNAH"), Some(("Foster's Pharmacy", "Pharmacy")));
-        assert_eq!(name("TRF TO: HOME GAS ROYAL BANK OF CANADA"), Some(("Home Gas", "Gas")));
+        assert_eq!(name("TRF TO: CLEAN GAS LTD ROYAL BANK OF CANADA"), Some(("Clean Gas", "Gas")));
         assert_eq!(name("CLEAN GAS LTD"), Some(("Clean Gas", "Gas")));
         assert_eq!(name("LOGIC COMMUNICATIONS"), Some(("Logic", "Phone & Internet")));
         assert_eq!(name("C3 PURE FIBRE"), Some(("C3", "Phone & Internet")));
         assert_eq!(name("C.U.C, GEORGE TOWN"), Some(("Caribbean Utilities Company", "Electricity")));
-        assert_eq!(name("TRF TO: FIS INSURANCEBROKERS BANK OF BUTTERFIELD INTL"), Some(("FIS Insurance Brokers", "Insurance")));
+        assert_eq!(name("TRF TO: BRITISH CAYMANIAN BANK OF BUTTERFIELD INTL"), Some(("British Caymanian Insurance", "Insurance")));
         // Amazon: the store is shopping, its digital services are subscriptions
-        assert_eq!(name("AMAZON MKTPL*535SO0QN2, SEATTLE"), Some(("Amazon", "Online Shopping")));
+        assert_eq!(name("AMAZON MKTPL*AB12CD34E, SEATTLE"), Some(("Amazon", "Online Shopping")));
         assert_eq!(name("AMAZON DIGITAL SVCS, AMZN.COM/BILL"), Some(("Amazon Digital", "Subscriptions & Digital")));
-        assert_eq!(name("AMAZON DIGIT*5A5GM9LI2"), Some(("Amazon Digital", "Subscriptions & Digital")));
+        assert_eq!(name("AMAZON DIGIT*XY98ZW76Q"), Some(("Amazon Digital", "Subscriptions & Digital")));
         // a generic word is never a match on its own
         assert_eq!(name("FLOWERS BY JANE"), None);
         assert_eq!(name("KIRK MARKET/BACK-UP 1"), Some(("Kirk Market", "Groceries")));
         assert_eq!(name("MARLEY JERK CENTRE"), Some(("Marley Jerk Centre", "Takeaway & Delivery")));
         // the merchant comes before the billing descriptor
-        assert_eq!(name("AUDIBLE*E47R01203, AMZN.COM/BILL"), Some(("Audible", "Subscriptions & Digital")));
+        assert_eq!(name("AUDIBLE*A12B34567, AMZN.COM/BILL"), Some(("Audible", "Subscriptions & Digital")));
         assert_eq!(name("AMAZON MKTPLACE PMTS, AMZN.COM/BILL"), Some(("Amazon", "Online Shopping")));
         assert_eq!(name("WAL-MART SUPERCENTER 5854, MIAMI"), Some(("Walmart", "Shopping")));
         assert_eq!(name("TORTUGA GREENERY, GEORGE TOWN"), None);

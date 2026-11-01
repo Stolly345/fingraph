@@ -32,7 +32,7 @@ fn assert_exact(r: &ScanResult, specs: &[StatementSpec]) {
 #[test]
 fn butterfield_chequing_ddmmyyyy_with_fx_memo() {
     let txs = vec![
-        DemoTx::new(d(2026, 8, 3), "SALARY ISLAND AIR", dec("2720.64")),
+        DemoTx::new(d(2026, 8, 3), "SALARY HARBOUR FREIGHT", dec("2480.15")),
         DemoTx::new(d(2026, 8, 5), "POS FOSTER'S FOOD FAIR", dec("-84.12")),
         DemoTx::new(d(2026, 8, 7), "VISA PURCHASE AMAZON.COM", dec("-121.80")).memo("USD 145.00 @ 0.84000"),
         DemoTx::new(d(2026, 8, 12), "CUC WEB PMT", dec("-231.40")),
@@ -68,7 +68,7 @@ fn butterfield_card_cr_suffix_and_posting_date() {
 fn scotiabank_dateless_rows_roll_over_december_to_january() {
     let txs = vec![
         DemoTx::new(d(2025, 12, 18), "POS PURCHASE", dec("-62.10")).memo("KIRK HOME CENTRE 0021"),
-        DemoTx::new(d(2025, 12, 31), "ELECTRONIC CREDIT", dec("2720.64")).memo("ISLAND AIR DIR PAY CR SALARY"),
+        DemoTx::new(d(2025, 12, 31), "ELECTRONIC CREDIT", dec("2480.15")).memo("HARBOUR FREIGHT DIR PAY CR SALARY"),
         DemoTx::new(d(2026, 1, 2), "CUC WEB PMT", dec("-210.00")).memo("CARIBBEAN UTILITIES CO"),
         DemoTx::new(d(2026, 1, 15), "SERVICE CHARGE", dec("-13.00")),
     ];
@@ -87,7 +87,7 @@ fn scotiabank_card_two_line_fx_memo() {
         DemoTx::new(d(2026, 8, 21), "INTERNET - CARD PAYMENT", dec("1000.00")),
         DemoTx::new(d(2026, 9, 2), "C.U.C GEORGE TOWN", dec("-283.55")),
     ];
-    let spec = StatementSpec::new(Bank::Scotiabank, AccountType::CreditCard, Currency::USD, "2197", dec("1250.00"), (d(2026, 8, 17), d(2026, 9, 15)), txs);
+    let spec = StatementSpec::new(Bank::Scotiabank, AccountType::CreditCard, Currency::USD, "9063", dec("1250.00"), (d(2026, 8, 17), d(2026, 9, 15)), txs);
     let r = scan(std::slice::from_ref(&spec));
     assert_exact(&r, std::slice::from_ref(&spec));
     assert_eq!(r.sections[0].transactions[0].fx_original, Some((Currency::KYD, dec("15.00"))));
@@ -132,7 +132,7 @@ fn rbc_rows_inherit_the_date_above_and_sparse_balances_verify() {
 #[test]
 fn cicsa_share_and_loan_sections() {
     let shares = StatementSpec::new(Bank::Cicsa, AccountType::ShareAccount, Currency::KYD, "1002", dec("6200.00"), (d(2025, 12, 1), d(2025, 12, 31)), vec![
-        DemoTx::new(d(2025, 12, 15), "PAYROLL DEDUCTION SHARES", dec("300.00")).memo("PAYROLL SPLIT ISLAND AIR"),
+        DemoTx::new(d(2025, 12, 15), "PAYROLL DEDUCTION SHARES", dec("300.00")).memo("PAYROLL SPLIT HARBOUR FREIGHT"),
         DemoTx::new(d(2025, 12, 20), "DIVIDEND POSTING 2025", dec("279.00")),
     ]);
     let loan = StatementSpec::new(Bank::Cicsa, AccountType::Loan, Currency::KYD, "1003", dec("18450.00"), (d(2025, 12, 1), d(2025, 12, 31)), vec![
@@ -164,7 +164,7 @@ fn a_page_break_split_row_is_joined_across_the_header() {
 #[test]
 fn pass5_recovers_an_amount_that_drifted_out_of_its_column() {
     let txs = vec![
-        DemoTx::new(d(2026, 8, 3), "SALARY", dec("2720.64")),
+        DemoTx::new(d(2026, 8, 3), "SALARY", dec("2480.15")),
         DemoTx::new(d(2026, 8, 5), "KIRK MARKET", dec("-84.12")),
         DemoTx::new(d(2026, 8, 9), "CUC WEB PMT", dec("-231.40")),
     ];

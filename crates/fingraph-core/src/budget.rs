@@ -806,13 +806,13 @@ mod tests {
             x
         };
         // every two weeks, with one bonus payday
-        // (the owner's real pattern: a bonus, two refunds and a penny test under the same wording)
+        // (a bonus, two refunds and a penny test under the same wording)
         let rows = vec![
-            pay(29, 5, "2720.64"), pay(11, 6, "2720.64"), pay(23, 6, "297.00"), pay(23, 6, "297.00"), pay(25, 6, "2720.64"), pay(9, 7, "2720.64"), pay(24, 7, "2720.64"),
-            pay(7, 8, "4122.51"), pay(21, 8, "2720.64"), pay(4, 9, "0.01"), pay(4, 9, "2720.64"),
+            pay(29, 5, "2480.15"), pay(11, 6, "2480.15"), pay(23, 6, "185.00"), pay(23, 6, "185.00"), pay(25, 6, "2480.15"), pay(9, 7, "2480.15"), pay(24, 7, "2480.15"),
+            pay(7, 8, "3910.40"), pay(21, 8, "2480.15"), pay(4, 9, "0.01"), pay(4, 9, "2480.15"),
         ];
         let s = detect_salary(&rows, NaiveDate::from_ymd_opt(2026, 9, 15).unwrap()).expect("the salary");
-        assert_eq!((s.amount, s.cycle), (d("2720.64"), PayCycle::Fortnightly));
+        assert_eq!((s.amount, s.cycle), (d("2480.15"), PayCycle::Fortnightly));
     }
 
     #[test]

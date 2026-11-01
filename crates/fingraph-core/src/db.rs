@@ -2572,7 +2572,7 @@ impl Db {
         let fx = self.fx()?;
         let rows: Vec<TxRow> = self.transactions(&TxFilter::default())?.into_iter().filter(|t| t.transfer_peer.is_none()).collect();
         let transfer_cat = self.category_id("Transfers")?;
-        // "Transfer to 2197": the account whose last four digits the description names is the likely other side
+        // "Transfer to 9063": the account whose last four digits the description names is the likely other side
         let last4: std::collections::HashMap<i64, String> = self.accounts()?.into_iter().map(|a| (a.id, a.account_number_masked.trim_start_matches('•').to_string())).collect();
         let names = |a: &TxRow, b: &TxRow| last4.get(&b.account_id).is_some_and(|l| l.len() == 4 && names_account(&crate::merchants::tokens(&format!("{} {}", a.raw_description, a.memo)), l));
         let apart: std::collections::HashSet<(i64, String, i64, String)> = {
@@ -2620,7 +2620,7 @@ impl Db {
     }
 
     /// Recognise payments to your credit cards: money out of a bank account whose description names
-    /// one of your cards' last four digits ("Transfer to 2197") or says it pays a card ("VISA PMT",
+    /// one of your cards' last four digits ("Transfer to 9063") or says it pays a card ("VISA PMT",
     /// "CARD PAYMENT"), and payments received on a card account. Filed under Transfers › Credit Card
     /// Payments, so they're never spending, even when the card's own statement isn't imported.
     /// A transaction you filed as something else by hand is left alone. Returns how many changed.
@@ -2801,7 +2801,7 @@ impl Db {
             n += self.import_scan_reviewed(ent, &doc.filename, &sha, &scan, &targets, &all)?.inserted;
         }
         // a few answers already learned, so triage starts with the interesting merchants
-        for (pattern, cat, payee) in [("SALARY", "Salary", "Island Air (Salary)"), ("RENT RECEIVED", "Rental Income", "Rent"), ("SERVICE CHARGE", "Bank Fees & Interest", "Scotiabank")] {
+        for (pattern, cat, payee) in [("SALARY", "Salary", "Harbour Freight (Salary)"), ("RENT RECEIVED", "Rental Income", "Rent"), ("SERVICE CHARGE", "Bank Fees & Interest", "Scotiabank")] {
             let category_id = self.category_id(cat)?;
             self.learn(&Rule { id: 0, kind: RuleKind::Substring, pattern: pattern.into(), clean_payee: Some(payee.into()), category_id, is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None, ..Default::default() })?;
         }
@@ -2813,8 +2813,8 @@ impl Db {
     }
 }
 
-/// The description names an account: its last four digits on their own ("Transfer to 2197") or as the
-/// end of a full card/account number ("Transfer to 10785 19544403575").
+/// The description names an account: its last four digits on their own ("Transfer to 9063") or as the
+/// end of a full card/account number ("Transfer to 20416 38817204418").
 pub(crate) fn names_account(words: &[String], last4: &str) -> bool {
     words.iter().any(|w| w == last4 || (w.len() >= 8 && w.ends_with(last4) && w.bytes().all(|b| b.is_ascii_digit())))
 }
@@ -3413,8 +3413,8 @@ mod tests {
         let named = db.transactions(&TxFilter { search: "BUTTERFIELD VISA 7710".into(), ..Default::default() }).unwrap();
         assert!(named.iter().all(|t| t.category_id == cc));
         // a card named by its full number
-        let words = crate::merchants::tokens("PC TRANSFER DEBIT Transfer to 10785 19544403575");
-        assert!(names_account(&words, "3575") && !names_account(&words, "0785"));
+        let words = crate::merchants::tokens("PC TRANSFER DEBIT Transfer to 20416 38817204418");
+        assert!(names_account(&words, "4418") && !names_account(&words, "0416"));
         // a transfer to your own savings account isn't a card payment
         assert!(db.transactions(&TxFilter { search: "RBC SAVINGS 3390".into(), ..Default::default() }).unwrap().iter().all(|t| t.category_id != cc));
     }

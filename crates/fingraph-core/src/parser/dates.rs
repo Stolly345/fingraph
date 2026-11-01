@@ -223,6 +223,6 @@ mod tests {
         assert_eq!(parse_period("Dec 16 - Jan 15, 2026", Order::DayFirst), Some((ymd(2025, 12, 16), ymd(2026, 1, 15))));
         assert_eq!(parse_period("01/08/2026 to 31/08/2026", Order::DayFirst), Some((ymd(2026, 8, 1), ymd(2026, 8, 31))));
         // the pay-by date after the period isn't its end
-        assert_eq!(parse_period("***********3575 May 16 - Jun 15, 2026 July 10, 2026 2 of 5", Order::DayFirst), Some((ymd(2026, 5, 16), ymd(2026, 6, 15))));
+        assert_eq!(parse_period("***********4418 May 16 - Jun 15, 2026 July 10, 2026 2 of 5", Order::DayFirst), Some((ymd(2026, 5, 16), ymd(2026, 6, 15))));
     }
 }
