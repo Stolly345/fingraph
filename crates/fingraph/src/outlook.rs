@@ -105,10 +105,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
     card.append(&info_heading(
         "Balances Until Your Next Statement",
-        "Each line is one bank account's estimated balance, starting from its last verified balance. Drops are bills and card payments on their usual days, jumps are pay, and the gentle slope is everyday spending. If a line dips below zero, that account is likely to go overdrawn around that date. Hover for each day's estimate.",
+        "Each line is one bank account's estimated balance, starting from its last verified balance. Drops are bills and card payments on their usual days, jumps are pay, and the gentle slope is everyday spending. If a line dips below zero, that account is likely to go overdrawn around that date. Hover for each day's estimate. Regular payments in and out (pay, bills, card payments, standing orders) land on their usual days; everything else is spread evenly at the last 90 days' rate.",
     ));
     card.append(&dim(&format!(
-        "Solid from each account's last verified balance: regular payments in and out (pay, bills, card payments, standing orders) on their usual days, and everything else spread evenly at the last 90 days' rate. An estimate — the next statement replaces it. {AHEAD} days ahead."
+        "An estimate from each account's last verified balance, {AHEAD} days ahead. The next statement replaces it."
     )));
     card.append(&chart.widget);
     body.append(&card);
@@ -196,7 +196,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let series: Vec<LineSeries> = fcs
                 .iter()
                 .enumerate()
-                .map(|(i, fc)| LineSeries { name: fc.account.clone(), points: fc.points.iter().filter(|p| p.0 >= start).map(|p| (x(p.0), f(fx.convert(p.1, fc.currency, ccy)))).collect(), color: charts::PALETTE[i % charts::PALETTE.len()], dashed: false })
+                .map(|(i, fc)| LineSeries { name: crate::transactions::short_account(&fc.account), points: fc.points.iter().filter(|p| p.0 >= start).map(|p| (x(p.0), f(fx.convert(p.1, fc.currency, ccy)))).collect(), color: charts::PALETTE[i % charts::PALETTE.len()], dashed: false })
                 .collect();
             let mut stops = Vec::new();
             let mut d = start;

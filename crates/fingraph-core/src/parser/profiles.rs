@@ -66,7 +66,7 @@ pub enum RowShape {
 }
 
 /// The parts of a bank's layout that are written down rather than guessed at every scan. A scan that
-/// doesn't match them says which one (Scan Pass Report → layout notes).
+/// doesn't match them says which one (Scan Report → layout notes).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayoutRules {

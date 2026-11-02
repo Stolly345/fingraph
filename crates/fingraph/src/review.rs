@@ -12,7 +12,7 @@ use crate::{App, clear};
 
 fn kind_text(k: TriageKind) -> &'static str {
     match k {
-        TriageKind::Subscription => "Subscription?",
+        TriageKind::Subscription => "Recurring",
         TriageKind::Transfer => "Transfer?",
         TriageKind::Merchant => "Category?",
     }
@@ -32,7 +32,9 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let groups: Rc<RefCell<Vec<TriageGroup>>> = Rc::default();
     let answered = Rc::new(Cell::new(0usize));
     // keep your place: after an answer, the next merchant down is selected
-    let place = Rc::new(Cell::new(0usize));
+    // debug screenshots: FINGRAPH_REVIEW_ROW=n opens on the nth merchant
+    let first = if cfg!(debug_assertions) { std::env::var("FINGRAPH_REVIEW_ROW").ok().and_then(|v| v.parse().ok()).unwrap_or(0) } else { 0 };
+    let place = Rc::new(Cell::new(first));
     let refresh_slot: Rc<RefCell<Option<crate::Refresh>>> = Rc::default();
 
     {

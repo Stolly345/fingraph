@@ -307,7 +307,7 @@ const CATEGORIES: &[(&str, &str, &[&str])] = &[
     ("Entertainment", "Expense", &["Events & Tickets", "Hobbies", "Movies & Streaming"]),
     ("Family Expense", "Expense", &["Allowances", "Baby & Kids' Supplies", "Childcare & Nanny", "Family Support & Remittances", "Kids' Activities", "School Supplies & Uniforms"]),
     ("Gifts & Donations", "Expense", &["Charity", "Church & Tithes", "Gifts"]),
-    ("Government & Fees", "Expense", &["Import Duty", "Stamp Duty", "Vehicle Licensing", "Work Permits & Immigration"]),
+    ("Government & Fees", "Expense", &["Import Duty", "Stamp Duty", "Taxes", "Vehicle Licensing", "Work Permits & Immigration"]),
     ("Groceries", "Expense", &["Liquor"]),
     ("Health & Fitness", "Expense", &["Doctor & Dental", "Gym & Sports", "Optical", "Pharmacy"]),
     ("Home & Garden", "Expense", &["Appliances", "Furniture & Decor", "Household Supplies"]),
@@ -589,10 +589,10 @@ impl Review {
             Review::NoBalances => "there are no balances to check the rows against",
             Review::Ocr => "it was read by OCR, so names may have typos",
             Review::NewLayout => "it's the first statement of this kind from this bank: check the dates, amounts and descriptions once",
-            Review::OffLayout => "it doesn't match this bank's declared layout (see the notes in its Scan Pass Report), so names or dates may be off",
-            Review::LayoutChanged => "the bank changed how its statements look since this account's last one (see its Scan Pass Report): check it once, and approving it teaches FinGraph the new layout",
-            Review::Derived => "an amount on it couldn't be read, so it was worked out from the balances before and after it (see Recovered in its Scan Pass Report): check that line against the PDF",
-            Review::Continuity => "it doesn't start where this account's previous statement ended (see its Scan Pass Report): a statement, or some of its rows, may be missing",
+            Review::OffLayout => "it doesn't match this bank's declared layout (see the notes in its Scan Report), so names or dates may be off",
+            Review::LayoutChanged => "the bank changed how its statements look since this account's last one (see its Scan Report): check it once, and approving it teaches FinGraph the new layout",
+            Review::Derived => "an amount on it couldn't be read, so it was worked out from the balances before and after it (see Recovered in its Scan Report): check that line against the PDF",
+            Review::Continuity => "it doesn't start where this account's previous statement ended (see its Scan Report): a statement, or some of its rows, may be missing",
         }
     }
     pub fn parse_list(s: &str) -> Vec<Review> {
@@ -807,6 +807,45 @@ impl Db {
     pub fn sp(&self) -> Result<Sp<'_>> {
         self.conn.execute_batch("SAVEPOINT fg")?;
         Ok(Sp { conn: &self.conn, done: false })
+    }
+
+    // ---------------------------------------------------------------- undo
+
+    /// One step of undo for edits to transactions and what's been learned (categories, payees, tags,
+    /// business and subscription flags, transfer pairs, rules): a copy taken just before the edit, in
+    /// temp tables on this connection. A new checkpoint replaces the last; rows deleted or imported
+    /// since aren't brought back or removed.
+    pub fn checkpoint(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "DROP TABLE IF EXISTS temp.undo_tx; DROP TABLE IF EXISTS temp.undo_rules; DROP TABLE IF EXISTS temp.undo_unpaired;
+             CREATE TEMP TABLE undo_tx AS SELECT * FROM main.transactions;
+             CREATE TEMP TABLE undo_rules AS SELECT * FROM main.learned_rules;
+             CREATE TEMP TABLE undo_unpaired AS SELECT * FROM main.unpaired;",
+        )?;
+        Ok(())
+    }
+
+    /// Put transactions and rules back as they were at the last `checkpoint`. False when there is none.
+    pub fn undo_to_checkpoint(&self) -> Result<bool> {
+        let have: bool = self.conn.query_row("SELECT EXISTS (SELECT 1 FROM sqlite_temp_master WHERE name = 'undo_tx')", [], |r| r.get(0))?;
+        if !have {
+            return Ok(false);
+        }
+        let cols: Vec<String> = {
+            let mut st = self.conn.prepare("SELECT name FROM pragma_table_info('transactions', 'main') WHERE name <> 'id'")?;
+            st.query_map([], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?
+        };
+        let list = cols.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+        let tx = self.sp()?;
+        tx.execute_batch(&format!(
+            "UPDATE main.transactions SET ({list}) = (SELECT {list} FROM temp.undo_tx u WHERE u.id = main.transactions.id)
+                 WHERE id IN (SELECT id FROM temp.undo_tx);
+             DELETE FROM main.learned_rules; INSERT INTO main.learned_rules SELECT * FROM temp.undo_rules;
+             DELETE FROM main.unpaired; INSERT INTO main.unpaired SELECT * FROM temp.undo_unpaired;"
+        ))?;
+        tx.commit()?;
+        self.conn.execute_batch("DROP TABLE temp.undo_tx; DROP TABLE temp.undo_rules; DROP TABLE temp.undo_unpaired;")?;
+        Ok(true)
     }
 
     // ---------------------------------------------------------------- preferences
@@ -2446,6 +2485,32 @@ impl Db {
 
     pub fn category_id(&self, name: &str) -> Result<Option<i64>> {
         Ok(self.conn.query_row("SELECT id FROM categories WHERE name = ?1 ORDER BY parent_id IS NOT NULL LIMIT 1", [name], |r| r.get(0)).optional()?)
+    }
+
+    /// The categories you use most for money going out (or coming in), busiest first: what the picker
+    /// offers before you type. Transfers aren't a choice anyone needs a shortcut to.
+    pub fn top_categories(&self, entity_ids: &[i64], outgoing: bool, limit: usize) -> Result<Vec<i64>> {
+        let ents = entity_ids.iter().map(|e| format!(",{e},")).collect::<String>();
+        let mut st = self.conn.prepare(
+            "SELECT t.category_id FROM transactions t JOIN accounts a ON a.id = t.account_id JOIN categories c ON c.id = t.category_id
+             WHERE c.kind <> 'Transfer' AND (t.amount_minor < 0) = ?1 AND (?2 = '' OR instr(?2, ',' || a.entity_id || ',') > 0)
+             GROUP BY t.category_id ORDER BY COUNT(*) DESC, t.category_id LIMIT ?3",
+        )?;
+        let ids = st.query_map(params![outgoing, ents, limit as i64], |r| r.get(0))?;
+        Ok(ids.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The last categories picked by hand, newest first (the picker's Recent).
+    pub fn recent_categories(&self) -> Vec<i64> {
+        self.setting("recent_categories").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default()
+    }
+
+    pub fn note_recent_category(&self, id: i64) -> Result<()> {
+        let mut r = self.recent_categories();
+        r.retain(|x| *x != id);
+        r.insert(0, id);
+        r.truncate(6);
+        self.set_setting("recent_categories", &serde_json::to_string(&r)?)
     }
 
     pub fn add_category(&self, name: &str, parent_id: Option<i64>, kind: CategoryKind) -> Result<i64> {

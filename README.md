@@ -160,7 +160,7 @@ searches transactions and Ctrl+O imports.
   or after the description, the bank's own summary labels, and which account types have been
   checked against a real statement. A statement that breaks the layout gets a note naming the
   rule. This catches statements that add up but are still wrong.
-- **Unreadable lines.** Anything the scanner can't read is shown in the Scan Pass Report, with a
+- **Unreadable lines.** Anything the scanner can't read is shown in the Scan Report, with a
   one-click **Convert** to turn a skipped line into a transaction.
 
 ### Importing statements
@@ -303,6 +303,13 @@ HOME GAS|HOMEGAS	Home Gas	Gas
   S is allowed. The earliest match in the statement text wins, then the longest.
 - **Generic words:** never add a generic word on its own.
 - **`fallback`:** marks a payment platform (Google, Apple) that gives way to the service it billed.
+
+**Sharing what you've taught it.** Main menu → **Share Merchant Hints…** lists the shops you
+categorized that the directory didn't know (or got wrong), each with the category you chose. It
+leaves out amounts, dates, accounts, balances, income, transfers, and payments by transfer, cheque
+or deposit, which name people. Untick anything you'd rather keep and save the file. FinGraph never
+sends it: attach it to a [new issue](https://github.com/Stolly345/fingraph/issues/new?title=Merchant%20hints)
+and the shops go into the next release's directory.
 
 Rebuild after editing. To browse the directory in the app, use main menu → **Business Directory**.
 It shows search, how often each business appears in your statements, keyword guesses, and

@@ -424,11 +424,9 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
     body.append(&info_heading(
         "Categories",
-        "One row per category. The pill says whether it's a fixed or variable expense (click it to switch). Below the name: what it usually costs, last month, and any trend, rollover or money moved. On the right: what you've spent of its budget. The bar turns amber near the limit and red when over.",
+        &format!("One row per category. The pill says whether it's a fixed or variable expense (click it to switch). Below the name: what it usually costs, last month, and any trend, rollover or money moved. On the right: what you've spent of its budget. The bar turns amber near the limit and red when over. “Usually” is the median of the last {MONTHS} months, so a one-off doesn't count. Transfers and categories left out in Preferences aren't spending."),
     ));
-    body.append(&dim(&format!(
-        "Type a monthly amount for any category and press Enter (empty or 0 removes it). “Usually” is the median of the last {MONTHS} months — a one-off doesn't count. Transfers and categories left out in Preferences aren't spending."
-    )));
+    body.append(&dim("Type a monthly amount and press Enter. Empty or 0 removes it."));
     let list = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
     body.append(&list);
     let watch_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
@@ -522,7 +520,14 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 // fill: categories without a budget get their usual amount
                 let (w, sc, redraw, usual, cats) = (Rc::downgrade(&a), s.scope.clone(), redraw.clone(), usual.clone(), s.cats.clone());
                 let has: Vec<i64> = s.budgets.keys().copied().collect();
-                fill.set_sensitive(cats.iter().any(|c| !has.contains(&c.id) && usual.contains_key(&c.name)));
+                let can_fill = cats.iter().any(|c| !has.contains(&c.id) && usual.contains_key(&c.name));
+                fill.set_sensitive(can_fill);
+                // greyed out says why, not just that
+                fill.set_tooltip_text(Some(&if can_fill {
+                    format!("Give every category without a budget what it usually costs (median of the last {MONTHS} months)")
+                } else {
+                    "Nothing to fill: every category you spend in already has a budget".to_string()
+                }));
                 *on_fill.borrow_mut() = Some(Rc::new(move || {
                     let Some(a) = w.upgrade() else { return };
                     let mut n = 0;
@@ -689,8 +694,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     "The bar splits a month's money by colour: fixed expenses (bills that don't change much, like rent, insurance or phone), variable spending (things you choose, like groceries or eating out), non-monthly bills, loans, and what's saved. The variable part is where you have room to cut back. Switch a category with its Fixed/Variable pill under Categories.",
                 ));
                 split_box.append(&dim(match income {
-                    Some(_) => "How your take-home divides each month: fixed expenses you can't easily change, variable spending you can, loan payments, and what's left to save. Amounts are budgets, or the usual cost where a category has no budget.",
-                    None => "Fixed expenses you can't easily change against variable spending you can. Amounts are budgets, or the usual cost where a category has no budget. Set up your pay (Set Up Budget…) to see them against your take-home.",
+                    Some(_) => "How your take-home divides each month. Amounts are budgets, or the usual cost where a category has none.",
+                    None => "Amounts are budgets, or the usual cost where a category has none. Set Up Budget… adds your pay, to see them against your take-home.",
                 }));
                 // one bar, split in proportion
                 let mut parts: Vec<(&str, Decimal, charts::Rgb)> = vec![("Fixed", fixed_t, charts::BLUE), ("Variable", var_t, charts::ORANGE)];
@@ -786,10 +791,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             {
                 funds_box.append(&info_heading(
                     "Non-Monthly Bills",
-                    "Each bar shows how much has been set aside so far towards that bill. A full bar means it's covered by its due date. Suggestions under the list are yearly or quarterly charges FinGraph spotted in your statements; add one to start setting money aside for it.",
+                    "Each bar shows how much has been set aside so far towards that bill. A full bar means it's covered by its due date. Suggestions under the list are yearly or quarterly charges FinGraph spotted in your statements; add one to start setting money aside for it. Each month sets a share aside so the bill is covered when it comes; that comes out of what you save in Your Plan.",
                 ));
                 funds_box.append(&dim(
-                    "Bills that come once a quarter or once a year — insurance, licences, registrations, annual plans. Each month sets a share aside so the bill is covered when it comes; that comes out of what you save in Your Plan.",
+                    "Insurance, licences, registrations, annual plans: bills that come once a quarter or once a year.",
                 ));
                 let lb = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
                 let ideas: Vec<core::FundIdea> = core::fund_ideas(&s.rows, ccy, &s.fx, today()).into_iter().filter(|i| !s.funds.iter().any(|f| f.stem == i.stem)).collect();

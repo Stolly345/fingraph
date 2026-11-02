@@ -132,9 +132,9 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
     card.append(&info_heading(
         "Net Worth Over Time",
-        "The blue line is your net worth at each month end. The dashed green line is what you own and the dashed red line is what you owe; blue is the gap between them. A rising blue line means you're getting ahead. Hover a month for the numbers.",
+        "The blue line is your net worth at each month end. The dashed green line is what you own and the dashed red line is what you owe; blue is the gap between them. A rising blue line means you're getting ahead. Hover a month for the numbers. Each month end is every account's last verified balance on or before it, plus the latest value of what you've added by hand. An account counts from its first statement; a month whose statement isn't in yet repeats the last balance.",
     ));
-    card.append(&dim("Each month end: every account's last verified balance on or before it, plus the latest value of what you've added by hand. An account counts from its first statement; a month whose statement isn't in yet repeats the last balance."));
+    card.append(&dim("Verified month-end balances from your statements, plus what you've added by hand."));
     card.append(&chart.widget);
     body.append(&card);
     let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).build();
@@ -200,6 +200,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             for (_, x) in accts {
                 let (d, v) = *x.points.last().unwrap_or(&(end, Decimal::ZERO));
                 let r = adw::ActionRow::builder().title(glib::markup_escape_text(&x.name)).subtitle(format!("Verified {}", d.format("%d %b %Y"))).build();
+                // confirmed by a statement: the same mark as everywhere a number is verified
+                let mark = gtk::Image::builder().icon_name("object-select-symbolic").css_classes(["verified"]).tooltip_text("Confirmed by a statement").build();
+                mark.update_property(&[gtk::accessible::Property::Label("Verified")]);
+                r.add_prefix(&mark);
                 r.add_suffix(&gtk::Label::builder().label(fmt_money(v, x.currency)).css_classes(["tnum", if v.is_sign_negative() { "amount-out" } else { "" }]).build());
                 l.append(&r);
             }
@@ -208,7 +212,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 "Other Assets & Debts",
                 "Things you own or owe that no statement shows. Use Update Value… when the value changes; the chart uses each value from its date onward. Debts show with a minus and count against your net worth.",
             ));
-            content.append(&dim("Things no statement shows: a house or car, a pension, an investment account, a loan from family. Update the value now and then; the chart uses each one from its date on."));
+            content.append(&dim("A house or car, a pension, an investment account, a loan from family."));
             let l = list();
             for i in &s.items {
                 let last = i.values.last();

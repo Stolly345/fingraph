@@ -7,6 +7,7 @@ pub mod demo;
 pub mod export;
 pub mod insights;
 pub mod learn;
+pub mod hints;
 pub mod merchants;
 pub mod money;
 pub mod parser;

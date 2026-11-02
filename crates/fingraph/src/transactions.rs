@@ -35,6 +35,14 @@ pub fn focus_search(_app: &Rc<App>) {
     });
 }
 
+/// `CNB Checking KYD ••6120` → `CNB ••6120`: the bank and the last four, which tell accounts apart.
+pub fn short_account(name: &str) -> String {
+    match (name.split_whitespace().next(), name.rsplit_once("••")) {
+        (Some(bank), Some((_, last4))) if !last4.is_empty() => format!("{bank} ••{last4}"),
+        _ => name.to_string(),
+    }
+}
+
 fn row_of(item: &gtk::ListItem) -> Option<TxRow> {
     item.item().and_downcast::<glib::BoxedAnyObject>().map(|o| o.borrow::<TxRow>().clone())
 }
@@ -63,23 +71,6 @@ fn pop_under(anchor: &gtk::Button, child: &impl IsA<gtk::Widget>) -> gtk::Popove
     });
     pop.popup();
     pop
-}
-
-/// Pick one of `names`; `on_pick` gets its index.
-fn pick_from(anchor: &gtk::Button, names: &[String], current: usize, on_pick: impl Fn(usize) + 'static) {
-    let list = gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build();
-    for n in names {
-        list.append(&gtk::Label::builder().label(n).xalign(0.0).build());
-    }
-    if let Some(r) = list.row_at_index(current as i32) {
-        list.select_row(Some(&r));
-    }
-    let sc = gtk::ScrolledWindow::builder().child(&list).min_content_height(320).propagate_natural_width(true).hscrollbar_policy(gtk::PolicyType::Never).build();
-    let pop = pop_under(anchor, &sc);
-    list.connect_row_activated(move |_, r| {
-        pop.popdown();
-        on_pick(r.index() as usize);
-    });
 }
 
 /// Edit `text` in a small entry; `on_done` gets the new text on Enter.
@@ -129,7 +120,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     SEARCH.with(|s| *s.borrow_mut() = Some(search.clone()));
     APP.with(|x| *x.borrow_mut() = Some(Rc::downgrade(app)));
     let account_dd = gtk::DropDown::builder().tooltip_text("Account").build();
-    let category_dd = gtk::DropDown::builder().tooltip_text("Category").build();
+    let category_dd = gtk::DropDown::builder().tooltip_text("Category").enable_search(true).expression(gtk::PropertyExpression::new(gtk::StringObject::static_type(), None::<gtk::Expression>, "string")).build();
     let account_ids: Rc<RefCell<Vec<Option<i64>>>> = Rc::new(RefCell::new(vec![None]));
     let filter_cats: Rc<RefCell<Vec<Option<i64>>>> = Rc::new(RefCell::new(vec![None]));
     let summary = gtk::Label::builder().xalign(0.0).css_classes(["dim-label"]).build();
@@ -143,31 +134,47 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let bar = gtk::ActionBar::new();
     let sel_label = gtk::Label::new(None);
     bar.pack_start(&sel_label);
-    let cat_menu_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
-    let cat_pop = gtk::Popover::builder().child(&gtk::ScrolledWindow::builder().child(&cat_menu_box).min_content_height(320).propagate_natural_width(true).build()).build();
-    let bulk_cat = gtk::MenuButton::builder().label("Categorize").popover(&cat_pop).build();
+    let bulk_cat = gtk::Button::builder().label("Categorize…").tooltip_text("Pick one category for every selected transaction").build();
     let bulk_tag = gtk::Button::with_label("Tag…");
     let bulk_sub = gtk::Button::builder().label("Subscription").tooltip_text("Mark as a subscription").build();
     let bulk_biz = gtk::Button::builder().label("Business").tooltip_text("Flag as a business expense paid from this account").build();
-    let one_split = gtk::Button::builder().icon_name("edit-cut-symbolic").tooltip_text("Split one transaction across categories / workspaces").build();
-    let one_attach = gtk::Button::builder().icon_name("mail-attachment-symbolic").tooltip_text("Attach a receipt or invoice (or drop a file on the row)").build();
-    let one_rule = gtk::Button::builder().label("Rule…").tooltip_text("A rule from this transaction: by its words or reference number, optionally only for this amount").build();
-    let bulk_unlink = gtk::Button::builder().label("Not Transfer").tooltip_text("Not a transfer between your own accounts").build();
+    // the less frequent actions live under More, so the bar shows four choices, not nine
+    let flat_item = |label: &str, tip: &str| {
+        let b = gtk::Button::builder().label(label).tooltip_text(tip).css_classes(["flat"]).build();
+        if let Some(l) = b.child().and_downcast::<gtk::Label>() {
+            l.set_xalign(0.0);
+        }
+        b
+    };
+    let one_split = flat_item("Split…", "Split one transaction across categories / workspaces");
+    let one_attach = flat_item("Attach Receipt…", "Attach a receipt or invoice (or drop a file on the row)");
+    let one_rule = flat_item("Make a Rule…", "A rule from this transaction: by its words or reference number, optionally only for this amount");
+    let bulk_unlink = flat_item("Not a Transfer", "Not a transfer between your own accounts");
+    let more_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+    for b in [&one_split, &one_attach, &one_rule, &bulk_unlink] {
+        more_box.append(b);
+    }
+    let more_pop = gtk::Popover::builder().child(&more_box).build();
+    for b in [&one_split, &one_attach, &one_rule, &bulk_unlink] {
+        let p = more_pop.clone();
+        b.connect_clicked(move |_| p.popdown());
+    }
+    let more = gtk::MenuButton::builder().icon_name("view-more-symbolic").tooltip_text("More actions").popover(&more_pop).build();
     let bulk_del = gtk::Button::builder().icon_name("user-trash-symbolic").tooltip_text("Delete selected").css_classes(["destructive-action"]).build();
     bar.pack_end(&bulk_del);
-    bar.pack_end(&bulk_unlink);
+    bar.pack_end(&more);
     bar.pack_end(&bulk_sub);
     bar.pack_end(&bulk_biz);
-    bar.pack_end(&one_rule);
-    bar.pack_end(&one_attach);
-    bar.pack_end(&one_split);
     bar.pack_end(&bulk_tag);
     bar.pack_end(&bulk_cat);
     bar.pack_end(&summary);
+    // nothing selected, nothing to act on
+    let acts: Vec<gtk::Widget> = vec![bulk_cat.clone().upcast(), bulk_tag.clone().upcast(), bulk_biz.clone().upcast(), bulk_sub.clone().upcast(), more.clone().upcast(), bulk_del.clone().upcast()];
+    for w in &acts {
+        w.set_sensitive(false);
+    }
     bar.set_revealed(false);
 
-    let cat_names: Rc<RefCell<Vec<String>>> = Rc::default();
-    let cat_ids: Rc<RefCell<Vec<Option<i64>>>> = Rc::default();
 
     let selected_rows = {
         let (store, selection) = (store.clone(), selection.clone());
@@ -210,14 +217,30 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             l.set_tooltip_text(t.effective.map(|e| format!("Transaction date {e}")).as_deref());
         }),
     );
+    // payee on top, the bank's own wording under it: one column instead of two half-cut ones
     {
         let w = Rc::downgrade(app);
         col(
             "Payee",
             true,
             Box::new(move |item| {
+                let cell = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
                 let b = cell_button();
                 b.set_tooltip_text(Some("Click to rename"));
+                cell.append(&b);
+                let detail = label();
+                detail.set_css_classes(&["dim-label", "caption"]);
+                detail.set_margin_start(6);
+                cell.append(&detail);
+                // drop a receipt or invoice onto the row to attach it
+                let drop = gtk::DropTarget::new(gtk::gdk::FileList::static_type(), gtk::gdk::DragAction::COPY);
+                let (w2, c2) = (w.clone(), cell.clone());
+                drop.connect_drop(move |_, v, _, _| {
+                    let (Some(a), Ok(files), Ok(id)) = (w2.upgrade(), v.get::<gtk::gdk::FileList>(), c2.widget_name().parse::<i64>()) else { return false };
+                    crate::split::attach_paths(&a, id, files.files().iter().filter_map(|f| f.path()).collect());
+                    true
+                });
+                cell.add_controller(drop);
                 let w = w.clone();
                 b.connect_clicked(move |b| {
                     let (Some(a), Ok(id)) = (w.upgrade(), b.widget_name().parse::<i64>()) else { return };
@@ -234,76 +257,46 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                         }
                     });
                 });
-                item.set_child(Some(&b));
+                item.set_child(Some(&cell));
             }),
             Box::new(|item, t| {
-                let b = item.child().and_downcast::<gtk::Button>().unwrap();
+                let cell = item.child().and_downcast::<gtk::Box>().unwrap();
+                cell.set_widget_name(&t.id.to_string());
+                let b = cell.first_child().and_downcast::<gtk::Button>().unwrap();
                 b.set_widget_name(&t.id.to_string());
                 set_cell_text(&b, &t.clean_payee);
+                let detail = b.next_sibling().and_downcast::<gtk::Label>().unwrap();
+                detail.set_label(&if t.memo.is_empty() { t.raw_description.clone() } else { format!("{} · {}", t.raw_description, t.memo) });
+                detail.set_tooltip_text(Some(&format!("{}\n{}\nFITID {}", t.raw_description, t.memo, t.fitid.get(..16).unwrap_or(&t.fitid))));
             }),
         );
     }
-    col(
-        "Description",
-        true,
-        Box::new({
-            let w = Rc::downgrade(app);
-            move |item| {
-                let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
-                b.append(&label());
-                let memo = label();
-                memo.add_css_class("dim-label");
-                memo.add_css_class("caption");
-                b.append(&memo);
-                // drop a receipt or invoice onto the row to attach it
-                let drop = gtk::DropTarget::new(gtk::gdk::FileList::static_type(), gtk::gdk::DragAction::COPY);
-                let (w, b2) = (w.clone(), b.clone());
-                drop.connect_drop(move |_, v, _, _| {
-                    let (Some(a), Ok(files), Ok(id)) = (w.upgrade(), v.get::<gtk::gdk::FileList>(), b2.widget_name().parse::<i64>()) else { return false };
-                    crate::split::attach_paths(&a, id, files.files().iter().filter_map(|f| f.path()).collect());
-                    true
-                });
-                b.add_controller(drop);
-                item.set_child(Some(&b));
-            }
-        }),
-        Box::new(|item, t| {
-            let b = item.child().and_downcast::<gtk::Box>().unwrap();
-            b.set_widget_name(&t.id.to_string());
-            let l = b.first_child().and_downcast::<gtk::Label>().unwrap();
-            let m = l.next_sibling().and_downcast::<gtk::Label>().unwrap();
-            l.set_label(&t.raw_description);
-            m.set_label(&t.memo);
-            m.set_visible(!t.memo.is_empty());
-            b.set_tooltip_text(Some(&format!("{}\n{}\nFITID {}", t.raw_description, t.memo, t.fitid.get(..16).unwrap_or(&t.fitid))));
-        }),
-    );
     col(
         "Account",
         false,
         Box::new(move |item| item.set_child(Some(&label()))),
         Box::new(|item, t| {
             let l = item.child().and_downcast::<gtk::Label>().unwrap();
-            l.set_label(&t.account_name);
+            l.set_label(&short_account(&t.account_name));
+            l.set_tooltip_text(Some(&t.account_name));
         }),
     );
     {
-        let (w, names, ids) = (Rc::downgrade(app), cat_names.clone(), cat_ids.clone());
+        let w = Rc::downgrade(app);
         col(
             "Category",
             false,
             Box::new(move |item| {
                 let b = cell_button();
                 b.set_width_request(150);
-                let (w, names, ids) = (w.clone(), names.clone(), ids.clone());
+                let w = w.clone();
                 b.connect_clicked(move |b| {
                     let (Some(a), Ok(id)) = (w.upgrade(), b.widget_name().parse::<i64>()) else { return };
                     let Ok(t) = a.db.transaction(id) else { return };
-                    let current = ids.borrow().iter().position(|c| *c == t.category_id).unwrap_or(0);
-                    let (w, ids) = (Rc::downgrade(&a), ids.clone());
-                    pick_from(b, &names.borrow(), current, move |i| {
+                    let w = Rc::downgrade(&a);
+                    let opts = crate::picker::Pick { allow_none: true, suggested: Vec::new(), outgoing: Some(t.amount.is_sign_negative()) };
+                    crate::picker::open(&a, b, opts, move |new| {
                         let Some(a) = w.upgrade() else { return };
-                        let new = ids.borrow().get(i).copied().flatten();
                         if new == t.category_id {
                             return;
                         }
@@ -320,94 +313,6 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 let b = item.child().and_downcast::<gtk::Button>().unwrap();
                 b.set_widget_name(&t.id.to_string());
                 set_cell_text(&b, t.category_name.as_deref().unwrap_or("Uncategorized"));
-            }),
-        );
-    }
-    {
-        let w = Rc::downgrade(app);
-        col(
-            "Business",
-            false,
-            Box::new(move |item| {
-                let cb = gtk::CheckButton::builder().halign(gtk::Align::Center).build();
-                let w = w.clone();
-                cb.connect_toggled(move |cb| {
-                    let Some(a) = w.upgrade() else { return };
-                    let Ok(id) = cb.widget_name().parse::<i64>() else { return };
-                    let Ok(t) = a.db.transaction(id) else { return };
-                    // binding sets the box too: only act on a real change
-                    if cb.is_active() == t.business_entity_id.is_some() {
-                        return;
-                    }
-                    if !cb.is_active() {
-                        if a.saved(a.db.set_business(&[id], None)) {
-                            a.toast(&format!("{} is personal again", t.clean_payee));
-                        }
-                        return a.refresh();
-                    }
-                    a.with_business(t.account_entity_id, move |a: &Rc<App>, biz| {
-                        if a.db.set_business(&[t.id], Some(biz)).is_ok() {
-                            let stem = merchant_stem(&t.raw_description, &t.memo);
-                            let rule = Rule { kind: RuleKind::NormalizedTokens, pattern: stem.clone(), entity_id: Some(t.account_entity_id), business_entity_id: Some(biz), ..Default::default() };
-                            a.toast_action(
-                                &format!("Booked to {}. Always treat “{stem}” as a business expense?", a.entity_name(biz)),
-                                "Always",
-                                Rc::new(move |a: &Rc<App>| match a.db.learn(&rule) {
-                                    Ok(n) => {
-                                        a.toast(&format!("Rule saved · {n} transaction{} booked to the business", if n == 1 { "" } else { "s" }));
-                                        a.refresh();
-                                    }
-                                    Err(e) => a.toast(&e.to_string()),
-                                }),
-                            );
-                            a.refresh();
-                        }
-                    }, |a| a.refresh());
-                });
-                item.set_child(Some(&cb));
-            }),
-            {
-                let w = Rc::downgrade(app);
-                Box::new(move |item, t| {
-                    let cb = item.child().and_downcast::<gtk::CheckButton>().unwrap();
-                    cb.set_widget_name(&t.id.to_string());
-                    cb.set_active(t.business_entity_id.is_some());
-                    let tip = match (t.business_entity_id, w.upgrade()) {
-                        (Some(b), Some(a)) => format!("Business expense of {} (paid from {})", a.entity_name(b), t.account_name),
-                        _ => "Tick if this was a business expense".to_string(),
-                    };
-                    cb.set_tooltip_text(Some(&tip));
-                })
-            },
-        );
-    }
-    {
-        let w = Rc::downgrade(app);
-        col(
-            "Tag",
-            false,
-            Box::new(move |item| {
-                let b = cell_button();
-                b.set_width_request(80);
-                b.set_tooltip_text(Some("Property, unit or project tag — click to change"));
-                let w = w.clone();
-                b.connect_clicked(move |b| {
-                    let (Some(a), Ok(id)) = (w.upgrade(), b.widget_name().parse::<i64>()) else { return };
-                    let Ok(t) = a.db.transaction(id) else { return };
-                    let w = Rc::downgrade(&a);
-                    edit_text(b, &t.tag.clone(), "Property, unit or project", move |text| {
-                        let Some(a) = w.upgrade() else { return };
-                        if text != t.tag && a.db.set_tag(&[id], &text).is_ok() {
-                            a.refresh();
-                        }
-                    });
-                });
-                item.set_child(Some(&b));
-            }),
-            Box::new(|item, t| {
-                let b = item.child().and_downcast::<gtk::Button>().unwrap();
-                b.set_widget_name(&t.id.to_string());
-                set_cell_text(&b, &t.tag);
             }),
         );
     }
@@ -434,7 +339,41 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         Box::new(|item, t| {
             let b = item.child().and_downcast::<gtk::Box>().unwrap();
             crate::clear(&b);
-            let icon = |name: &str, tip: &str| gtk::Image::builder().icon_name(name).tooltip_text(tip).build();
+            let app = APP.with(|x| x.borrow().as_ref().and_then(|w| w.upgrade()));
+            // business and tag as badges on the row, each a click away from changing
+            if let (Some(biz), Some(a)) = (t.business_entity_id, &app) {
+                let pill = gtk::Button::builder().label(a.entity_name(biz)).tooltip_text(format!("Business expense of {} (paid from {}) — click to make it personal", a.entity_name(biz), t.account_name)).valign(gtk::Align::Center).css_classes(["flat", "row-badge", "business"]).build();
+                let (id, payee) = (t.id, t.clean_payee.clone());
+                pill.connect_clicked(move |_| {
+                    if let Some(a) = APP.with(|x| x.borrow().as_ref().and_then(|w| w.upgrade())) {
+                        a.undoable(|a| a.saved(a.db.set_business(&[id], None)).then(|| format!("{payee} is personal again")));
+                        a.refresh();
+                    }
+                });
+                b.append(&pill);
+            }
+            if !t.tag.is_empty() {
+                let pill = gtk::Button::builder().label(&t.tag).tooltip_text("Property, unit or project tag — click to change").valign(gtk::Align::Center).css_classes(["flat", "row-badge"]).build();
+                let (id, tag) = (t.id, t.tag.clone());
+                pill.connect_clicked(move |p| {
+                    let tag = tag.clone();
+                    edit_text(p, &tag.clone(), "Property, unit or project", move |text| {
+                        if let Some(a) = APP.with(|x| x.borrow().as_ref().and_then(|w| w.upgrade()))
+                            && text != tag
+                            && a.saved(a.db.set_tag(&[id], &text))
+                        {
+                            a.refresh();
+                        }
+                    });
+                });
+                b.append(&pill);
+            }
+            // the tooltip is also what a screen reader says
+            let icon = |name: &str, tip: &str| {
+                let i = gtk::Image::builder().icon_name(name).tooltip_text(tip).build();
+                i.update_property(&[gtk::accessible::Property::Label(tip)]);
+                i
+            };
             b.append(&match t.review {
                 ReviewStatus::NeedsReview => icon("dialog-information-symbolic", "Needs review"),
                 ReviewStatus::AutoCategorized => icon("emblem-system-symbolic", "Categorized by a learned rule"),
@@ -473,9 +412,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let refresh: crate::Refresh = {
         let w = Rc::downgrade(app);
         let busy = busy.clone();
-        let (store, account_dd, category_dd, search, account_ids, filter_cats, summary, focus_bar, cat_names, cat_ids, cat_menu_box, cat_pop) =
-            (store.clone(), account_dd.clone(), category_dd.clone(), search.clone(), account_ids.clone(), filter_cats.clone(), summary.clone(), focus_bar.clone(), cat_names.clone(), cat_ids.clone(), cat_menu_box.clone(), cat_pop.clone());
-        let selected_rows = selected_rows.clone();
+        let (store, account_dd, category_dd, search, account_ids, filter_cats, summary, focus_bar) =
+            (store.clone(), account_dd.clone(), category_dd.clone(), search.clone(), account_ids.clone(), filter_cats.clone(), summary.clone(), focus_bar.clone());
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
             if busy.get() {
@@ -494,35 +432,12 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
             let cats = a.categories();
             let (cn, ci) = category_choices(&cats);
-            *cat_names.borrow_mut() = cn.clone();
-            *cat_ids.borrow_mut() = ci.clone();
             let prev_cat = filter_cats.borrow().get(category_dd.selected() as usize).copied().flatten();
             let mut fnames = vec!["All categories".to_string(), "Uncategorized".to_string()];
             fnames.extend(cn.iter().skip(1).cloned());
             *filter_cats.borrow_mut() = [None, Some(-1)].into_iter().chain(ci.iter().skip(1).copied()).collect();
             category_dd.set_model(Some(&gtk::StringList::new(&fnames.iter().map(String::as_str).collect::<Vec<_>>())));
             category_dd.set_selected(filter_cats.borrow().iter().position(|x| *x == prev_cat).unwrap_or(0) as u32);
-
-            // bulk "Categorize" menu
-            crate::clear(&cat_menu_box);
-            for (name, id) in cn.iter().zip(ci.iter()) {
-                let b = gtk::Button::builder().label(name.trim()).css_classes(["flat"]).halign(gtk::Align::Fill).build();
-                if let Some(l) = b.child().and_downcast::<gtk::Label>() {
-                    l.set_xalign(0.0);
-                }
-                let (w, id, sr, pop) = (Rc::downgrade(&a), *id, selected_rows.clone(), cat_pop.clone());
-                b.connect_clicked(move |_| {
-                    pop.popdown();
-                    let Some(a) = w.upgrade() else { return };
-                    let rows = sr();
-                    let ids: Vec<i64> = rows.iter().map(|t| t.id).collect();
-                    if a.db.set_category(&ids, id).is_ok() {
-                        a.toast(&format!("Categorized {} transactions", ids.len()));
-                        a.refresh();
-                    }
-                });
-                cat_menu_box.append(&b);
-            }
 
             let cat_filter = filter_cats.borrow().get(category_dd.selected() as usize).copied().flatten();
             let mut rows = a
@@ -589,12 +504,32 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         let (bar, sel_label, store) = (bar.clone(), sel_label.clone(), store.clone());
         selection.connect_selection_changed(move |s, _, _| {
             let n = s.selection().size();
+            for w in &acts {
+                w.set_sensitive(n > 0);
+            }
             bar.set_revealed(true);
             sel_label.set_label(&if n > 0 { format!("{n} selected") } else { String::new() });
             let _ = store.n_items();
         });
     }
     bar.set_revealed(true);
+    {
+        let (w, sr) = (Rc::downgrade(app), selected_rows.clone());
+        bulk_cat.connect_clicked(move |b| {
+            let Some(a) = w.upgrade() else { return };
+            let ids: Vec<i64> = sr().iter().map(|t| t.id).collect();
+            if ids.is_empty() {
+                return;
+            }
+            let w = Rc::downgrade(&a);
+            crate::picker::open(&a, b, crate::picker::Pick { allow_none: true, ..Default::default() }, move |id| {
+                if let Some(a) = w.upgrade() {
+                    a.undoable(|a| a.saved(a.db.set_category(&ids, id)).then(|| format!("Categorized {} transactions", ids.len())));
+                    a.refresh();
+                }
+            });
+        });
+    }
     {
         let (w, sr) = (Rc::downgrade(app), selected_rows.clone());
         bulk_biz.connect_clicked(move |_| {
@@ -605,10 +540,27 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             a.with_business(
                 home,
                 move |a, biz| {
-                    if a.db.set_business(&ids, Some(biz)).is_ok() {
-                        a.toast(&format!("{} transactions booked to {}", ids.len(), a.entity_name(biz)));
-                        a.refresh();
+                    // one transaction: offer to learn the merchant, as ticking a row used to; several: offer Undo
+                    if let [t] = rows.as_slice() {
+                        if a.saved(a.db.set_business(&[t.id], Some(biz))) {
+                            let stem = merchant_stem(&t.raw_description, &t.memo);
+                            let rule = Rule { kind: RuleKind::NormalizedTokens, pattern: stem.clone(), entity_id: Some(t.account_entity_id), business_entity_id: Some(biz), ..Default::default() };
+                            a.toast_action(
+                                &format!("Booked to {}. Always treat “{stem}” as a business expense?", a.entity_name(biz)),
+                                "Always",
+                                Rc::new(move |a: &Rc<App>| match a.db.learn(&rule) {
+                                    Ok(n) => {
+                                        a.toast(&format!("Rule saved · {n} transaction{} booked to the business", if n == 1 { "" } else { "s" }));
+                                        a.refresh();
+                                    }
+                                    Err(e) => a.toast(&e.to_string()),
+                                }),
+                            );
+                        }
+                    } else {
+                        a.undoable(|a| a.saved(a.db.set_business(&ids, Some(biz))).then(|| format!("{} transactions booked to {}", ids.len(), a.entity_name(biz))));
                     }
+                    a.refresh();
                 },
                 |_| {},
             );
@@ -619,10 +571,11 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         bulk_sub.connect_clicked(move |_| {
             let Some(a) = w.upgrade() else { return };
             let ids: Vec<i64> = sr().iter().map(|t| t.id).collect();
-            if !ids.is_empty() && a.db.set_subscription(&ids, true).is_ok() {
-                a.toast(&format!("{} marked as subscription", ids.len()));
-                a.refresh();
+            if ids.is_empty() {
+                return;
             }
+            a.undoable(|a| a.saved(a.db.set_subscription(&ids, true)).then(|| format!("{} marked as subscription", ids.len())));
+            a.refresh();
         });
     }
     {
@@ -630,11 +583,11 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         bulk_unlink.connect_clicked(move |_| {
             let Some(a) = w.upgrade() else { return };
             let rows = sr();
-            let ok = rows.iter().all(|t| a.saved(a.db.unlink_transfer(t.id)));
-            let ids: Vec<i64> = rows.iter().filter(|t| t.category_name.as_deref() == Some("Transfers")).map(|t| t.id).collect();
-            if ok && a.saved(a.db.set_category(&ids, None)) {
-                a.toast(&format!("{} unlinked — they count as spending/income again", rows.len()));
-            }
+            a.undoable(|a| {
+                let ok = rows.iter().all(|t| a.saved(a.db.unlink_transfer(t.id)));
+                let ids: Vec<i64> = rows.iter().filter(|t| t.category_name.as_deref() == Some("Transfers")).map(|t| t.id).collect();
+                (ok && a.saved(a.db.set_category(&ids, None))).then(|| format!("{} unlinked — they count as spending/income again", rows.len()))
+            });
             a.refresh();
         });
     }
@@ -656,7 +609,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let w = Rc::downgrade(&a);
             d.connect_response(None, move |_, r| crate::shielded(|| {
                 if let (Some(a), "ok") = (w.upgrade(), r) {
-                    a.saved(a.db.set_tag(&ids, &e.text()));
+                    a.undoable(|a| a.saved(a.db.set_tag(&ids, &e.text())).then(|| format!("Tagged {} transactions", ids.len())));
                     a.refresh();
                 }
             }));

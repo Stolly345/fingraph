@@ -173,7 +173,7 @@ Each bank profile writes its layout down instead of the scanner guessing it at e
 | Summary labels | Opening/Previous Balance, Closing/New Balance, Withdrawals / Purchases…, Deposits / Payments & Credits | Beginning Balance, Ending Balance (on an `as of` line), Cheques & Other Debit, Deposits & Other Cred | generic |
 | Checked on real statements | Checking, CreditCard | Savings (one OCR'd statement) | none |
 
-A read that departs from its bank's declaration gets **layout notes** in the Scan Pass Report (a dated
+A read that departs from its bank's declaration gets **layout notes** in the Scan Report (a dated
 line with no amount under an amount-first bank; none of the bank's headings found; a balance found
 only under a generic label). That matters because a statement can reconcile and still be wrong: with
 the wrong row shape every amount still adds up but lands on the line above, so names and dates shift
@@ -248,7 +248,7 @@ and a bank that changes its statements breaks that. Four parts keep it working w
    and **from the amounts alone** (`data_layout`: rows that open with a date, money columns where the
    amounts' right edges line up, each debit/credit/balance assignment tried). The read that reconciles
    with the most rows wins; one that doesn't reconcile never replaces the saved layout's read. The winner is
-   still held: its Scan Pass Report says what the saved layout got wrong and how it was read instead.
+   still held: its Scan Report says what the saved layout got wrong and how it was read instead.
    Guards: dates count only where most dates start (memo lines that open with a date don't move the
    column); a summary box above the table is never part of it; an undated total line (`Deposits & Other
    Credits`) is never recovered as a missing transaction, even when its amount fits (found on the demo).
@@ -682,7 +682,7 @@ after their title — hover shows how to read it, a click keeps it open in a pop
 **Pages**: Transactions (virtualised grid, search Ctrl+F, account/category filters, inline category,
 payee, business and tag edits with "Remember" toasts, bulk categorise/tag/business/subscription/
 unlink/delete, ✂ split, 📎 attach — or drop a file on a row — and Rule…; a paperclip opens the
-receipts) · Statements (drop zone, bank badge, reconciliation badge, Scan Pass Report for every
+receipts) · Statements (drop zone, bank badge, reconciliation badge, Scan Report for every
 pass, Convert for skipped lines) · Reports & Export (CSV, QIF, OFX, QBO per account, P&L CSV, **P&L with receipts** — a folder with
 the P&L and every attached receipt named `date payee amount` — and Projects & Landed Cost) · Rules & Categories (edit, re-apply, forget, add category) · Bank Profiles (edit, test a
 PDF, new profile from a sample's detected columns).
@@ -727,7 +727,7 @@ remembers the step you were on (`guide_step`); closing it early is fine.
    and one row per file (bank, accounts, period, transactions, Adds up / Off by / Couldn't read),
    then: statements · accounts · transactions and the date span; money in and out with a monthly
    average (transfers between your own accounts left out); statements that didn't add up and how to
-   fix them (Scan Pass Report → Convert); months covered per account (● ◐ ○) and what to do about
+   fix them (Scan Report → Convert); months covered per account (● ◐ ○) and what to do about
    gaps; Read Again. Leaving the step mid-read and coming back shows the same read's progress (Continue
    waits for it). Files read here are remembered so the watcher doesn't scan them again, and the
    usual post-import triage jump is skipped (`import_paths_with(.., on_done)`).

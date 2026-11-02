@@ -14,7 +14,7 @@ use crate::App;
 // ──────────────────────────────────────────────────────────────── Smart Triage
 
 /// The one-tap answers, A–Z (the suggestion, when there is one, goes first).
-const QUICK: [&str; 15] = [
+const QUICK: [&str; 16] = [
     "Bank Fees & Interest",
     "Business Expense",
     "Dining & Takeaway",
@@ -28,6 +28,7 @@ const QUICK: [&str; 15] = [
     "Property Expense",
     "Repairs & Maintenance",
     "Shopping",
+    "Subscriptions & Digital",
     "Transport",
     "Utilities",
 ];
@@ -108,7 +109,8 @@ fn answer(app: &Rc<App>, g: &TriageGroup, category_id: Option<i64>, payee: &str,
         amount_min: amount,
         amount_max: amount,
     };
-    match app.db.learn(&rule) {
+    // a learned rule reaches back over every past match, so the answer can be taken back
+    app.undoable(|app| match app.db.learn(&rule) {
         Ok(n) => {
             // the wizard's own group is confirmed even where an older rule had guessed
             app.saved(app.db.set_category(&g.tx_ids, category_id));
@@ -119,10 +121,13 @@ fn answer(app: &Rc<App>, g: &TriageGroup, category_id: Option<i64>, payee: &str,
                 app.saved(app.db.set_business(&g.tx_ids, business));
             }
             answered.set(answered.get() + 1);
-            app.toast(&format!("Learned “{}” · updated {} transaction{}", g.suggested_payee, n.max(g.count), if n.max(g.count) == 1 { "" } else { "s" }));
+            Some(format!("Learned “{}” · updated {} transaction{}", g.suggested_payee, n.max(g.count), if n.max(g.count) == 1 { "" } else { "s" }))
         }
-        Err(e) => app.toast(&e.to_string()),
-    }
+        Err(e) => {
+            app.toast(&e.to_string());
+            None
+        }
+    });
     next();
 }
 
@@ -132,12 +137,15 @@ pub fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn(
     let cat_id = |name: &str| cats.iter().find(|c| c.name == name).map(|c| c.id);
     let plural = if g.count == 1 { "charge" } else { "charges" };
     let typical = fmt_money(-g.typical_amount, g.currency);
+    // "CHEQUE", "BRANCH DEPOSIT": the bank's label for many different payees, so one answer would be wrong
+    let varied = g.kind == TriageKind::Merchant && g.count > 1 && fingraph_core::rules::varied_payee(&g.stem);
 
     let q = gtk::Label::builder().xalign(0.0).wrap(true).use_markup(true).css_classes(["title-3"]).build();
     let esc = |s: &str| glib::markup_escape_text(s).to_string();
     q.set_markup(&match g.kind {
-        TriageKind::Subscription => format!("We found {} {plural} from <tt>{}</tt> ({typical}{}). Is <b>{}</b> a <b>Subscription</b>?", g.count, esc(&g.stem), cadence_word(g.cadence), esc(&g.suggested_payee)),
+        TriageKind::Subscription => format!("We found {} {plural} from <tt>{}</tt> ({typical}{}). How should we categorize <b>{}</b>?", g.count, esc(&g.stem), cadence_word(g.cadence), esc(&g.suggested_payee)),
         TriageKind::Transfer => format!("We found {} to <tt>{}</tt>. Is this an internal credit card payment or transfer between your accounts?", esc(&amounts_text(g)), esc(&g.stem)),
+        TriageKind::Merchant if varied => format!("These {} entries all read <tt>{}</tt>. Your bank prints that for every one, so they're probably to or from different people.", g.count, esc(&g.stem)),
         TriageKind::Merchant => format!("We found {} from <tt>{}</tt>. How should we categorize <b>{}</b>?", esc(&amounts_text(g)), esc(&g.stem), esc(&g.suggested_payee)),
     });
     content.append(&q);
@@ -172,9 +180,9 @@ pub fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn(
     opts.add(&payee);
     // scope: the workspace(s) these charges came from, or every workspace
     let mut scope_ids: Vec<Option<i64>> = ents.iter().filter(|e| g.entity_ids.contains(&e.id)).map(|e| Some(e.id)).collect();
-    let mut scope_names: Vec<String> = ents.iter().filter(|e| g.entity_ids.contains(&e.id)).map(|e| format!("Apply to {}", e.name)).collect();
+    let mut scope_names: Vec<String> = ents.iter().filter(|e| g.entity_ids.contains(&e.id)).map(|e| e.name.clone()).collect();
     scope_ids.push(None);
-    scope_names.push("Apply to all workspaces".into());
+    scope_names.push("All workspaces".into());
     let scope_row = adw::ComboRow::builder()
         .title("Remember for")
         .model(&gtk::StringList::new(&scope_names.iter().map(String::as_str).collect::<Vec<_>>()))
@@ -226,40 +234,70 @@ pub fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn(
         Rc::new(move || (s(), biz.get(), exact.is_active().then_some(amt)))
     };
 
-    // category chips (hidden behind "pick category" for subscription/transfer cards)
-    let chips_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).visible(g.kind == TriageKind::Merchant).build();
-    let flow = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).max_children_per_line(4).column_spacing(6).row_spacing(6).build();
-    // the directory's suggestion, then what your own categorising suggests, then the usual ones
-    let mut names: Vec<&str> = Vec::new();
-    if let Some(s) = g.suggested_category {
-        names.push(s);
-    }
-    names.extend(g.guesses.iter().map(String::as_str));
-    let lead = names.len();
-    names.extend(QUICK.iter().copied().filter(|n| !names.contains(n)).collect::<Vec<_>>());
-    for (i, name) in names.iter().enumerate() {
-        let b = gtk::Button::builder().label(*name).css_classes(if i < lead { vec!["chip", "suggested-action"] } else { vec!["chip"] }).build();
-        if i < lead && g.suggested_category != Some(*name) {
-            b.set_tooltip_text(Some("Suggested from how you've categorised similar transactions"));
+    // recurring is a flag, not a category: on by default for a subscription card, and every chip honours it
+    let sub_row = (g.kind == TriageKind::Subscription).then(|| {
+        adw::SwitchRow::builder()
+            .title("Count as a subscription")
+            .subtitle(glib::markup_escape_text(&format!("Listed under Subscriptions and planned for every month ({typical}{})", cadence_word(g.cadence))))
+            .active(true)
+            .build()
+    });
+    let recurring = {
+        let s = sub_row.clone();
+        Rc::new(move || s.as_ref().is_some_and(|s| s.is_active()))
+    };
+
+    // category chips (behind "they're all the same" for a varied payee; a transfer card asks first)
+    let chips_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).visible(g.kind != TriageKind::Transfer && !varied).build();
+    let flow = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).max_children_per_line(3).min_children_per_line(3).column_spacing(6).row_spacing(6).build();
+    // six answers at most, all about this merchant: the directory's suggestion, what your own
+    // categorising suggests, then what you pick lately and most for money going this way
+    let outgoing = g.typical_amount.is_sign_negative();
+    let mut lead: Vec<i64> = g.suggested_category.and_then(cat_id).into_iter().collect();
+    lead.extend(g.guesses.iter().filter_map(|n| cat_id(n)).filter(|id| !lead.contains(id)).collect::<Vec<_>>());
+    let pick = crate::picker::Pick { allow_none: false, suggested: lead.clone(), outgoing: Some(outgoing) };
+    let mut ids = crate::picker::shortcuts(app, &pick, &cats);
+    // a new ledger has no habits yet: the usual ones, never Income for money going out
+    for n in QUICK.iter().filter(|n| (**n == "Income") != outgoing) {
+        if ids.len() >= 6 {
+            break;
         }
-        let (w, g2, id, payee, scope, next, ans) = (Rc::downgrade(app), g.clone(), cat_id(name), payee.clone(), scope.clone(), next.clone(), answered.clone());
+        if let Some(id) = cat_id(n).filter(|id| !ids.contains(id)) {
+            ids.push(id);
+        }
+    }
+    for (i, id) in ids.iter().enumerate() {
+        let Some(c) = cats.iter().find(|c| c.id == *id) else { continue };
+        // one highlighted answer: the best guess
+        let b = gtk::Button::builder().label(&c.name).css_classes(if i == 0 && !lead.is_empty() { vec!["chip", "suggested-action"] } else { vec!["chip"] }).build();
+        if let Some(p) = c.parent_id.and_then(|p| cats.iter().find(|x| x.id == p)) {
+            b.set_tooltip_text(Some(&format!("{} · {}", c.name, p.name)));
+        }
+        let (w, g2, id, payee, scope, next, ans, rec) = (Rc::downgrade(app), g.clone(), Some(*id), payee.clone(), scope.clone(), next.clone(), answered.clone(), recurring.clone());
         b.connect_clicked(move |_| {
             if let Some(a) = w.upgrade() {
-                answer(&a, &g2, id, &payee.text(), false, scope(), &next, &ans);
+                answer(&a, &g2, id, &payee.text(), rec(), scope(), &next, &ans);
             }
         });
         flow.insert(&b, -1);
     }
     chips_box.append(&flow);
-    let more_names: Vec<String> = std::iter::once("More categories…".to_string()).chain(cats.iter().map(|c| if c.parent_id.is_some() { format!("   {}", c.name) } else { c.name.clone() })).collect();
-    let more = gtk::DropDown::builder().model(&gtk::StringList::new(&more_names.iter().map(String::as_str).collect::<Vec<_>>())).halign(gtk::Align::Start).build();
+    // everything else: the same searchable picker as everywhere else in FinGraph
+    let more = gtk::Button::builder()
+        .child(&adw::ButtonContent::builder().icon_name("system-search-symbolic").label("Find Another Category…").build())
+        .halign(gtk::Align::Start)
+        .css_classes(["flat"])
+        .build();
     {
-        let (w, g2, cats, payee, scope, next, ans) = (Rc::downgrade(app), g.clone(), cats.clone(), payee.clone(), scope.clone(), next.clone(), answered.clone());
-        more.connect_selected_notify(move |dd| {
-            let Some(c) = (dd.selected() as usize).checked_sub(1).and_then(|i| cats.get(i)) else { return };
-            if let Some(a) = w.upgrade() {
-                answer(&a, &g2, Some(c.id), &payee.text(), false, scope(), &next, &ans);
-            }
+        let (w, g2, payee, scope, next, ans, rec) = (Rc::downgrade(app), g.clone(), payee.clone(), scope.clone(), next.clone(), answered.clone(), recurring.clone());
+        more.connect_clicked(move |b| {
+            let Some(a) = w.upgrade() else { return };
+            let (w, g2, payee, scope, next, ans, rec) = (w.clone(), g2.clone(), payee.clone(), scope.clone(), next.clone(), ans.clone(), rec.clone());
+            crate::picker::open(&a, b, pick.clone(), move |id| {
+                if let (Some(a), Some(id)) = (w.upgrade(), id) {
+                    answer(&a, &g2, Some(id), &payee.text(), rec(), scope(), &next, &ans);
+                }
+            });
         });
     }
     chips_box.append(&more);
@@ -267,18 +305,30 @@ pub fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn(
     let buttons = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
     match g.kind {
         TriageKind::Subscription => {
-            let yes = gtk::Button::builder().label("Yes — Mark as Subscription & Categorize as “Subscriptions & Digital”").css_classes(["suggested-action", "pill"]).build();
-            let no = gtk::Button::builder().label("Not a Subscription — Pick Category…").css_classes(["pill"]).build();
-            let (w, g2, id, payee2, scope2, next2, ans) = (Rc::downgrade(app), g.clone(), cat_id("Subscriptions & Digital"), payee.clone(), scope.clone(), next.clone(), answered.clone());
-            yes.connect_clicked(move |_| {
+            if let Some(s) = &sub_row {
+                let l = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
+                l.append(s);
+                buttons.append(&l);
+            }
+        }
+        TriageKind::Merchant if varied => {
+            let each = gtk::Button::builder().label("Categorize Each One in Transactions").css_classes(["suggested-action", "pill"]).build();
+            let same = gtk::Button::builder().label("They're All the Same — Categorize Together").css_classes(["pill"]).build();
+            let (w, ids) = (Rc::downgrade(app), g.tx_ids.clone());
+            each.connect_clicked(move |_| {
                 if let Some(a) = w.upgrade() {
-                    answer(&a, &g2, id, &payee2.text(), true, scope2(), &next2, &ans);
+                    a.show_transactions(ids.clone());
                 }
             });
-            let cb = chips_box.clone();
-            no.connect_clicked(move |_| cb.set_visible(true));
-            buttons.append(&yes);
-            buttons.append(&no);
+            let (cb, op, b) = (chips_box.clone(), opts.clone(), buttons.clone());
+            same.connect_clicked(move |_| {
+                cb.set_visible(true);
+                op.set_visible(true);
+                b.set_visible(false);
+            });
+            opts.set_visible(false);
+            buttons.append(&each);
+            buttons.append(&same);
         }
         TriageKind::Transfer => {
             let yes = gtk::Button::builder().label("Yes, Internal Transfer (Exclude from Spending)").css_classes(["suggested-action", "pill"]).build();
@@ -286,13 +336,16 @@ pub fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn(
             let (w, g2, scope2, next2, ans) = (Rc::downgrade(app), g.clone(), scope.clone(), next.clone(), answered.clone());
             yes.connect_clicked(move |_| {
                 let Some(a) = w.upgrade() else { return };
-                match a.db.mark_transfers(&g2.tx_ids, &g2.stem, scope2().0) {
+                a.undoable(|a| match a.db.mark_transfers(&g2.tx_ids, &g2.stem, scope2().0) {
                     Ok(n) => {
                         ans.set(ans.get() + 1);
-                        a.toast(&format!("Marked as transfers · {n} new pair{} matched across your accounts", if n == 1 { "" } else { "s" }));
+                        Some(format!("Marked as transfers · {n} new pair{} matched across your accounts", if n == 1 { "" } else { "s" }))
                     }
-                    Err(e) => a.toast(&e.to_string()),
-                }
+                    Err(e) => {
+                        a.toast(&e.to_string());
+                        None
+                    }
+                });
                 next2();
             });
             let cb = chips_box.clone();

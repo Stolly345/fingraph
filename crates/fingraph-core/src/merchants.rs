@@ -106,6 +106,8 @@ pub const KEYWORDS: &[(&str, &str)] = &[
     ("SHOES|BOUTIQUE|CLOTHING|APPAREL|FASHION", "Clothing & Shoes"),
     ("BOOKS|BOOKSTORE|TOYS|GIFT SHOP|GIFTS", "Shopping"),
     ("GOVERNMENT|GOVT|REGISTRY", "Government & Fees"),
+    ("STAMP DUTY", "Stamp Duty"),
+    ("TAX|TAXES|TAX NETWORK|IRS|USATAXPYMT|EFTPS|TURBOTAX|TAXACT|H&R BLOCK", "Taxes"),
     ("CHURCH|CHAPEL|TITHE|TITHES|MINISTRIES", "Church & Tithes"),
     ("CHARITY|DONATION|FOUNDATION", "Charity"),
 ];
@@ -229,5 +231,10 @@ mod tests {
         assert_eq!(keyword_category("ISLAND MARKETING LTD"), None);
         assert_eq!(keyword_category("SEVEN MILE INSURANCEBROKERS"), Some("Insurance"));
         assert_eq!(keyword_category("JOE'S AUTO REPAIR"), Some("Vehicle Maintenance"));
+        // a tax service has a home; Scotiabank's stamp duty line stays Stamp Duty; a taxi isn't a tax
+        assert_eq!(keyword_category("TAX NETWORK USA"), Some("Taxes"));
+        assert_eq!(keyword_category("IRS USATAXPYMT"), Some("Taxes"));
+        assert_eq!(keyword_category("STAMP DUTY TAX"), Some("Stamp Duty"));
+        assert_eq!(keyword_category("ISLAND TAXI"), Some("Taxi & Rideshare"));
     }
 }

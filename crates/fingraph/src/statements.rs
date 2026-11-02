@@ -92,11 +92,17 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
 fn doc_row(app: &Rc<App>, d: &DocumentRow) -> adw::ActionRow {
     let period = d.period.map(|(a, b)| format!("{} – {}", a.format("%d %b %Y"), b.format("%d %b %Y"))).unwrap_or_else(|| "period unknown".into());
+    // the account says which statement it is; the file name is a hover away. Confidence only when it's short of sure.
+    let unsure = if d.confidence < 0.995 { format!(" · read with {:.0}% confidence", d.confidence * 100.0) } else { String::new() };
+    let plural = if d.tx_count == 1 { "" } else { "s" };
     let row = adw::ActionRow::builder()
-        .title(glib::markup_escape_text(&d.filename))
-        .subtitle(glib::markup_escape_text(&format!("{} · {period} · {} transactions · confidence {:.0}%", d.account_name, d.tx_count, d.confidence * 100.0)))
+        .title(glib::markup_escape_text(&d.account_name))
+        .subtitle(glib::markup_escape_text(&format!("{period} · {} transaction{plural}{unsure}", d.tx_count)))
+        .tooltip_text(&d.filename)
         .build();
-    row.add_prefix(&pill(if d.bank_short.is_empty() { "Unknown bank" } else { &d.bank_short }, "bank"));
+    if d.bank_short.is_empty() {
+        row.add_prefix(&pill("Unknown bank", "meh"));
+    }
     row.add_suffix(&reconciliation_pill(&d.reconciliation, d.currency));
     if !d.review.is_empty() {
         row.set_subtitle(&glib::markup_escape_text(&format!("{} · waiting for review: {}", row.subtitle().unwrap_or_default(), d.review.iter().map(|r| r.text()).collect::<Vec<_>>().join("; "))));
@@ -109,10 +115,26 @@ fn doc_row(app: &Rc<App>, d: &DocumentRow) -> adw::ActionRow {
             }
         });
     }
-    let report = gtk::Button::builder().label("Scan Pass Report").valign(gtk::Align::Center).css_classes(["flat"]).build();
-    let del = gtk::Button::builder().icon_name("user-trash-symbolic").tooltip_text("Remove this statement and its transactions").valign(gtk::Align::Center).css_classes(["flat"]).build();
-    row.add_suffix(&report);
-    row.add_suffix(&del);
+    // the occasional actions, in the row's menu
+    let item = |label: &str, tip: &str| {
+        let b = gtk::Button::builder().label(label).tooltip_text(tip).css_classes(["flat"]).build();
+        if let Some(l) = b.child().and_downcast::<gtk::Label>() {
+            l.set_xalign(0.0);
+        }
+        b
+    };
+    let report = item("Scan Report…", "Each pass of the scanner over this statement, and what it found");
+    let del = item("Remove Statement…", "Remove this statement and its transactions");
+    del.add_css_class("error");
+    let menu = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+    menu.append(&report);
+    menu.append(&del);
+    let pop = gtk::Popover::builder().child(&menu).build();
+    for b in [&report, &del] {
+        let p = pop.clone();
+        b.connect_clicked(move |_| p.popdown());
+    }
+    row.add_suffix(&gtk::MenuButton::builder().icon_name("view-more-symbolic").tooltip_text(format!("More for {}", d.filename)).popover(&pop).valign(gtk::Align::Center).css_classes(["flat"]).build());
     {
         let (w, id) = (Rc::downgrade(app), d.id);
         report.connect_clicked(move |_| {
@@ -150,10 +172,10 @@ fn approve_dialog(app: &Rc<App>, id: i64, name: &str, why: &[Review], n: i64) {
     let dlg = adw::AlertDialog::new(
         Some("Approve this statement?"),
         Some(&format!(
-            "“{name}” is waiting because:\n{reasons}\n\nOpen its Scan Pass Report to compare it with the PDF. Once approved, its {n} transactions count in your budgets and reports."
+            "“{name}” is waiting because:\n{reasons}\n\nOpen its Scan Report to compare it with the PDF. Once approved, its {n} transactions count in your budgets and reports."
         )),
     );
-    dlg.add_responses(&[("cancel", "Cancel"), ("report", "Scan Pass Report"), ("ok", "Approve")]);
+    dlg.add_responses(&[("cancel", "Cancel"), ("report", "Scan Report"), ("ok", "Approve")]);
     dlg.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
     let w = Rc::downgrade(app);
     dlg.connect_response(None, move |_, r| crate::shielded(|| {
@@ -254,7 +276,7 @@ fn fill_coverage(app: &Rc<App>, grid: &gtk::Grid, breaks: &gtk::Box) {
         for (i, (m, s)) in c.months.iter().enumerate() {
             let (glyph, class, what) = match s {
                 MonthState::Verified => ("●", "amount-in", "statement present and verified to the cent"),
-                MonthState::Discrepancy => ("◐", "warning", "statement present but it doesn't balance (see its Scan Pass Report)"),
+                MonthState::Discrepancy => ("◐", "warning", "statement present but it doesn't balance (see its Scan Report)"),
                 MonthState::Missing => ("○", "error", "no statement — download it from your bank and drop it here"),
                 MonthState::Pending => ("·", "dim-label", "this month: the statement isn't out yet"),
                 MonthState::Before => ("·", "dim-label", "before this account's first statement"),
@@ -807,7 +829,7 @@ pub fn report_dialog(app: &Rc<App>, doc_id: i64) {
     }
 
     let tv = adw::ToolbarView::new();
-    tv.add_top_bar(&adw::HeaderBar::builder().title_widget(&adw::WindowTitle::new("Scan Pass Report", &d.filename)).build());
+    tv.add_top_bar(&adw::HeaderBar::builder().title_widget(&adw::WindowTitle::new("Scan Report", &d.filename)).build());
     tv.set_content(Some(&page));
     let dlg = adw::Dialog::builder().content_width(820).content_height(760).child(&tv).build();
     dlg.present(Some(&app.win));

@@ -765,7 +765,7 @@ fn read_summary(g: &G, app: &Rc<App>, into: &gtk::Box) {
     let bad: Vec<_> = docs.iter().filter(|d| matches!(d.reconciliation, Reconciliation::Discrepancy(_))).collect();
     if !bad.is_empty() {
         into.append(&heading("Didn't add up"));
-        into.append(&dim("A line was probably misread — a page break or a smudge in the layout. Usually one click fixes it: on the Statements page, open the statement's Scan Pass Report, find the skipped line and press Convert. Until then the rest of its transactions are in."));
+        into.append(&dim("A line was probably misread — a page break or a smudge in the layout. Usually one click fixes it: on the Statements page, open the statement's Scan Report, find the skipped line and press Convert. Until then the rest of its transactions are in."));
         let l = list();
         for d in bad {
             let off = if let Reconciliation::Discrepancy(x) = d.reconciliation { fmt_money(x.abs(), d.currency) } else { String::new() };
