@@ -111,10 +111,18 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
     let refresh: crate::Refresh = {
         let w = Rc::downgrade(app);
-        let (list, groups, stack, place) = (list.clone(), groups.clone(), stack.clone(), place.clone());
+        let (list, groups, stack, place, done, answered) = (list.clone(), groups.clone(), stack.clone(), place.clone(), done.clone(), answered.clone());
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
             let gs = a.db.triage(&a.entity_ids()).unwrap_or_default();
+            // finishing the queue is real work: say what it did, then what happens from here
+            if gs.is_empty() && answered.get() > 0 {
+                let n = answered.get();
+                done.set_description(Some(&format!(
+                    "You answered {n} merchant{} this session, and each answer reached back over their past transactions. From now on FinGraph sorts them itself; only shops it hasn't met come back here.",
+                    if n == 1 { "" } else { "s" }
+                )));
+            }
             stack.set_visible_child_name(if gs.is_empty() { "done" } else { "list" });
             list.remove_all();
             for g in &gs {

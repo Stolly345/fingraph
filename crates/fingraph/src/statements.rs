@@ -260,6 +260,21 @@ async fn decide(app: &Rc<App>, name: &str, plan: &ImportPlan) -> Option<(Vec<Tar
 }
 
 /// Account × month dots for the last twelve months, then any break in the chain of balances.
+/// FinGraph's promise kept: the first time an import leaves a month reconciled to the cent on every
+/// account, say so, once per month. Nothing else is celebrated; this is the work it's all for.
+pub fn celebrate_verified(app: &Rc<App>) {
+    use fingraph_core::workflows::{MonthState, verified_months};
+    let cov = app.db.coverage(&app.entity_ids(), 12, crate::today()).unwrap_or_default();
+    let Some(m) = verified_months(&cov).last().copied() else { return };
+    const KEY: &str = "verified_milestone";
+    if app.db.setting(KEY).is_some_and(|last| last >= m.to_string()) {
+        return;
+    }
+    let _ = app.db.set_setting(KEY, &m.to_string());
+    let n = cov.iter().filter(|c| c.months.iter().any(|(x, s)| *x == m && *s == MonthState::Verified)).count();
+    app.toast(&format!("{} adds up to the cent: all {n} account{} reconciled", m.format("%B %Y"), if n == 1 { "" } else { "s" }));
+}
+
 fn fill_coverage(app: &Rc<App>, grid: &gtk::Grid, breaks: &gtk::Box) {
     use fingraph_core::workflows::MonthState;
     while let Some(c) = grid.first_child() {
@@ -267,9 +282,18 @@ fn fill_coverage(app: &Rc<App>, grid: &gtk::Grid, breaks: &gtk::Box) {
     }
     crate::clear(breaks);
     let cov = app.db.coverage(&app.entity_ids(), 12, crate::today()).unwrap_or_default();
+    // a month every account proves to the cent wears the verified colour on its heading
+    let proven = fingraph_core::workflows::verified_months(&cov);
     if let Some(first) = cov.first() {
         for (i, (m, _)) in first.months.iter().enumerate() {
-            grid.attach(&gtk::Label::builder().label(m.format("%b").to_string()).css_classes(["caption", "dim-label"]).width_chars(4).build(), i as i32 + 1, 0, 1, 1);
+            let l = gtk::Label::builder().label(m.format("%b").to_string()).width_chars(4).build();
+            if proven.contains(m) {
+                l.set_css_classes(&["caption-heading", "verified"]);
+                l.set_tooltip_text(Some(&format!("{}: every account reconciled to the cent", m.format("%B %Y"))));
+            } else {
+                l.set_css_classes(&["caption", "dim-label"]);
+            }
+            grid.attach(&l, i as i32 + 1, 0, 1, 1);
         }
     }
     for (r, c) in cov.iter().enumerate() {
@@ -434,6 +458,7 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
             );
         }
         if files > 0 {
+            celebrate_verified(&a);
             let msg = format!("Imported {inserted} transactions from {files} statement{} · {reconciled} reconciled", if files == 1 { "" } else { "s" });
             let waiting = a.db.uncategorized_count(&a.entity_ids()).unwrap_or(0) > 0;
             if waiting && a.db.prefs().triage_after_import {
@@ -622,6 +647,7 @@ fn watched_file(a: &Rc<App>, p: &std::path::Path, k: &str, r: Result<(ScanResult
                 a.toast_action(&format!("{name} from your watched folder is waiting for review"), "Review", Rc::new(|a: &Rc<App>| a.show_view("statements")));
             } else {
                 a.toast_action(&format!("Imported {name} from your watched folder · {} transactions", rep.inserted), "Categorize", Rc::new(crate::wizard::triage));
+                celebrate_verified(a);
             }
         }
         Err(e) => offer(format!("{name} in your watched folder couldn't be imported: {e}")),

@@ -483,3 +483,19 @@ fn merchant_hints_share_only_shops() {
         assert!(!csv.contains(&format!("{:.2}", t.amount.abs())), "no amounts: {}", t.amount);
     }
 }
+
+/// The months worth marking: every account reconciled (or not started yet), none missing or off.
+#[test]
+fn verified_months_need_every_account() {
+    use fingraph_core::workflows::{verified_months, Coverage, MonthState::*};
+    let m = |n| d(n, 1);
+    let acct = |id, states: Vec<fingraph_core::workflows::MonthState>| Coverage { account_id: id, account: format!("a{id}"), months: (8..=10).map(m).zip(states).collect(), breaks: vec![] };
+    let cov = vec![acct(1, vec![Verified, Verified, Verified]), acct(2, vec![Before, Discrepancy, Verified]), acct(3, vec![Before, Verified, Missing])];
+    assert_eq!(verified_months(&cov), vec![m(8)], "Sep has a discrepancy, Oct a missing statement");
+    let all_before = vec![acct(1, vec![Before, Before, Verified])];
+    assert_eq!(verified_months(&all_before), vec![m(10)], "a month nobody had started isn't a milestone");
+    let db = Db::open_in_memory().unwrap();
+    db.load_demo().unwrap();
+    let cov = db.coverage(&[], 12, d(11, 2)).unwrap();
+    assert!(verified_months(&cov).contains(&m(10)), "the demo's October is verified everywhere");
+}
