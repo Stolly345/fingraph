@@ -13,7 +13,7 @@ use crate::rules::{known_merchant, looks_like_transfer, merchant_stem, varied_pa
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hint {
-    /// The merchant as the statement names it, reference numbers and places stripped (`KIRK MOTORS`).
+    /// The merchant as the statement names it, reference numbers and places stripped (`BODDEN MOTORS`).
     pub merchant: String,
     pub category: String,
     /// The category's parent, when it's a sub-category (`Vehicle Maintenance` → `Transport`).

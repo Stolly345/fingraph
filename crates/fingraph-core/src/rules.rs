@@ -131,7 +131,7 @@ pub fn same_merchant(a: &str, b: &str) -> bool {
     }
     let (wa, wb): (Vec<&str>, Vec<&str>) = (a.split(' ').collect(), b.split(' ').collect());
     let n = wa.len().min(wb.len());
-    // one word never swallows a longer name: KIRK isn't KIRK OFFICE EQUIPMEN (the directory still joins known ones)
+    // one word never swallows a longer name: BODDEN isn't BODDEN OFFICE SUPPLY (the directory still joins known ones)
     let lone = n == 1 && wa.len() != wb.len();
     n > 0 && !lone && wa[0].len() >= 3 && (0..n).all(|i| word_match(wa[i], wb[i], i == 0))
 }
@@ -211,7 +211,7 @@ pub fn merchant_stem(raw: &str, memo: &str) -> String {
     for _ in 0..2 {
         s = PREFIX.replace(&s, "").to_string();
     }
-    // KIRK MOTORS1USD: the card's currency glued to the name, which the reference filter would take with it
+    // BODDEN MOTORS1USD: the card's currency glued to the name, which the reference filter would take with it
     s = GLUED_CCY.replace_all(&s, "$1").to_string();
     for re in NOISE.iter() {
         s = re.replace_all(&s, " ").to_string();
@@ -466,11 +466,11 @@ mod tests {
         assert!(same_merchant("HBO MAX HBOMAX.COM", "HBOMAX HELP"));
         assert!(!same_merchant("KIRK MARKET", "KIRK HOME CENTRE"));
         assert!(!same_merchant("FLOW", "FLOWERS BY JANE"));
-        // "KIRK" is half of Cayman's shops: one word never swallows a longer name
-        assert!(!same_merchant("KIRK", "KIRK OFFICE EQUIPMEN"));
-        // Scotiabank glues the card currency onto the name: KIRK MOTORS1USD (Napa) isn't Kirk Office Equipment
-        assert_eq!(merchant_stem("KIRK MOTORS1USD, GEORGE TOWN", "Ref 1738069811"), "KIRK MOTORS");
-        assert!(!same_merchant(&merchant_stem("KIRK MOTORS1USD, GEORGE TOWN", "Ref 1738069811"), &merchant_stem("KIRK OFFICE EQUIPMEN, GRAND CAYMAN", "Ref 1654528427")));
+        // a family name is half of Cayman's shops: one word never swallows a longer name
+        assert!(!same_merchant("BODDEN", "BODDEN OFFICE SUPPLY"));
+        // a card statement can glue its currency onto the name: BODDEN MOTORS1USD isn't Bodden Office Supply
+        assert_eq!(merchant_stem("BODDEN MOTORS1USD, GEORGE TOWN", "Ref 1000000001"), "BODDEN MOTORS");
+        assert!(!same_merchant(&merchant_stem("BODDEN MOTORS1USD, GEORGE TOWN", "Ref 1000000001"), &merchant_stem("BODDEN OFFICE SUPPLY, GRAND CAYMAN", "Ref 1000000002")));
         // a rule learned from one spelling covers the others
         let r = Rule { pattern: c.clone(), category_id: Some(17), ..Default::default() };
         assert!(r.matches("POS PURCHASE", "PAYPAL *DISCOVERYDI HELP.4029357733 US"));
@@ -537,16 +537,16 @@ mod tests {
         let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
         let t = |id, date, raw: &str, memo: &str, amt: &str| TriageInput { id, entity_id: 1, posted: date, raw: raw.into(), memo: memo.into(), amount: amt.parse().unwrap(), currency: Currency::KYD, account: "Chq".into() };
         let g = triage_groups(&[
-            t(1, d(10, 14), "THIRD PARTY TRF BNS", "Transfer to DOUGHTARTY MOLL 0477", "-850.77"),
-            t(2, d(7, 29), "THIRD PARTY TRF BNS", "Transfer to GRAND HARBOUR MEDICAL LTD. 8", "-8.03"),
-            t(3, d(7, 29), "THIRD PARTY TRF BNS", "Transfer to GRAND HARBOUR MEDICAL LTD. 8", "-13.87"),
-            t(4, d(7, 3), "THIRD PARTY TRF BNS", "Transfer to PAUL STOLL 7563", "-20.00"),
-            t(5, d(5, 15), "THIRD PARTY TRF BNS #Error", "Transfer to DOUGHTARTY MOLL 0477", "-850.00"),
-            t(6, d(3, 2), "THIRD PARTY TRF BNS", "Transfer to DOUGHTARTY MOLL 0477", "-850.00"),
+            t(1, d(10, 14), "THIRD PARTY TRF BNS", "Transfer to ANNA RIVERS 0193", "-640.12"),
+            t(2, d(7, 29), "THIRD PARTY TRF BNS", "Transfer to SEAVIEW DENTAL LTD. 4", "-6.40"),
+            t(3, d(7, 29), "THIRD PARTY TRF BNS", "Transfer to SEAVIEW DENTAL LTD. 4", "-11.25"),
+            t(4, d(7, 3), "THIRD PARTY TRF BNS", "Transfer to JOHN BAKER 2290", "-25.00"),
+            t(5, d(5, 15), "THIRD PARTY TRF BNS #Error", "Transfer to ANNA RIVERS 0193", "-640.00"),
+            t(6, d(3, 2), "THIRD PARTY TRF BNS", "Transfer to ANNA RIVERS 0193", "-640.00"),
         ]);
         let mut stems: Vec<(String, usize)> = g.iter().map(|g| (g.stem.clone(), g.count)).collect();
         stems.sort();
-        assert_eq!(stems, vec![("DOUGHTARTY MOLL".to_string(), 3), ("GRAND HARBOUR MEDICAL".to_string(), 2), ("PAUL STOLL".to_string(), 1)]);
+        assert_eq!(stems, vec![("ANNA RIVERS".to_string(), 3), ("JOHN BAKER".to_string(), 1), ("SEAVIEW DENTAL".to_string(), 2)]);
     }
 
     #[test]
