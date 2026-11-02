@@ -243,7 +243,7 @@ fn editor(app: &Rc<App>, p: BankProfile) {
     let l = &p.layout;
     let gl = adw::PreferencesGroup::builder()
         .title("Declared layout")
-        .description("How this bank lays out its statements, written down instead of guessed. A statement that doesn't match says which rule failed in its Scan Pass Report.")
+        .description("How this bank lays out its statements, written down instead of guessed. A statement that doesn't match says which rule failed in its Scan Report.")
         .build();
     let shapes = ["Not checked yet (accept either)", "Amount on a transaction's first line", "Amount on a transaction's last line"];
     let shape_of = [RowShape::Auto, RowShape::AmountFirst, RowShape::AmountLast];

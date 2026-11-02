@@ -216,6 +216,8 @@ impl Chart {
     }
 
     pub fn set(&self, d: Data) {
+        // what a screen reader says on reaching the chart, before any arrow key: the same numbers as the tooltips
+        self.widget.update_property(&[gtk::accessible::Property::Description(&summary(&d))]);
         *self.data.borrow_mut() = d;
         self.hover.set(None);
         self.widget.set_cursor_from_name(if self.click.borrow().is_some() { Some("pointer") } else { None });
@@ -228,6 +230,24 @@ impl Chart {
         self.widget.set_focusable(true);
         self.widget.set_focus_on_click(false);
     }
+}
+
+/// The chart in words, from its tooltips (one line each, the first dozen). Arrow keys read the rest.
+fn summary(d: &Data) -> String {
+    let tips: Vec<String> = match d {
+        Data::Empty(msg) => return msg.clone(),
+        Data::Bars { tips, .. } | Data::Donut { tips, .. } | Data::HBars { tips, .. } | Data::Pareto { tips, .. } | Data::Flow { tips, .. } => tips.clone(),
+        Data::Lines { stops, .. } => stops.iter().map(|s| s.1.clone()).collect(),
+    };
+    let lines: Vec<String> = tips.iter().take(12).map(|t| t.lines().filter(|l| !l.starts_with("Click")).collect::<Vec<_>>().join(", ")).collect();
+    let more = if tips.len() > 12 { format!(". {} more: use the arrow keys", tips.len() - 12) } else { String::new() };
+    format!("{}{more}", lines.join(". "))
+}
+
+/// A category's colour: its place in the palette, except Uncategorized, which is missing data rather
+/// than a kind of spending, so it's a faint wash of the text colour and never the loudest slice.
+fn swatch(name: &str, i: usize, fg: Rgb) -> (Rgb, f64) {
+    if name == "Uncategorized" { (fg, 0.3) } else { (PALETTE[i % PALETTE.len()], 1.0) }
 }
 
 fn rgb(cr: &cairo::Context, c: Rgb, a: f64) {
@@ -281,16 +301,18 @@ fn y_axis(cr: &cairo::Context, fg: Rgb, lo: f64, hi: f64, (top, bottom, left, ri
 }
 
 fn legend(cr: &cairo::Context, fg: Rgb, items: &[(&str, Rgb)], right: f64, y: f64) {
+    let width = |s: &str| cr.text_extents(s).map_or(40.0, |e| e.x_advance());
+    // every line keeps its key: out of room, each name is shortened to an even share instead of dropped
+    let room = right - 60.0;
+    let need: f64 = items.iter().map(|(n, _)| width(n) + 28.0).sum();
+    let cap = if need > room && !items.is_empty() { (room / items.len() as f64 - 28.0).max(24.0) } else { f64::MAX };
     let mut x = right;
     for (name, c) in items.iter().rev() {
-        let w = cr.text_extents(name).map_or(40.0, |e| e.x_advance());
-        // out of room: the rest are in the tooltips
-        if x - w - 28.0 < 60.0 {
-            break;
-        }
+        let name = if width(name) > cap { ellipsize(cr, name, cap) } else { name.to_string() };
+        let w = width(&name);
         x -= w;
         rgb(cr, fg, 0.75);
-        text(cr, name, x, y + 4.0, 0.0);
+        text(cr, &name, x, y + 4.0, 0.0);
         x -= 14.0;
         rgb(cr, *c, 1.0);
         cr.rectangle(x, y - 4.0, 9.0, 9.0);
@@ -364,10 +386,11 @@ fn draw(cr: &cairo::Context, w: f64, h: f64, fg: Rgb, data: &Data, hover: Option
             let r1 = h / 2.0 - 10.0;
             let r0 = r1 * 0.58;
             let mut a = -PI / 2.0;
-            for (i, (_, v)) in items.iter().enumerate() {
+            for (i, (name, v)) in items.iter().enumerate() {
                 let da = if total > 0.0 { v / total * 2.0 * PI } else { 0.0 };
                 let grow = if hover == Some(i) { 6.0 } else { 0.0 };
-                rgb(cr, PALETTE[i % PALETTE.len()], if hover.is_none() || hover == Some(i) { 1.0 } else { 0.6 });
+                let (c, k) = swatch(name, i, fg);
+                rgb(cr, c, k * if hover.is_none() || hover == Some(i) { 1.0 } else { 0.6 });
                 cr.new_path();
                 cr.arc(cx, cy, r1 + grow, a, a + da);
                 cr.arc_negative(cx, cy, r0, a + da, a);
@@ -384,7 +407,8 @@ fn draw(cr: &cairo::Context, w: f64, h: f64, fg: Rgb, data: &Data, hover: Option
             let lx = cx + r1 + 24.0;
             for (i, (name, v)) in items.iter().enumerate().take(((h - 10.0) / 18.0) as usize) {
                 let ly = 16.0 + i as f64 * 18.0;
-                rgb(cr, PALETTE[i % PALETTE.len()], 1.0);
+                let (c, k) = swatch(name, i, fg);
+                rgb(cr, c, k);
                 cr.rectangle(lx, ly - 8.0, 10.0, 10.0);
                 let _ = cr.fill();
                 rgb(cr, fg, if hover == Some(i) { 1.0 } else { 0.75 });
@@ -412,7 +436,8 @@ fn draw(cr: &cairo::Context, w: f64, h: f64, fg: Rgb, data: &Data, hover: Option
                 let bx = label_w;
                 let bwmax = w - label_w - 90.0;
                 let bw = if max > 0.0 { v / max * bwmax } else { 0.0 };
-                rgb(cr, PALETTE[i % PALETTE.len()], 0.85);
+                let (c, k) = swatch(name, i, fg);
+                rgb(cr, c, k * 0.85);
                 cr.rectangle(bx, y0 + 5.0, bw.max(1.0), rh - 10.0);
                 let _ = cr.fill();
                 rgb(cr, fg, 0.7);

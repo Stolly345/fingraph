@@ -12,10 +12,12 @@ mod export;
 mod guide;
 mod outlook;
 mod owed;
+mod picker;
 mod preferences;
 mod profiles;
 mod review;
 mod rules;
+mod share;
 mod split;
 mod statement;
 mod statements;
@@ -161,6 +163,7 @@ impl App {
         s2.append(Some("Getting Started"), Some("win.welcome"));
         menu.append_section(None, &s2);
         let s3 = gio::Menu::new();
+        s3.append(Some("Share Merchant Hints…"), Some("win.share-hints"));
         s3.append(Some("About FinGraph"), Some("win.about"));
         menu.append_section(None, &s3);
         let menu_btn = gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).primary(true).tooltip_text("Main Menu").build();
@@ -400,6 +403,8 @@ impl App {
             add(&format!("show-{page}"), Rc::new(move |a: &Rc<App>| a.show_view(page)));
         }
         add("retriage", Rc::new(wizard::reset_and_retriage));
+        add("share-hints", Rc::new(share::open));
+        add("setup-budget", Rc::new(|a: &Rc<App>| budget::wizard(a, { let w = Rc::downgrade(a); Rc::new(move || w.upgrade().iter().for_each(App::refresh)) })));
         add("fx", Rc::new(|a| a.fx_dialog()));
         add("welcome", Rc::new(guide::open));
         add(
@@ -755,24 +760,8 @@ impl App {
 
     fn side_row(&self, name: &str, title: &str, icon: &str) -> gtk::ListBoxRow {
         let row = gtk::Box::builder().spacing(12).margin_top(6).margin_bottom(6).margin_start(6).margin_end(6).build();
-        // a white symbol on a rounded tile in the page's colour (Setup pages share a quiet slate)
-        let tile = match name {
-            "overview" => "tile-blue",
-            "changes" => "tile-purple",
-            "transactions" => "tile-teal",
-            "statement" => "tile-indigo",
-            "budget" => "tile-green",
-            "outlook" => "tile-cyan",
-            "networth" => "tile-purple",
-            "subscriptions" => "tile-pink",
-            "statements" => "tile-yellow",
-            "export" => "tile-cyan",
-            _ => "tile-slate",
-        };
-        let img = gtk::Image::builder().icon_name(icon).pixel_size(14).build();
-        let tile = gtk::Box::builder().css_classes(["side-tile", tile]).valign(gtk::Align::Center).halign(gtk::Align::Start).hexpand(false).build();
-        tile.append(&img);
-        row.append(&tile);
+        // a plain symbolic icon, as GNOME's own sidebars do: the page names carry the meaning, not colour
+        row.append(&gtk::Image::builder().icon_name(icon).valign(gtk::Align::Center).build());
         row.append(&gtk::Label::builder().label(title).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build());
         let badge = gtk::Label::builder().css_classes(["dim-label", "caption", "tnum"]).build();
         row.append(&badge);
@@ -985,6 +974,28 @@ impl App {
         self.toasts.add_toast(t);
     }
 
+    /// An edit Undo can take back: a checkpoint, then `edit` (the toast text, or None when nothing
+    /// changed), then a toast whose Undo restores the checkpoint. One step: the next edit replaces it.
+    pub fn undoable(self: &Rc<Self>, edit: impl FnOnce(&Rc<Self>) -> Option<String>) {
+        let ready = self.db.checkpoint().is_ok();
+        let Some(msg) = edit(self) else { return };
+        if !ready {
+            return self.toast(&msg);
+        }
+        self.toast_action(
+            &msg,
+            "Undo",
+            Rc::new(|a: &Rc<App>| match a.db.undo_to_checkpoint() {
+                Ok(true) => {
+                    a.toast("Undone");
+                    a.refresh();
+                }
+                Ok(false) => {}
+                Err(e) => a.toast(&format!("Couldn't undo that: {e}")),
+            }),
+        );
+    }
+
     fn fx_dialog(self: &Rc<Self>) {
         let fx = self.db.fx().unwrap_or_default();
         let row = adw::EntryRow::builder().title("US dollars per 1 Cayman dollar").text(fx.kyd_to_usd.to_string()).build();
@@ -1073,6 +1084,31 @@ pub fn info_heading(text: &str, help: &str) -> gtk::Box {
     with_info(&heading(text), help)
 }
 
+/// The top of a summary page (Net Worth, Outlook, Budget), as Overview does it: one card, the page's
+/// answer large on the left (two fifths), the other numbers quiet beside it. Returns the card and,
+/// for each number, its (value, line below) labels: the lead first.
+pub fn summary_row(lead: (&str, &str), rest: &[(&str, &str)]) -> (gtk::Grid, Vec<(gtk::Label, gtk::Label)>) {
+    let grid = gtk::Grid::builder().column_spacing(24).column_homogeneous(true).css_classes(["card", "summary"]).build();
+    let cell = |title: &str, help: &str, class: &str| {
+        let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).css_classes([class]).build();
+        b.append(&info_caption(title, help));
+        let v = gtk::Label::builder().xalign(0.0).css_classes(["value", "tnum"]).ellipsize(gtk::pango::EllipsizeMode::End).build();
+        let s = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label", "caption"]).build();
+        b.append(&v);
+        b.append(&s);
+        (b, (v, s))
+    };
+    let (b, first) = cell(lead.0, lead.1, "lead");
+    grid.attach(&b, 0, 0, 2, 1);
+    let mut out = vec![first];
+    for (i, (t, h)) in rest.iter().enumerate() {
+        let (b, n) = cell(t, h, "stat");
+        grid.attach(&b, 2 + i as i32, 0, 1, 1);
+        out.push(n);
+    }
+    (grid, out)
+}
+
 /// A small card title (the KPI tiles) with its ⓘ.
 pub fn info_caption(text: &str, help: &str) -> gtk::Box {
     with_info(&gtk::Label::builder().label(text).xalign(0.0).css_classes(["dim-label", "caption-heading"]).build(), help)
@@ -1102,6 +1138,19 @@ fn css() {
          .pill-badge.bank { background: alpha(@accent_bg_color, 0.18); color: @accent_color; }
          .kpi { padding: 14px 16px; }
          .kpi .value { font-size: 1.6em; font-weight: 800; }
+         .kpi.headline { padding: 18px 20px; }
+         .kpi.headline .value { font-size: 2.6em; }
+         .stat-strip { padding: 14px 20px; }
+         .summary { padding: 18px 20px; }
+         .summary .lead .value { font-size: 2.4em; font-weight: 800; }
+         .stat .value { font-size: 1.2em; font-weight: 700; }
+         .verified { color: @success_color; }
+         .verified image { -gtk-icon-size: 12px; }
+         .small-toggle { min-height: 0; padding: 2px 10px; font-size: 0.85em; }
+         button.row-badge { min-height: 0; padding: 1px 8px; border-radius: 99px; font-size: 0.8em; font-weight: 600; background: alpha(@window_fg_color, 0.08); }
+         label.row-badge { padding: 1px 8px; border-radius: 99px; font-size: 0.8em; font-weight: 600; }
+         .row-badge.needs { background: alpha(@warning_bg_color, 0.18); color: @warning_color; }
+         button.row-badge.business { background: alpha(@accent_bg_color, 0.18); color: @accent_color; }
          .chart-card { padding: 12px; }
          .info-button { min-width: 22px; min-height: 22px; padding: 0; opacity: 0.6; }
          .info-button:hover, .info-button:checked { opacity: 1; }
@@ -1110,23 +1159,6 @@ fn css() {
          levelbar.over block.filled { background-color: @error_color; }
          levelbar block.near { background-color: @warning_color; }
          .kind-pill { border-radius: 99px; padding: 2px 10px; min-height: 0; font-size: 0.8em; font-weight: 600; }
-         .kind-fixed { background: alpha(#3584e4, 0.18); color: #62a0ea; }
-         .kind-variable { background: alpha(#ff7800, 0.16); color: #ffa348; }
-         .amount-fixed { color: #62a0ea; }
-         .amount-variable { color: #ffa348; }
-         .side-tile { min-width: 24px; min-height: 24px; border-radius: 7px; color: white; }
-         .side-tile image { margin: 5px; }
-         .side-tile image { -gtk-icon-shadow: 0 1px rgba(0,0,0,0.15); }
-         .tile-blue { background: linear-gradient(to bottom, #4a9cf0, #2a72d8); }
-         .tile-orange { background: linear-gradient(to bottom, #ffa348, #f07818); }
-         .tile-purple { background: linear-gradient(to bottom, #b07fd6, #8a4fc0); }
-         .tile-teal { background: linear-gradient(to bottom, #3ec6b8, #1f9a8e); }
-         .tile-indigo { background: linear-gradient(to bottom, #7c86e8, #5560d0); }
-         .tile-green { background: linear-gradient(to bottom, #5ccf7a, #2fa856); }
-         .tile-pink { background: linear-gradient(to bottom, #f27ab0, #d94b8c); }
-         .tile-yellow { background: linear-gradient(to bottom, #f6c445, #e0a21a); }
-         .tile-cyan { background: linear-gradient(to bottom, #45b4e6, #2190c4); }
-         .tile-slate { background: linear-gradient(to bottom, #8e98a6, #6b7584); }
          .tnum { font-feature-settings: 'tnum'; }
          .chip { border-radius: 99px; padding: 4px 12px; }
          .guide-num { min-width: 24px; min-height: 24px; border-radius: 99px; font-weight: 700; font-size: 0.9em; background: alpha(@window_fg_color, 0.10); }
@@ -1137,6 +1169,23 @@ fn css() {
     );
     if let Some(d) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(&d, &p, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        // fixed and variable keep the hues of the Fixed vs Variable bar (blue, orange) in a shade that
+        // reads as text on either background, swapped when the theme changes
+        let kinds = gtk::CssProvider::new();
+        let load = |p: &gtk::CssProvider, dark: bool| {
+            let (blue, orange) = if dark { ("#62a0ea", "#ffa348") } else { ("#1c71d8", "#c64600") };
+            p.load_from_string(&format!(
+                ".kind-fixed {{ background: alpha({blue}, 0.16); color: {blue}; }}
+                 .kind-variable {{ background: alpha({orange}, 0.16); color: {orange}; }}
+                 .amount-fixed {{ color: {blue}; }}
+                 .amount-variable {{ color: {orange}; }}"
+            ));
+        };
+        let sm = adw::StyleManager::default();
+        load(&kinds, sm.is_dark());
+        let k2 = kinds.clone();
+        sm.connect_dark_notify(move |sm| load(&k2, sm.is_dark()));
+        gtk::style_context_add_provider_for_display(&d, &kinds, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 }
 
@@ -1173,6 +1222,7 @@ fn debug_shot(app: &Rc<App>) {
         Ok("budget") => budget::wizard(app, Rc::new(|| {})),
         Ok("close") => close::open(app, None, Rc::new(|| {})),
         Ok(d) if d.starts_with("tx:") => txedit::dialog(app, d[3..].parse().unwrap_or(0), None),
+        Ok("share") => share::open(app),
         Ok("preferences") => {
             preferences::show(app);
             if let (Some(d), Ok(page)) = (app.win.visible_dialog().and_downcast::<adw::PreferencesDialog>(), std::env::var("FINGRAPH_PAGE")) {
@@ -1187,6 +1237,7 @@ fn debug_shot(app: &Rc<App>) {
     let steps: u32 = std::env::var("FINGRAPH_SHOT_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let n = Rc::new(Cell::new(0u32));
     let scrolled = Cell::new(false);
+    let typed = Cell::new(false);
     let clicked = Cell::new(0usize);
     glib::timeout_add_local(std::time::Duration::from_secs(wait), move || {
         if n.get() < steps {
@@ -1216,7 +1267,7 @@ fn debug_shot(app: &Rc<App>) {
         if let Some(label) = std::env::var("FINGRAPH_CLICK").ok().and_then(|l| l.split(',').nth(clicked.get()).map(str::to_string)) {
             clicked.set(clicked.get() + 1);
             fn find_button(w: &gtk::Widget, label: &str) -> Option<gtk::Button> {
-                if let Some(b) = w.downcast_ref::<gtk::Button>().filter(|b| b.is_mapped() && (b.label().as_deref() == Some(label) || b.child().and_downcast::<gtk::Label>().is_some_and(|l| l.label() == label))) {
+                if let Some(b) = w.downcast_ref::<gtk::Button>().filter(|b| b.is_mapped() && (b.label().as_deref() == Some(label) || b.child().and_downcast::<gtk::Label>().is_some_and(|l| l.label() == label) || b.child().and_downcast::<adw::ButtonContent>().is_some_and(|c| c.label() == label) || b.tooltip_text().as_deref() == Some(label))) {
                     return Some(b.clone());
                 }
                 let mut c = w.first_child();
@@ -1230,6 +1281,26 @@ fn debug_shot(app: &Rc<App>) {
             }
             if let Some(b) = find_button(&a.win.clone().upcast(), &label) {
                 b.emit_clicked();
+            }
+            return glib::ControlFlow::Continue;
+        }
+        // FINGRAPH_TYPE=text: type into the open popover's search box (the category picker)
+        if let Some(text) = std::env::var("FINGRAPH_TYPE").ok().filter(|_| !typed.replace(true)) {
+            fn find_search(w: &gtk::Widget) -> Option<gtk::SearchEntry> {
+                if let Some(e) = w.downcast_ref::<gtk::SearchEntry>().filter(|e| e.is_mapped() && e.ancestor(gtk::Popover::static_type()).is_some()) {
+                    return Some(e.clone());
+                }
+                let mut c = w.first_child();
+                while let Some(ch) = c {
+                    if let Some(x) = find_search(&ch) {
+                        return Some(x);
+                    }
+                    c = ch.next_sibling();
+                }
+                None
+            }
+            if let Some(e) = find_search(&a.win.clone().upcast()) {
+                e.set_text(&text);
             }
             return glib::ControlFlow::Continue;
         }
@@ -1258,6 +1329,28 @@ fn debug_shot(app: &Rc<App>) {
         let paint = gtk::WidgetPaintable::new(Some(&a.win));
         let snap = gtk::Snapshot::new();
         paint.snapshot(&snap, a.win.width() as f64, a.win.height() as f64);
+        // an open popover is its own surface: draw it over the window where it sits
+        fn open_popover(w: &gtk::Widget) -> Option<gtk::Popover> {
+            if let Some(p) = w.downcast_ref::<gtk::Popover>().filter(|p| p.is_visible()) {
+                return Some(p.clone());
+            }
+            let mut c = w.first_child();
+            while let Some(ch) = c {
+                if let Some(x) = open_popover(&ch) {
+                    return Some(x);
+                }
+                c = ch.next_sibling();
+            }
+            None
+        }
+        if let Some(p) = open_popover(&a.win.clone().upcast())
+            && let Some(at) = p.compute_point(&a.win, &gtk::graphene::Point::new(0.0, 0.0))
+        {
+            snap.save();
+            snap.translate(&at);
+            gtk::WidgetPaintable::new(Some(&p)).snapshot(&snap, p.width() as f64, p.height() as f64);
+            snap.restore();
+        }
         if let (Some(node), Some(r)) = (snap.to_node(), a.win.renderer()) {
             let _ = r.render_texture(node, None).save_to_png(&out);
         }

@@ -316,7 +316,7 @@ fn fill(app: &Rc<App>, i: usize, m: NaiveDate, b: &gtk::Box, redo: crate::Refres
                 if let Some(a) = w.upgrade() {
                     if a.saved(a.db.close_month(&sc, m, &sum2)) {
                         crate::outlook::remember_forecast(&a);
-                        a.toast(&format!("{} closed", m.format("%B %Y")));
+                        a.toast(&close_note(m, &sum2, ccy));
                     }
                     r2();
                 }
@@ -334,5 +334,35 @@ fn fill(app: &Rc<App>, i: usize, m: NaiveDate, b: &gtk::Box, redo: crate::Refres
                 b.append(&reopen);
             }
         }
+    }
+}
+
+/// What closing a month says: the month's result in one line, from its own summary. A month that
+/// cost more than came in is said plainly, without cheer and without alarm.
+fn close_note(m: NaiveDate, s: &fingraph_core::budget::CloseSummary, ccy: fingraph_core::Currency) -> String {
+    let money = |d: fingraph_core::Decimal| fmt_money(d, s.currency.unwrap_or(ccy));
+    let month = m.format("%B");
+    if s.income.is_zero() {
+        format!("{month} is closed")
+    } else if s.saved.is_sign_negative() {
+        format!("{month} is closed. It took {} more than came in; the summary shows where it went", money(-s.saved))
+    } else {
+        format!("{month} is closed. You kept {} of the {} that came in", money(s.saved), money(s.income))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fingraph_core::budget::CloseSummary;
+    use fingraph_core::{Currency, Decimal};
+
+    #[test]
+    fn close_says_the_result() {
+        let m = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        let sum = |income: i64, spent: i64| CloseSummary { currency: Some(Currency::KYD), income: Decimal::from(income), spent: Decimal::from(spent), saved: Decimal::from(income - spent), age_of_money: None, over: 0, missed: 0, variance: None, net_worth: None };
+        assert_eq!(close_note(m, &sum(10718, 3004), Currency::KYD), format!("October is closed. You kept {} of the {} that came in", fmt_money(Decimal::from(7714), Currency::KYD), fmt_money(Decimal::from(10718), Currency::KYD)));
+        assert!(close_note(m, &sum(2000, 2500), Currency::KYD).contains("took"), "a loss is said plainly");
+        assert_eq!(close_note(m, &sum(0, 0), Currency::KYD), "October is closed");
     }
 }

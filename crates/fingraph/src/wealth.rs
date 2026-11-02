@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 use crate::budget::{amount_text, parse_date};
 use crate::charts::{self, Chart, Data, LineSeries};
-use crate::{App, clear, dim, info_caption, info_heading, today};
+use crate::{App, clear, dim, info_heading, today};
 
 const MONTHS: i32 = 24;
 
@@ -109,32 +109,20 @@ fn goal_row(app: &App, s: &Snap, g: &Goal) -> adw::ActionRow {
 
 pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(18).margin_bottom(24).margin_start(18).margin_end(18).build();
-    let ribbon = gtk::Box::builder().spacing(12).homogeneous(true).build();
-    let kpi = |t: &str, help: &str| {
-        let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).css_classes(["card", "kpi"]).build();
-        b.append(&info_caption(t, help));
-        let v = gtk::Label::builder().xalign(0.0).css_classes(["value", "tnum"]).build();
-        let s = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label", "caption"]).build();
-        b.append(&v);
-        b.append(&s);
-        ribbon.append(&b);
-        (v, s)
-    };
-    let (net_v, net_s) = kpi(
-        "Net Worth",
-        "Everything you own minus everything you owe. Bank balances come from your latest statements, and the things you've added by hand (a house, car, pension) are included too. Cards, loans and other debts are taken off.",
+    // the answer first: what you're worth, then how it moved and what it's made of
+    let (summary, nums) = crate::summary_row(
+        ("Net Worth", "Everything you own minus everything you owe. Bank balances come from your latest statements, and the things you've added by hand (a house, car, pension) are included too. Cards, loans and other debts are taken off."),
+        &[("Over 12 Months", "How much your net worth changed over the past year. Green means it grew, red means it shrank."), ("Assets", "What you own: the balances of your bank accounts plus the assets you've added by hand."), ("Debts", "What you owe: credit card and loan balances from your statements, plus the debts you've added by hand.")],
     );
-    let (as_v, as_s) = kpi("Assets", "What you own: the balances of your bank accounts plus the assets you've added by hand.");
-    let (de_v, de_s) = kpi("Debts", "What you owe: credit card and loan balances from your statements, plus the debts you've added by hand.");
-    let (ch_v, ch_s) = kpi("Over 12 Months", "How much your net worth changed over the past year. Green means it grew, red means it shrank.");
-    body.append(&ribbon);
+    let [(net_v, net_s), (ch_v, ch_s), (as_v, as_s), (de_v, de_s)] = <[(gtk::Label, gtk::Label); 4]>::try_from(nums).unwrap();
+    body.append(&summary);
     let chart = Chart::new(240);
     let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
     card.append(&info_heading(
         "Net Worth Over Time",
-        "The blue line is your net worth at each month end. The dashed green line is what you own and the dashed red line is what you owe; blue is the gap between them. A rising blue line means you're getting ahead. Hover a month for the numbers.",
+        "The blue line is your net worth at each month end. The dashed green line is what you own and the dashed red line is what you owe; blue is the gap between them. A rising blue line means you're getting ahead. Hover a month for the numbers. Each month end is every account's last verified balance on or before it, plus the latest value of what you've added by hand. An account counts from its first statement; a month whose statement isn't in yet repeats the last balance.",
     ));
-    card.append(&dim("Each month end: every account's last verified balance on or before it, plus the latest value of what you've added by hand. An account counts from its first statement; a month whose statement isn't in yet repeats the last balance."));
+    card.append(&dim("Verified month-end balances from your statements, plus what you've added by hand."));
     card.append(&chart.widget);
     body.append(&card);
     let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).build();
@@ -167,7 +155,11 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let year = series.get(series.len().saturating_sub(13)).copied().unwrap_or(now);
             let newest = s.accounts.values().filter_map(|x| x.points.last().map(|p| p.0)).max();
             net_v.set_label(&money(now.net()));
-            net_s.set_label(&newest.map(|d| format!("Statements to {}", d.format("%d %b %Y"))).unwrap_or_else(|| "No statements yet".into()));
+            net_s.set_label(&newest.map(|d| format!("Verified statements to {}", d.format("%d %b %Y"))).unwrap_or_else(|| "No statements yet".into()));
+            // the same verified mark as Overview's headline
+            if newest.is_some() {
+                net_s.set_css_classes(&["caption", "verified"]);
+            }
             as_v.set_label(&money(now.assets));
             as_s.set_label(&format!("{} accounts + {} items", s.accounts.values().filter(|x| !x.liability).count(), s.items.iter().filter(|i| !i.liability).count()));
             de_v.set_label(&money(now.debts));
@@ -200,6 +192,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             for (_, x) in accts {
                 let (d, v) = *x.points.last().unwrap_or(&(end, Decimal::ZERO));
                 let r = adw::ActionRow::builder().title(glib::markup_escape_text(&x.name)).subtitle(format!("Verified {}", d.format("%d %b %Y"))).build();
+                // confirmed by a statement: the same mark as everywhere a number is verified
+                let mark = gtk::Image::builder().icon_name("object-select-symbolic").css_classes(["verified"]).tooltip_text("Confirmed by a statement").build();
+                mark.update_property(&[gtk::accessible::Property::Label("Verified")]);
+                r.add_prefix(&mark);
                 r.add_suffix(&gtk::Label::builder().label(fmt_money(v, x.currency)).css_classes(["tnum", if v.is_sign_negative() { "amount-out" } else { "" }]).build());
                 l.append(&r);
             }
@@ -208,7 +204,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 "Other Assets & Debts",
                 "Things you own or owe that no statement shows. Use Update Value… when the value changes; the chart uses each value from its date onward. Debts show with a minus and count against your net worth.",
             ));
-            content.append(&dim("Things no statement shows: a house or car, a pension, an investment account, a loan from family. Update the value now and then; the chart uses each one from its date on."));
+            content.append(&dim("A house or car, a pension, an investment account, a loan from family."));
             let l = list();
             for i in &s.items {
                 let last = i.values.last();

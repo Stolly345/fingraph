@@ -92,14 +92,23 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
 fn doc_row(app: &Rc<App>, d: &DocumentRow) -> adw::ActionRow {
     let period = d.period.map(|(a, b)| format!("{} – {}", a.format("%d %b %Y"), b.format("%d %b %Y"))).unwrap_or_else(|| "period unknown".into());
+    // the account says which statement it is; the file name is a hover away. Confidence only when it's short of sure.
+    let unsure = if d.confidence < 0.995 { format!(" · read with {:.0}% confidence", d.confidence * 100.0) } else { String::new() };
+    let plural = if d.tx_count == 1 { "" } else { "s" };
     let row = adw::ActionRow::builder()
-        .title(glib::markup_escape_text(&d.filename))
-        .subtitle(glib::markup_escape_text(&format!("{} · {period} · {} transactions · confidence {:.0}%", d.account_name, d.tx_count, d.confidence * 100.0)))
+        .title(glib::markup_escape_text(&d.account_name))
+        .subtitle(glib::markup_escape_text(&format!("{period} · {} transaction{plural}{unsure}", d.tx_count)))
+        .tooltip_text(&d.filename)
         .build();
-    row.add_prefix(&pill(if d.bank_short.is_empty() { "Unknown bank" } else { &d.bank_short }, "bank"));
+    if d.bank_short.is_empty() {
+        row.add_prefix(&pill("Unknown bank", "meh"));
+    }
     row.add_suffix(&reconciliation_pill(&d.reconciliation, d.currency));
     if !d.review.is_empty() {
-        row.set_subtitle(&glib::markup_escape_text(&format!("{} · waiting for review: {}", row.subtitle().unwrap_or_default(), d.review.iter().map(|r| r.text()).collect::<Vec<_>>().join("; "))));
+        // a short status on the row; the reasons are in Approve… (and on hover)
+        let why = d.review.iter().map(|r| r.text()).collect::<Vec<_>>().join("; ");
+        row.set_subtitle(&glib::markup_escape_text(&format!("{} · waiting for your approval", row.subtitle().unwrap_or_default())));
+        row.set_tooltip_text(Some(&format!("{}\nWaiting because {why}", d.filename)));
         let approve = gtk::Button::builder().label("Approve…").valign(gtk::Align::Center).css_classes(["suggested-action"]).build();
         row.add_suffix(&approve);
         let (w, id, name, why, n) = (Rc::downgrade(app), d.id, d.filename.clone(), d.review.clone(), d.tx_count);
@@ -109,10 +118,26 @@ fn doc_row(app: &Rc<App>, d: &DocumentRow) -> adw::ActionRow {
             }
         });
     }
-    let report = gtk::Button::builder().label("Scan Pass Report").valign(gtk::Align::Center).css_classes(["flat"]).build();
-    let del = gtk::Button::builder().icon_name("user-trash-symbolic").tooltip_text("Remove this statement and its transactions").valign(gtk::Align::Center).css_classes(["flat"]).build();
-    row.add_suffix(&report);
-    row.add_suffix(&del);
+    // the occasional actions, in the row's menu
+    let item = |label: &str, tip: &str| {
+        let b = gtk::Button::builder().label(label).tooltip_text(tip).css_classes(["flat"]).build();
+        if let Some(l) = b.child().and_downcast::<gtk::Label>() {
+            l.set_xalign(0.0);
+        }
+        b
+    };
+    let report = item("Scan Report…", "Each pass of the scanner over this statement, and what it found");
+    let del = item("Remove Statement…", "Remove this statement and its transactions");
+    del.add_css_class("error");
+    let menu = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+    menu.append(&report);
+    menu.append(&del);
+    let pop = gtk::Popover::builder().child(&menu).build();
+    for b in [&report, &del] {
+        let p = pop.clone();
+        b.connect_clicked(move |_| p.popdown());
+    }
+    row.add_suffix(&gtk::MenuButton::builder().icon_name("view-more-symbolic").tooltip_text(format!("More for {}", d.filename)).popover(&pop).valign(gtk::Align::Center).css_classes(["flat"]).build());
     {
         let (w, id) = (Rc::downgrade(app), d.id);
         report.connect_clicked(move |_| {
@@ -150,10 +175,10 @@ fn approve_dialog(app: &Rc<App>, id: i64, name: &str, why: &[Review], n: i64) {
     let dlg = adw::AlertDialog::new(
         Some("Approve this statement?"),
         Some(&format!(
-            "“{name}” is waiting because:\n{reasons}\n\nOpen its Scan Pass Report to compare it with the PDF. Once approved, its {n} transactions count in your budgets and reports."
+            "“{name}” is waiting because:\n{reasons}\n\nOpen its Scan Report to compare it with the PDF. Once approved, its {n} transactions count in your budgets and reports."
         )),
     );
-    dlg.add_responses(&[("cancel", "Cancel"), ("report", "Scan Pass Report"), ("ok", "Approve")]);
+    dlg.add_responses(&[("cancel", "Cancel"), ("report", "Scan Report"), ("ok", "Approve")]);
     dlg.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
     let w = Rc::downgrade(app);
     dlg.connect_response(None, move |_, r| crate::shielded(|| {
@@ -235,6 +260,21 @@ async fn decide(app: &Rc<App>, name: &str, plan: &ImportPlan) -> Option<(Vec<Tar
 }
 
 /// Account × month dots for the last twelve months, then any break in the chain of balances.
+/// FinGraph's promise kept: the first time an import leaves a month reconciled to the cent on every
+/// account, say so, once per month. Nothing else is celebrated; this is the work it's all for.
+pub fn celebrate_verified(app: &Rc<App>) {
+    use fingraph_core::workflows::{MonthState, verified_months};
+    let cov = app.db.coverage(&app.entity_ids(), 12, crate::today()).unwrap_or_default();
+    let Some(m) = verified_months(&cov).last().copied() else { return };
+    const KEY: &str = "verified_milestone";
+    if app.db.setting(KEY).is_some_and(|last| last >= m.to_string()) {
+        return;
+    }
+    let _ = app.db.set_setting(KEY, &m.to_string());
+    let n = cov.iter().filter(|c| c.months.iter().any(|(x, s)| *x == m && *s == MonthState::Verified)).count();
+    app.toast(&format!("{} adds up to the cent: all {n} account{} reconciled", m.format("%B %Y"), if n == 1 { "" } else { "s" }));
+}
+
 fn fill_coverage(app: &Rc<App>, grid: &gtk::Grid, breaks: &gtk::Box) {
     use fingraph_core::workflows::MonthState;
     while let Some(c) = grid.first_child() {
@@ -242,9 +282,18 @@ fn fill_coverage(app: &Rc<App>, grid: &gtk::Grid, breaks: &gtk::Box) {
     }
     crate::clear(breaks);
     let cov = app.db.coverage(&app.entity_ids(), 12, crate::today()).unwrap_or_default();
+    // a month every account proves to the cent wears the verified colour on its heading
+    let proven = fingraph_core::workflows::verified_months(&cov);
     if let Some(first) = cov.first() {
         for (i, (m, _)) in first.months.iter().enumerate() {
-            grid.attach(&gtk::Label::builder().label(m.format("%b").to_string()).css_classes(["caption", "dim-label"]).width_chars(4).build(), i as i32 + 1, 0, 1, 1);
+            let l = gtk::Label::builder().label(m.format("%b").to_string()).width_chars(4).build();
+            if proven.contains(m) {
+                l.set_css_classes(&["caption-heading", "verified"]);
+                l.set_tooltip_text(Some(&format!("{}: every account reconciled to the cent", m.format("%B %Y"))));
+            } else {
+                l.set_css_classes(&["caption", "dim-label"]);
+            }
+            grid.attach(&l, i as i32 + 1, 0, 1, 1);
         }
     }
     for (r, c) in cov.iter().enumerate() {
@@ -254,7 +303,7 @@ fn fill_coverage(app: &Rc<App>, grid: &gtk::Grid, breaks: &gtk::Box) {
         for (i, (m, s)) in c.months.iter().enumerate() {
             let (glyph, class, what) = match s {
                 MonthState::Verified => ("●", "amount-in", "statement present and verified to the cent"),
-                MonthState::Discrepancy => ("◐", "warning", "statement present but it doesn't balance (see its Scan Pass Report)"),
+                MonthState::Discrepancy => ("◐", "warning", "statement present but it doesn't balance (see its Scan Report)"),
                 MonthState::Missing => ("○", "error", "no statement — download it from your bank and drop it here"),
                 MonthState::Pending => ("·", "dim-label", "this month: the statement isn't out yet"),
                 MonthState::Before => ("·", "dim-label", "before this account's first statement"),
@@ -409,6 +458,7 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
             );
         }
         if files > 0 {
+            celebrate_verified(&a);
             let msg = format!("Imported {inserted} transactions from {files} statement{} · {reconciled} reconciled", if files == 1 { "" } else { "s" });
             let waiting = a.db.uncategorized_count(&a.entity_ids()).unwrap_or(0) > 0;
             if waiting && a.db.prefs().triage_after_import {
@@ -597,6 +647,7 @@ fn watched_file(a: &Rc<App>, p: &std::path::Path, k: &str, r: Result<(ScanResult
                 a.toast_action(&format!("{name} from your watched folder is waiting for review"), "Review", Rc::new(|a: &Rc<App>| a.show_view("statements")));
             } else {
                 a.toast_action(&format!("Imported {name} from your watched folder · {} transactions", rep.inserted), "Categorize", Rc::new(crate::wizard::triage));
+                celebrate_verified(a);
             }
         }
         Err(e) => offer(format!("{name} in your watched folder couldn't be imported: {e}")),
@@ -807,7 +858,7 @@ pub fn report_dialog(app: &Rc<App>, doc_id: i64) {
     }
 
     let tv = adw::ToolbarView::new();
-    tv.add_top_bar(&adw::HeaderBar::builder().title_widget(&adw::WindowTitle::new("Scan Pass Report", &d.filename)).build());
+    tv.add_top_bar(&adw::HeaderBar::builder().title_widget(&adw::WindowTitle::new("Scan Report", &d.filename)).build());
     tv.set_content(Some(&page));
     let dlg = adw::Dialog::builder().content_width(820).content_height(760).child(&tv).build();
     dlg.present(Some(&app.win));

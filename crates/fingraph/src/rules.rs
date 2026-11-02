@@ -320,8 +320,13 @@ pub fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
 }
 
 fn category_dialog(app: &Rc<App>) {
+    category_dialog_with(app, "", |_, _| {});
+}
+
+/// New Category, with `name` filled in; `added` gets the new category's id (the picker's "Add…").
+pub fn category_dialog_with(app: &Rc<App>, name: &str, added: impl Fn(&Rc<App>, i64) + 'static) {
     let tops: Vec<_> = app.categories().into_iter().filter(|c| c.parent_id.is_none()).collect();
-    let name = adw::EntryRow::builder().title("Name").build();
+    let name = adw::EntryRow::builder().title("Name").text(name).build();
     let mut parents = vec!["None — a top-level category".to_string()];
     parents.extend(tops.iter().map(|c| format!("Under {}", c.name)));
     let parent = adw::ComboRow::builder().title("Sits under").model(&gtk::StringList::new(&parents.iter().map(String::as_str).collect::<Vec<_>>())).build();
@@ -346,8 +351,9 @@ fn category_dialog(app: &Rc<App>) {
         let p = (parent.selected() as usize).checked_sub(1).and_then(|i| tops.get(i));
         let k = p.map(|p| p.kind).unwrap_or([CategoryKind::Expense, CategoryKind::Income, CategoryKind::Transfer][kind.selected() as usize]);
         match a.db.add_category(&n, p.map(|p| p.id), k) {
-            Ok(_) => {
+            Ok(id) => {
                 a.toast(&format!("Added “{n}”"));
+                added(&a, id);
                 a.refresh();
             }
             Err(_) => a.toast(&format!("“{n}” already exists there")),

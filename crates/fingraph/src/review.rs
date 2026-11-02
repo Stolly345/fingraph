@@ -12,7 +12,7 @@ use crate::{App, clear};
 
 fn kind_text(k: TriageKind) -> &'static str {
     match k {
-        TriageKind::Subscription => "Subscription?",
+        TriageKind::Subscription => "Recurring",
         TriageKind::Transfer => "Transfer?",
         TriageKind::Merchant => "Category?",
     }
@@ -32,7 +32,9 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let groups: Rc<RefCell<Vec<TriageGroup>>> = Rc::default();
     let answered = Rc::new(Cell::new(0usize));
     // keep your place: after an answer, the next merchant down is selected
-    let place = Rc::new(Cell::new(0usize));
+    // debug screenshots: FINGRAPH_REVIEW_ROW=n opens on the nth merchant
+    let first = if cfg!(debug_assertions) { std::env::var("FINGRAPH_REVIEW_ROW").ok().and_then(|v| v.parse().ok()).unwrap_or(0) } else { 0 };
+    let place = Rc::new(Cell::new(first));
     let refresh_slot: Rc<RefCell<Option<crate::Refresh>>> = Rc::default();
 
     {
@@ -54,12 +56,73 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         });
     }
 
+    // the keyboard: 1–6 pick a chip, Enter takes the highlighted answer, J and K move between merchants.
+    // Bubble phase, so a field you're typing in (the payee) keeps its own keys.
+    {
+        let (list, card) = (list.clone(), card.clone());
+        let keys = gtk::EventControllerKey::builder().propagation_phase(gtk::PropagationPhase::Bubble).build();
+        keys.connect_key_pressed(move |_, key, _, mods| {
+            if mods.intersects(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK) {
+                return glib::Propagation::Proceed;
+            }
+            fn buttons(w: &gtk::Widget, class: &str, out: &mut Vec<gtk::Button>) {
+                if let Some(b) = w.downcast_ref::<gtk::Button>().filter(|b| b.has_css_class(class) && b.is_mapped() && b.is_sensitive()) {
+                    out.push(b.clone());
+                }
+                let mut c = w.first_child();
+                while let Some(ch) = c {
+                    buttons(&ch, class, out);
+                    c = ch.next_sibling();
+                }
+            }
+            let root: gtk::Widget = card.clone().upcast();
+            let step = |d: i32| {
+                let i = list.selected_row().map_or(0, |r| r.index()) + d;
+                if let Some(r) = list.row_at_index(i.max(0)) {
+                    list.select_row(Some(&r));
+                }
+            };
+            match key {
+                gtk::gdk::Key::_1 | gtk::gdk::Key::_2 | gtk::gdk::Key::_3 | gtk::gdk::Key::_4 | gtk::gdk::Key::_5 | gtk::gdk::Key::_6 => {
+                    let n = key.to_unicode().and_then(|c| c.to_digit(10)).unwrap_or(0) as usize;
+                    let mut chips = Vec::new();
+                    buttons(&root, "chip", &mut chips);
+                    match chips.get(n.saturating_sub(1)) {
+                        Some(b) => b.emit_clicked(),
+                        None => return glib::Propagation::Proceed,
+                    }
+                }
+                gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter => {
+                    let mut lead = Vec::new();
+                    buttons(&root, "suggested-action", &mut lead);
+                    match lead.first() {
+                        Some(b) => b.emit_clicked(),
+                        None => return glib::Propagation::Proceed,
+                    }
+                }
+                gtk::gdk::Key::j => step(1),
+                gtk::gdk::Key::k => step(-1),
+                _ => return glib::Propagation::Proceed,
+            }
+            glib::Propagation::Stop
+        });
+        stack.add_controller(keys);
+    }
+
     let refresh: crate::Refresh = {
         let w = Rc::downgrade(app);
-        let (list, groups, stack, place) = (list.clone(), groups.clone(), stack.clone(), place.clone());
+        let (list, groups, stack, place, done, answered) = (list.clone(), groups.clone(), stack.clone(), place.clone(), done.clone(), answered.clone());
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
             let gs = a.db.triage(&a.entity_ids()).unwrap_or_default();
+            // finishing the queue is real work: say what it did, then what happens from here
+            if gs.is_empty() && answered.get() > 0 {
+                let n = answered.get();
+                done.set_description(Some(&format!(
+                    "You answered {n} merchant{} this session, and each answer reached back over their past transactions. From now on FinGraph sorts them itself; only shops it hasn't met come back here.",
+                    if n == 1 { "" } else { "s" }
+                )));
+            }
             stack.set_visible_child_name(if gs.is_empty() { "done" } else { "list" });
             list.remove_all();
             for g in &gs {

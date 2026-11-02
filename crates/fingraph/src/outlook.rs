@@ -15,7 +15,7 @@ use rust_decimal::prelude::ToPrimitive;
 use std::rc::Rc;
 
 use crate::charts::{self, Chart, Data, LineSeries};
-use crate::{App, clear, dim, info_caption, info_heading, today};
+use crate::{App, clear, dim, info_heading, today};
 
 /// How far ahead the estimate runs.
 const AHEAD: i64 = 45;
@@ -76,39 +76,21 @@ fn safe_to_spend(app: &App) -> Option<(Decimal, Decimal, i64, NaiveDate)> {
 
 pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(18).margin_bottom(24).margin_start(18).margin_end(18).build();
-    let ribbon = gtk::Box::builder().spacing(12).homogeneous(true).build();
-    let kpi = |t: &str, help: &str| {
-        let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).css_classes(["card", "kpi"]).build();
-        b.append(&info_caption(t, help));
-        let v = gtk::Label::builder().xalign(0.0).css_classes(["value", "tnum"]).build();
-        let s = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label", "caption"]).build();
-        b.append(&v);
-        b.append(&s);
-        ribbon.append(&b);
-        (v, s)
-    };
-    let (safe_v, safe_s) = kpi(
-        "Safe to Spend",
-        "How much you can spend a day for the rest of the month and stay within budget: what's left in your variable budgets (fixed bills left out) divided by the days remaining. Your statements stop at their last date, so take off anything you've spent since then.",
+    // the answer first: what you can spend a day, then what's ahead
+    let (summary, nums) = crate::summary_row(
+        ("Safe to Spend", "How much you can spend a day for the rest of the month and stay within budget: what's left in your variable budgets (fixed bills left out) divided by the days remaining. Your statements stop at their last date, so take off anything you've spent since then."),
+        &[("Lowest Balance Ahead", "The lowest an account is expected to get before your next statement, and roughly when. It shows an account heading below zero first; otherwise your main account. Red means it would go overdrawn unless something changes."), ("Bills This Month", "All your regular bills for this month added up, and how many already show on a statement. The rest should appear once the next statements arrive. The Bills list further down shows each one."), ("Age of Money", "How many days money sits between arriving and being spent. Each purchase spends the oldest money still in your accounts. Under 30 days means you're spending this month's pay as it arrives; over 30 means you're living on last month's money, which is the goal.")],
     );
-    let (age_v, age_s) = kpi("Age of Money", "How many days money sits between arriving and being spent. Each purchase spends the oldest money still in your accounts. Under 30 days means you're spending this month's pay as it arrives; over 30 means you're living on last month's money, which is the goal.");
-    let (low_v, low_s) = kpi(
-        "Lowest Balance Ahead",
-        "The lowest an account is expected to get before your next statement, and roughly when. It shows an account heading below zero first; otherwise your main account. Red means it would go overdrawn unless something changes.",
-    );
-    let (bill_v, bill_s) = kpi(
-        "Bills This Month",
-        "All your regular bills for this month added up, and how many already show on a statement. The rest should appear once the next statements arrive. The Bills list further down shows each one.",
-    );
-    body.append(&ribbon);
+    let [(safe_v, safe_s), (low_v, low_s), (bill_v, bill_s), (age_v, age_s)] = <[(gtk::Label, gtk::Label); 4]>::try_from(nums).unwrap();
+    body.append(&summary);
     let chart = Chart::new(260);
     let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
     card.append(&info_heading(
         "Balances Until Your Next Statement",
-        "Each line is one bank account's estimated balance, starting from its last verified balance. Drops are bills and card payments on their usual days, jumps are pay, and the gentle slope is everyday spending. If a line dips below zero, that account is likely to go overdrawn around that date. Hover for each day's estimate.",
+        "Each line is one bank account's estimated balance, starting from its last verified balance. Drops are bills and card payments on their usual days, jumps are pay, and the gentle slope is everyday spending. If a line dips below zero, that account is likely to go overdrawn around that date. Hover for each day's estimate. Regular payments in and out (pay, bills, card payments, standing orders) land on their usual days; everything else is spread evenly at the last 90 days' rate.",
     ));
     card.append(&dim(&format!(
-        "Solid from each account's last verified balance: regular payments in and out (pay, bills, card payments, standing orders) on their usual days, and everything else spread evenly at the last 90 days' rate. An estimate — the next statement replaces it. {AHEAD} days ahead."
+        "An estimate from each account's last verified balance, {AHEAD} days ahead. The next statement replaces it."
     )));
     card.append(&chart.widget);
     body.append(&card);
@@ -196,7 +178,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let series: Vec<LineSeries> = fcs
                 .iter()
                 .enumerate()
-                .map(|(i, fc)| LineSeries { name: fc.account.clone(), points: fc.points.iter().filter(|p| p.0 >= start).map(|p| (x(p.0), f(fx.convert(p.1, fc.currency, ccy)))).collect(), color: charts::PALETTE[i % charts::PALETTE.len()], dashed: false })
+                .map(|(i, fc)| LineSeries { name: crate::transactions::short_account(&fc.account), points: fc.points.iter().filter(|p| p.0 >= start).map(|p| (x(p.0), f(fx.convert(p.1, fc.currency, ccy)))).collect(), color: charts::PALETTE[i % charts::PALETTE.len()], dashed: false })
                 .collect();
             let mut stops = Vec::new();
             let mut d = start;
@@ -220,14 +202,19 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 for fc in &fcs {
                     let m = |d: Decimal| fmt_money(d, fc.currency);
                     let today_est = fc.at(t).unwrap_or(fc.start.1);
-                    let mut sub = vec![format!("verified {} on {}", m(fc.start.1), fc.start.0.format("%d %b"))];
+                    // two short lines instead of one run-on: where it stands, then what's coming
+                    let mut first = vec![format!("Verified {} on {}", m(fc.start.1), fc.start.0.format("%d %b"))];
                     if let Some((d, v)) = fc.low(t, end) {
-                        sub.push(format!("low point {} around {}", m(v), d.format("%d %b")));
+                        first.push(format!("lowest {} around {}", m(v), d.format("%d %b")));
                     }
+                    let mut second = Vec::new();
                     if let Some(e) = fc.events.iter().find(|e| e.0 > t) {
-                        sub.push(format!("next: {} {} on {}", e.1, m(e.2), e.0.format("%d %b")));
+                        second.push(format!("Next: {} {} on {}", e.1, m(e.2), e.0.format("%d %b")));
                     }
-                    sub.push(format!("day to day {} a day", m(fc.daily)));
+                    if !fc.daily.is_zero() {
+                        second.push(format!("{} about {} a day otherwise", if fc.daily.is_sign_negative() { "spends" } else { "gains" }, m(fc.daily.abs())));
+                    }
+                    let mut sub = vec![first.join(" · "), second.join(" · ")];
                     // how the last remembered estimate did, once a statement covers its date
                     if let Some((when, est, made)) = checks.get(&fc.account_id)
                         && fc.start.0 >= *when
@@ -237,7 +224,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                             sub.push(format!("estimated {} for {} on {}; the statement says {} (off by {})", m(*est), when.format("%d %b"), made.format("%d %b"), m(act), m((act - est).abs())));
                         }
                     }
-                    let r = adw::ActionRow::builder().title(glib::markup_escape_text(&fc.account)).subtitle(glib::markup_escape_text(&sub.join(" · "))).subtitle_lines(3).build();
+                    let r = adw::ActionRow::builder().title(glib::markup_escape_text(&fc.account)).subtitle(glib::markup_escape_text(&sub.iter().filter(|l| !l.is_empty()).cloned().collect::<Vec<_>>().join("\n"))).subtitle_lines(4).build();
                     r.add_suffix(&gtk::Label::builder().label(format!("≈ {} today", m(today_est))).css_classes(["tnum", "heading", if today_est.is_sign_negative() { "amount-out" } else { "" }]).build());
                     l.append(&r);
                 }

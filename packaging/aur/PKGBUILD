@@ -2,7 +2,7 @@
 # Repackages the release .deb (the same binary as the .deb/.rpm; built on Ubuntu 26.04).
 # New release: set pkgver, sha256sum of the uploaded .deb, then `makepkg --printsrcinfo > .SRCINFO`.
 pkgname=fingraph-bin
-pkgver=0.2.17
+pkgver=0.2.18
 pkgrel=1
 pkgdesc="Local-first ledger and statement scanner for Cayman bank statements"
 arch=('x86_64')
@@ -17,7 +17,7 @@ conflicts=('fingraph')
 # prebuilt, already stripped release binary
 options=('!debug' '!strip')
 source=("https://github.com/Stolly345/fingraph/releases/download/v${pkgver}/fingraph_${pkgver}-1_amd64.deb")
-sha256sums=('aaebef01f4cde708a9630bd6116746f3c0d529c99adda16e64c1c9e289d9d376')
+sha256sums=('d317cf04204a8c472f75eeb9c2c3814d742f48803cd1777da2f11f91be308536')
 
 package() {
     bsdtar -xf data.tar.* -C "$pkgdir"

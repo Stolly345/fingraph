@@ -332,6 +332,21 @@ pub struct Coverage {
     pub breaks: Vec<String>,
 }
 
+/// The months every account proves to the cent: each one either reconciled that month or hadn't
+/// started yet, and at least one reconciled. Oldest first.
+pub fn verified_months(cov: &[Coverage]) -> Vec<NaiveDate> {
+    let Some(first) = cov.first() else { return Vec::new() };
+    first
+        .months
+        .iter()
+        .map(|(m, _)| *m)
+        .filter(|m| {
+            let states: Vec<MonthState> = cov.iter().filter_map(|c| c.months.iter().find(|(x, _)| x == m).map(|(_, s)| *s)).collect();
+            states.iter().all(|s| matches!(s, MonthState::Verified | MonthState::Before)) && states.contains(&MonthState::Verified)
+        })
+        .collect()
+}
+
 impl Db {
     /// For each visible account: which of the `n` months up to `today` have a statement, and whether
     /// its statements chain (closing of one = opening of the next).

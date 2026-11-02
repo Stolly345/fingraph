@@ -131,7 +131,9 @@ pub fn same_merchant(a: &str, b: &str) -> bool {
     }
     let (wa, wb): (Vec<&str>, Vec<&str>) = (a.split(' ').collect(), b.split(' ').collect());
     let n = wa.len().min(wb.len());
-    n > 0 && wa[0].len() >= 3 && (0..n).all(|i| word_match(wa[i], wb[i], i == 0))
+    // one word never swallows a longer name: BODDEN isn't BODDEN OFFICE SUPPLY (the directory still joins known ones)
+    let lone = n == 1 && wa.len() != wb.len();
+    n > 0 && !lone && wa[0].len() >= 3 && (0..n).all(|i| word_match(wa[i], wb[i], i == 0))
 }
 
 /// Which well-known merchant a stem names, if any. Short keys must be whole words ("FLOW" ≠ "FLOWERS").
@@ -152,12 +154,25 @@ pub fn first_match<'a>(rules: &'a [Rule], entity_id: i64, raw: &str, memo: &str,
 /// Bank transaction-type labels that say nothing about the merchant (Scotiabank prints the merchant
 /// on the next line).
 static GENERIC: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(pos (purchase|debit)|visa (purchase|debit)|debit card purchase|electronic (credit|debit)|mobile ob trf (dr|cr)|pc transfer (debit|credit)|abm withdrawal|atm withdrawal|bill payment|internet banking (payment|transfer)|point of sale)$").unwrap()
+    Regex::new(r"(?i)^(pos (purchase|debit)|visa (purchase|debit)|debit card purchase|electronic (credit|debit)|mobile ob trf (dr|cr)|pc transfer (debit|credit)|abm withdrawal|atm withdrawal|bill payment|internet banking (payment|transfer)|point of sale|third party (trf|transfer)( bns)?)(\s*#\s*error)?$").unwrap()
 });
+
+/// What a bank prints for every cheque, deposit or cash withdrawal, whoever it was to or from: one
+/// answer for the whole stem would file every future cheque under the same category.
+static VARIED_PAYEE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(cheques?|checks?|cheque paid|cheque deposit|branch deposit|cash deposit|counter deposit|mobile deposit|deposits?|cash withdrawal|counter withdrawal|withdrawal|abm withdrawal|atm withdrawal|atm|abm)$").unwrap()
+});
+
+/// A stem that stands for many different payees (`CHEQUE`, `BRANCH DEPOSIT`), so each charge needs its own answer.
+pub fn varied_payee(stem: &str) -> bool {
+    VARIED_PAYEE.is_match(stem.trim())
+}
 
 static PREFIX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(pos (purchase|debit)|visa (purchase|debit)|debit card purchase|point of sale|ath|sq \*|sq\*|tst\*|tst \*|pp\*|paypal \*|paypal\*|sp |trf to:|trf from:|transfer to|transfer from|bill payment|web pmt|purchase)\s*").unwrap()
 });
+
+static GLUED_CCY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([A-Z]{3,})\d(USD|KYD)\b").unwrap());
 
 static NOISE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
@@ -196,6 +211,8 @@ pub fn merchant_stem(raw: &str, memo: &str) -> String {
     for _ in 0..2 {
         s = PREFIX.replace(&s, "").to_string();
     }
+    // BODDEN MOTORS1USD: the card's currency glued to the name, which the reference filter would take with it
+    s = GLUED_CCY.replace_all(&s, "$1").to_string();
     for re in NOISE.iter() {
         s = re.replace_all(&s, " ").to_string();
     }
@@ -390,7 +407,9 @@ pub fn triage_groups(items: &[TriageInput]) -> Vec<TriageGroup> {
             entity_ids.dedup();
             TriageGroup {
                 suggested_payee: payee,
-                suggested_category: if kind == TriageKind::Subscription { Some("Subscriptions & Digital") } else { cat },
+                // recurring isn't a category: a monthly landscaper is still Repairs & Maintenance, so only
+                // a known digital service defaults to Subscriptions & Digital
+                suggested_category: cat.or_else(|| SUBSCRIPTION_HINT.is_match(&stem).then_some("Subscriptions & Digital")),
                 guesses: Vec::new(),
                 kind,
                 tx_ids: v.iter().map(|t| t.id).collect(),
@@ -447,6 +466,11 @@ mod tests {
         assert!(same_merchant("HBO MAX HBOMAX.COM", "HBOMAX HELP"));
         assert!(!same_merchant("KIRK MARKET", "KIRK HOME CENTRE"));
         assert!(!same_merchant("FLOW", "FLOWERS BY JANE"));
+        // a family name is half of Cayman's shops: one word never swallows a longer name
+        assert!(!same_merchant("BODDEN", "BODDEN OFFICE SUPPLY"));
+        // a card statement can glue its currency onto the name: BODDEN MOTORS1USD isn't Bodden Office Supply
+        assert_eq!(merchant_stem("BODDEN MOTORS1USD, GEORGE TOWN", "Ref 1000000001"), "BODDEN MOTORS");
+        assert!(!same_merchant(&merchant_stem("BODDEN MOTORS1USD, GEORGE TOWN", "Ref 1000000001"), &merchant_stem("BODDEN OFFICE SUPPLY, GRAND CAYMAN", "Ref 1000000002")));
         // a rule learned from one spelling covers the others
         let r = Rule { pattern: c.clone(), category_id: Some(17), ..Default::default() };
         assert!(r.matches("POS PURCHASE", "PAYPAL *DISCOVERYDI HELP.4029357733 US"));
@@ -494,5 +518,44 @@ mod tests {
         assert_eq!(g[0].charges.iter().map(|c| c.posted).collect::<Vec<_>>(), vec![d(8, 3), d(7, 3), d(6, 3)], "newest first");
         assert_eq!(g[1].kind, TriageKind::Transfer);
         assert_eq!(g[2].kind, TriageKind::Merchant, "a monthly cash withdrawal is not a subscription");
+        assert_eq!(g[0].suggested_category, Some("Subscriptions & Digital"));
+    }
+
+    #[test]
+    fn recurring_is_not_a_category() {
+        let d = |m| NaiveDate::from_ymd_opt(2026, m, 12).unwrap();
+        let t = |id, m| TriageInput { id, entity_id: 1, posted: d(m), raw: "GENERAL LANDSCAPING LTD".into(), memo: String::new(), amount: "-275.00".parse().unwrap(), currency: Currency::KYD, account: "Chq".into() };
+        let g = triage_groups(&[t(1, 6), t(2, 7), t(3, 8), t(4, 9)]);
+        assert_eq!(g[0].kind, TriageKind::Subscription, "same price every month still asks");
+        assert_eq!(g[0].suggested_category, Some("Landscaping"), "the directory's answer, not Subscriptions & Digital");
+    }
+
+    /// Scotiabank prints "THIRD PARTY TRF BNS" for every transfer out to someone else; who it went to
+    /// is on the next line. One card per payee, not one for all of them (found in Getting Started).
+    #[test]
+    fn third_party_transfers_group_by_payee() {
+        let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        let t = |id, date, raw: &str, memo: &str, amt: &str| TriageInput { id, entity_id: 1, posted: date, raw: raw.into(), memo: memo.into(), amount: amt.parse().unwrap(), currency: Currency::KYD, account: "Chq".into() };
+        let g = triage_groups(&[
+            t(1, d(10, 14), "THIRD PARTY TRF BNS", "Transfer to ANNA RIVERS 0193", "-640.12"),
+            t(2, d(7, 29), "THIRD PARTY TRF BNS", "Transfer to SEAVIEW DENTAL LTD. 4", "-6.40"),
+            t(3, d(7, 29), "THIRD PARTY TRF BNS", "Transfer to SEAVIEW DENTAL LTD. 4", "-11.25"),
+            t(4, d(7, 3), "THIRD PARTY TRF BNS", "Transfer to JOHN BAKER 2290", "-25.00"),
+            t(5, d(5, 15), "THIRD PARTY TRF BNS #Error", "Transfer to ANNA RIVERS 0193", "-640.00"),
+            t(6, d(3, 2), "THIRD PARTY TRF BNS", "Transfer to ANNA RIVERS 0193", "-640.00"),
+        ]);
+        let mut stems: Vec<(String, usize)> = g.iter().map(|g| (g.stem.clone(), g.count)).collect();
+        stems.sort();
+        assert_eq!(stems, vec![("ANNA RIVERS".to_string(), 3), ("JOHN BAKER".to_string(), 1), ("SEAVIEW DENTAL".to_string(), 2)]);
+    }
+
+    #[test]
+    fn varied_payees() {
+        for s in ["CHEQUE", "Cheque", "BRANCH DEPOSIT", "CASH WITHDRAWAL", "ATM"] {
+            assert!(varied_payee(s), "{s}");
+        }
+        for s in ["CHEQUE BOOK FEE", "INCOMING WIRE BLUE WATER", "MONTHLY FEE", "KIRK MARKET"] {
+            assert!(!varied_payee(s), "{s}");
+        }
     }
 }

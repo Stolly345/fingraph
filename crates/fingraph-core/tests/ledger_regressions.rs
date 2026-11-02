@@ -404,3 +404,98 @@ fn downloads_dedupe_stay_approved_and_chain() {
     assert_ne!(status(&import_download(&db, e, &dir, "oct-short.ofx", &ofx("1300.00"))), "Reconciled");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Undo puts back a bulk edit and the rule it taught, including what the rule changed elsewhere.
+#[test]
+fn undo_restores_edits_and_rules() {
+    let db = Db::open_in_memory().unwrap();
+    db.load_demo().unwrap();
+    let before = all(&db);
+    let rules_before = db.rules().unwrap().len();
+    assert!(!db.undo_to_checkpoint().unwrap(), "nothing to undo yet");
+
+    db.checkpoint().unwrap();
+    let ids: Vec<i64> = before.iter().take(5).map(|t| t.id).collect();
+    db.set_category(&ids, None).unwrap();
+    db.set_subscription(&ids, true).unwrap();
+    db.set_tag(&ids, "oops").unwrap();
+    let t = &before[10];
+    let rule = fingraph_core::rules::Rule {
+        kind: fingraph_core::rules::RuleKind::NormalizedTokens,
+        pattern: fingraph_core::rules::merchant_stem(&t.raw_description, &t.memo),
+        clean_payee: Some("Wrong Name".into()),
+        ..Default::default()
+    };
+    db.learn(&rule).unwrap();
+    assert_ne!(all(&db), before);
+
+    assert!(db.undo_to_checkpoint().unwrap());
+    assert_eq!(all(&db), before, "every transaction back as it was");
+    assert_eq!(db.rules().unwrap().len(), rules_before, "the learned rule is gone");
+    assert!(!db.undo_to_checkpoint().unwrap(), "one step only");
+}
+
+/// The picker's shortcuts: busiest categories by direction (no transfers), and recent picks newest first.
+#[test]
+fn picker_shortcuts() {
+    let db = Db::open_in_memory().unwrap();
+    db.load_demo().unwrap();
+    let out = db.top_categories(&[], true, 6).unwrap();
+    let inc = db.top_categories(&[], false, 6).unwrap();
+    assert!(!out.is_empty() && out.len() <= 6);
+    let cats = db.categories().unwrap();
+    let kind = |id: &i64| cats.iter().find(|c| c.id == *id).map(|c| c.kind);
+    assert!(out.iter().chain(&inc).all(|id| kind(id) != Some(fingraph_core::db::CategoryKind::Transfer)), "no transfers");
+    assert!(cats.iter().any(|c| c.name == "Taxes"), "Taxes is seeded");
+    for id in [5, 7, 5, 9] {
+        db.note_recent_category(id).unwrap();
+    }
+    assert_eq!(db.recent_categories(), vec![9, 5, 7]);
+}
+
+/// Merchant hints carry shop names and categories only: never people, income, transfers or numbers.
+#[test]
+fn merchant_hints_share_only_shops() {
+    use fingraph_core::hints::{merchant_hints, to_csv};
+    let db = Db::open_in_memory().unwrap();
+    db.load_demo().unwrap();
+    let rows = all(&db);
+    let cats = db.categories().unwrap();
+    let cat = |n: &str| cats.iter().find(|c| c.name == n).unwrap().id;
+    let ids_like = |s: &str| rows.iter().filter(|t| t.raw_description.contains(s)).map(|t| t.id).collect::<Vec<_>>();
+    // a shop the directory would call Landscaping, filed by you as Repairs: worth teaching
+    db.set_category(&ids_like("GENERAL LANDSCAPING"), Some(cat("Repairs & Maintenance"))).unwrap();
+    // a cheque (to a person), and money coming in: never shared, whatever their category
+    db.set_category(&ids_like("CHEQUE"), Some(cat("Housing"))).unwrap();
+    db.set_category(&ids_like("RENT RECEIVED"), Some(cat("Rental Income"))).unwrap();
+    let hints = merchant_hints(&all(&db), &db.categories().unwrap());
+    let land = hints.iter().find(|h| h.merchant == "GENERAL LANDSCAPING").expect("the landscaper is a hint");
+    assert_eq!((land.category.as_str(), land.parent.as_deref()), ("Repairs & Maintenance", None));
+    assert!(land.times >= 1);
+    for h in &hints {
+        assert!(!h.merchant.contains("CHEQUE") && !h.merchant.contains("RENT RECEIVED"), "{h:?}");
+        assert!(!h.merchant.chars().any(|c| c.is_ascii_digit()), "no reference or account numbers: {h:?}");
+    }
+    let csv = to_csv(&hints, "0.2.17");
+    assert!(csv.starts_with("# FinGraph 0.2.17 merchant hints"));
+    assert!(csv.contains("GENERAL LANDSCAPING,Repairs & Maintenance,,"));
+    for t in all(&db) {
+        assert!(!csv.contains(&format!("{:.2}", t.amount.abs())), "no amounts: {}", t.amount);
+    }
+}
+
+/// The months worth marking: every account reconciled (or not started yet), none missing or off.
+#[test]
+fn verified_months_need_every_account() {
+    use fingraph_core::workflows::{verified_months, Coverage, MonthState::*};
+    let m = |n| d(n, 1);
+    let acct = |id, states: Vec<fingraph_core::workflows::MonthState>| Coverage { account_id: id, account: format!("a{id}"), months: (8..=10).map(m).zip(states).collect(), breaks: vec![] };
+    let cov = vec![acct(1, vec![Verified, Verified, Verified]), acct(2, vec![Before, Discrepancy, Verified]), acct(3, vec![Before, Verified, Missing])];
+    assert_eq!(verified_months(&cov), vec![m(8)], "Sep has a discrepancy, Oct a missing statement");
+    let all_before = vec![acct(1, vec![Before, Before, Verified])];
+    assert_eq!(verified_months(&all_before), vec![m(10)], "a month nobody had started isn't a milestone");
+    let db = Db::open_in_memory().unwrap();
+    db.load_demo().unwrap();
+    let cov = db.coverage(&[], 12, d(11, 2)).unwrap();
+    assert!(verified_months(&cov).contains(&m(10)), "the demo's October is verified everywhere");
+}

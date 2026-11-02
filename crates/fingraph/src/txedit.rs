@@ -41,23 +41,30 @@ pub fn dialog(app: &Rc<App>, tx_id: i64, on_closed: Option<Rc<dyn Fn()>>) {
     }
     what.add(&payee);
 
+    // the same picker as everywhere else: the row shows the category, a click opens it
     let cats = app.categories();
-    let mut names = vec!["Uncategorized".to_string()];
-    names.extend(cats.iter().map(|c| if c.parent_id.is_some() { format!("   {}", c.name) } else { c.name.clone() }));
-    let category = adw::ComboRow::builder().title("Category").model(&gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>())).enable_search(true).build();
-    category.set_selected(t.category_id.and_then(|id| cats.iter().position(|c| c.id == id)).map_or(0, |i| i + 1) as u32);
+    let label_of = move |id: Option<i64>| id.and_then(|id| cats.iter().find(|c| c.id == id)).map_or("Uncategorized".to_string(), |c| c.name.clone());
+    let current = gtk::Label::builder().label(label_of(t.category_id)).css_classes(["dim-label"]).build();
+    let category = adw::ActionRow::builder().title("Category").activatable(true).build();
+    category.add_suffix(&current);
+    category.add_suffix(&gtk::Image::from_icon_name("pan-down-symbolic"));
     if t.splits > 0 {
         category.set_sensitive(false);
         category.set_subtitle("Split into lines — edit them with Split…");
     }
     {
-        let (w, touch) = (Rc::downgrade(app), touch.clone());
-        category.connect_selected_notify(move |c| {
-            if let Some(a) = w.upgrade() {
-                let id = (c.selected() as usize).checked_sub(1).and_then(|i| cats.get(i)).map(|c| c.id);
-                a.saved(a.db.set_category(&[tx_id], id));
-                touch();
-            }
+        let (w, touch, outgoing) = (Rc::downgrade(app), touch.clone(), t.amount.is_sign_negative());
+        category.connect_activated(move |row| {
+            let Some(a) = w.upgrade() else { return };
+            let (w, touch, current, label_of) = (w.clone(), touch.clone(), current.clone(), label_of.clone());
+            crate::picker::open(&a, row, crate::picker::Pick { allow_none: true, suggested: Vec::new(), outgoing: Some(outgoing) }, move |id| {
+                if let Some(a) = w.upgrade()
+                    && a.saved(a.db.set_category(&[tx_id], id))
+                {
+                    current.set_label(&label_of(id));
+                    touch();
+                }
+            });
         });
     }
     what.add(&category);
