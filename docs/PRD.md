@@ -8,6 +8,10 @@
 > `~/.config/fingraph/data.db` was not migrated). The original build brief is section 2; everything
 > after it records what was actually built, including the changes requested while using it.
 
+![FinGraph social preview](social-preview.png)
+
+*GitHub social preview (1280×640), made by `scripts/social-preview.py` from the icon and `docs/screenshots/overview.png`; uploaded by hand in Settings → General → Social preview (GitHub has no API for it). Rerun it after the overview screenshot or tagline changes.*
+
 ---
 
 ## 1. Purpose & Goals
