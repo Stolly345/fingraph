@@ -778,6 +778,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     cards.append(&card);
                 }
                 split_box.append(&cards);
+                rules_of_thumb(&split_box, fixed_t + set_aside + loans, var_t, income, ccy);
             }
 
             // ── yearly and quarterly bills, a share set aside each month
@@ -1871,4 +1872,51 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
         });
     }
     dlg.present(Some(&app.win));
+}
+
+/// Your month against the well-known budgeting rules (50/30/20 and friends), each explained.
+fn rules_of_thumb(into: &gtk::Box, needs: Decimal, wants: Decimal, income: Option<Decimal>, ccy: Currency) {
+    into.append(&info_heading(
+        "Budgeting Rules of Thumb",
+        "Popular ways to divide take-home pay, with your month against each. Needs are your fixed expenses, non-monthly bills and loan payments; wants are your variable spending; saving is what's left, including anything paid off debt above the minimums. Mark categories Fixed or Variable to sort needs from wants.",
+    ));
+    let shares = income.and_then(|i| core::shares(needs, wants, i));
+    let Some((n, w, sv)) = shares else {
+        into.append(&dim("Set up your pay (Set Up Budget…) to see your month against each rule."));
+        return;
+    };
+    let money = |d: Decimal| fmt_money(d, ccy);
+    into.append(&dim(&format!("Yours: needs {n}% ({}) · wants {w}% ({}) · saving {sv}%.", money(needs), money(wants))));
+    let l = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
+    for r in core::RULES {
+        let d = |v: u8| Decimal::from(v);
+        // what's off, in points of take-home
+        let mut off: Vec<String> = Vec::new();
+        match (r.needs, r.wants) {
+            (Some(tn), Some(tw)) => {
+                if n > d(tn) {
+                    off.push(format!("needs {} points over", n - d(tn)));
+                }
+                if w > d(tw) {
+                    off.push(format!("wants {} points over", w - d(tw)));
+                }
+            }
+            _ if n + w > d(r.spend) => off.push(format!("spending {} points over", n + w - d(r.spend))),
+            _ => {}
+        }
+        if sv < d(r.save) {
+            off.push(format!("saving {} points short", d(r.save) - sv));
+        }
+        let verdict = if off.is_empty() { "You're within this rule.".to_string() } else { format!("Off by: {}.", off.join(", ")) };
+        let row = adw::ActionRow::builder().title(r.name).subtitle(glib::markup_escape_text(&format!("{}\n{verdict}", r.about))).subtitle_lines(0).build();
+        row.add_suffix(&gtk::Image::builder().icon_name(if off.is_empty() { "emblem-ok-symbolic" } else { "dialog-warning-symbolic" }).css_classes([if off.is_empty() { "success" } else { "warning" }]).build());
+        l.append(&row);
+    }
+    let zb = adw::ActionRow::builder()
+        .title("Zero-Based Budget")
+        .subtitle("Give every dollar of take-home a job — a category, a bill, savings or a debt — until nothing is left unassigned. It's what this page does: budgets per category, non-monthly bills set aside, and what's left goes to saving. Monthly Close shows how the month really went against it.")
+        .subtitle_lines(0)
+        .build();
+    l.append(&zb);
+    into.append(&l);
 }

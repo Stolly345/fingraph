@@ -30,8 +30,9 @@ transactions. On top of that sit a budget, a forecast for the weeks between stat
 net worth, in KYD or USD, across personal and business workspaces.
 
 Everything lives in `~/.local/share/fingraph/`: the ledger, kept copies of your statements and
-backups. The one optional network use, off until you switch it on, downloads daily exchange rates
-(only currency codes and dates are sent).
+backups. FinGraph goes online for two things only: once a day it asks GitHub whether a newer
+release is out (Preferences → General turns it off), and, if you switch it on, it downloads daily
+exchange rates (only currency codes and dates are sent). Your ledger never leaves the machine.
 
 <table>
 <tr>

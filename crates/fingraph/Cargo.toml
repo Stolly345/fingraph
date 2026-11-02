@@ -23,8 +23,9 @@ Cayman National, RBC and the CICSA Credit Union) with a five-pass scanner that \
 proves every statement against its own running and closing balances, learns your \
 merchants through Smart Triage, and charts income, spending, subscriptions and \
 bank fees across personal and business workspaces in any currency. Statements and \
-the ledger stay in ~/.local/share/fingraph. The one optional network use, off until \
-switched on, downloads daily exchange rates (only currency codes and dates are sent)."""
+the ledger stay in ~/.local/share/fingraph. Network use: a daily check for a newer \
+release on GitHub (can be turned off), and, when switched on, daily exchange rates \
+(only currency codes and dates are sent)."""
 section = "utils"
 priority = "optional"
 # pdftotext -bbox gives the scanner every word with its position

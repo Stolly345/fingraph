@@ -358,6 +358,8 @@ pub enum Strategy {
     Avalanche,
     /// Smallest balance first: the quickest wins.
     Snowball,
+    /// Only each debt's minimum, nothing extra: the baseline the others are measured against.
+    Minimums,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -373,7 +375,7 @@ pub struct Payoff {
 /// `None` when `monthly` doesn't cover the minimums, or it would take more than 50 years.
 pub fn payoff(debts: &[Debt], monthly: Decimal, strategy: Strategy) -> Option<Payoff> {
     let mut bal: Vec<Decimal> = debts.iter().map(|d| d.balance.max(Decimal::ZERO)).collect();
-    if monthly < bal.iter().map(|b| min_payment(*b)).sum::<Decimal>() {
+    if strategy != Strategy::Minimums && monthly < bal.iter().map(|b| min_payment(*b)).sum::<Decimal>() {
         return None;
     }
     let mut order: Vec<(String, u32)> = Vec::new();
@@ -389,7 +391,7 @@ pub fn payoff(debts: &[Debt], monthly: Decimal, strategy: Strategy) -> Option<Pa
             interest += x;
             bal[i] += x;
         }
-        let mut left = monthly;
+        let mut left = if strategy == Strategy::Minimums { Decimal::MAX } else { monthly };
         for b in bal.iter_mut() {
             let p = min_payment(*b).min(left);
             *b -= p;
@@ -399,6 +401,7 @@ pub fn payoff(debts: &[Debt], monthly: Decimal, strategy: Strategy) -> Option<Pa
         match strategy {
             Strategy::Avalanche => open.sort_by(|a, b| debts[*b].apr.cmp(&debts[*a].apr).then(bal[*a].cmp(&bal[*b]))),
             Strategy::Snowball => open.sort_by(|a, b| bal[*a].cmp(&bal[*b]).then(debts[*b].apr.cmp(&debts[*a].apr))),
+            Strategy::Minimums => open.clear(),
         }
         for i in open {
             let p = left.min(bal[i]);
@@ -419,6 +422,15 @@ pub fn payoff(debts: &[Debt], monthly: Decimal, strategy: Strategy) -> Option<Pa
         }
     }
     None
+}
+
+#[test]
+fn minimums_only_takes_longest_and_costs_most() {
+    let d = |v: &str| v.parse::<Decimal>().unwrap();
+    let debts = [Debt { name: "Card".into(), balance: d("3000"), apr: d("24") }, Debt { name: "Loan".into(), balance: d("2000"), apr: d("9") }];
+    let a = payoff(&debts, d("400"), Strategy::Avalanche).unwrap();
+    let m = payoff(&debts, Decimal::ZERO, Strategy::Minimums).unwrap();
+    assert!(m.months > a.months && m.interest > a.interest);
 }
 
 #[test]

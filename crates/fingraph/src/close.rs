@@ -50,13 +50,16 @@ pub fn summary(app: &App, m: NaiveDate) -> CloseSummary {
     let bar = fingraph_core::insights::monthly(&s.rows, m, 1, s.ccy, &s.fx).pop();
     let (income, spent) = bar.map_or((Decimal::ZERO, Decimal::ZERO), |b| (b.income, b.expenses));
     let rolls = app.db.rollovers(&s.scope);
-    let over = envs(app, &s, m).iter().filter(|(id, e)| (!e.budget.is_zero() || rolls.contains_key(id)) && e.available().is_sign_negative()).count();
+    let env = envs(app, &s, m);
+    let over = env.iter().filter(|(id, e)| (!e.budget.is_zero() || rolls.contains_key(id)) && e.available().is_sign_negative()).count();
+    let budgeted: Decimal = env.values().map(|e| e.budget).sum();
+    let variance = (!budgeted.is_zero()).then(|| budgeted - env.values().map(|e| e.spent).sum::<Decimal>());
     let ids = app.entity_ids();
     let whole = app.db.transactions(&TxFilter { entity_ids: ids.clone(), ..Default::default() }).unwrap_or_default();
     let docs = app.db.documents(&ids).unwrap_or_default();
     let missed = outlook::bills_for(&whole, &outlook::covered(&docs), m, s.ccy, &s.fx).iter().filter(|b| b.state == BillState::Missed).count();
     let aom = outlook::age_of_money(&whole, &docs, s.ccy, &s.fx).and_then(|a| a.by_month.iter().rev().find(|p| p.0 <= end).map(|p| p.1));
-    CloseSummary { currency: Some(s.ccy), income, spent, saved: income - spent, age_of_money: aom, over, missed, net_worth: crate::wealth::net_worth_at(app, end) }
+    CloseSummary { currency: Some(s.ccy), income, spent, saved: income - spent, age_of_money: aom, over, missed, variance, net_worth: crate::wealth::net_worth_at(app, end) }
 }
 
 /// `month`: None = the newest month not yet closed. `done` runs after closing.
@@ -289,6 +292,9 @@ fn fill(app: &Rc<App>, i: usize, m: NaiveDate, b: &gtk::Box, redo: crate::Refres
             }
             if let Some(n) = sum.net_worth {
                 line("Net worth", money(n));
+            }
+            if let Some(v) = sum.variance {
+                line("Against budget", if v.is_sign_negative() { format!("{} over", money(-v)) } else { format!("{} under", money(v)) });
             }
             line("Over budget", if sum.over == 0 { "none".into() } else { format!("{} categories", sum.over) });
             line("Bills that didn't come", sum.missed.to_string());

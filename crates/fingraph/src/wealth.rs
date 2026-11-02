@@ -339,7 +339,7 @@ fn payoff_section(app: &Rc<App>, s: &Snap, into: &gtk::Box, redraw: crate::Refre
     }
     into.append(&info_heading(
         "Paying Off Debt",
-        "Compares two ways to clear your debts with the monthly amount you enter. Both pay every minimum, then put the extra on one debt at a time. Highest rate first (avalanche) usually costs the least interest. Smallest balance first (snowball) clears whole debts sooner, which some people find easier to stick with. Each card shows when you'd be debt-free and the total interest.",
+        "Compares ways to clear your debts with the monthly amount you enter. Avalanche and snowball both pay every minimum, then put the extra on one debt at a time; minimums only shows what happens if you pay just what the bank asks. Each card shows when you'd be debt-free and the total interest. Below the cards are other approaches worth knowing about.",
     ));
     if debts.is_empty() {
         into.append(&dim("Nothing owed on a card or loan in your statements, and no debts added by hand."));
@@ -406,10 +406,15 @@ fn payoff_section(app: &Rc<App>, s: &Snap, into: &gtk::Box, redraw: crate::Refre
     g.add(&amount);
     into.append(&g);
     let cards = gtk::Box::builder().spacing(12).homogeneous(true).build();
-    let results: Vec<(Strategy, Option<core::Payoff>)> = [Strategy::Avalanche, Strategy::Snowball].into_iter().map(|st| (st, core::payoff(&list, planned, st))).collect();
+    let results: Vec<(Strategy, Option<core::Payoff>)> = [Strategy::Avalanche, Strategy::Snowball, Strategy::Minimums].into_iter().map(|st| (st, core::payoff(&list, planned, st))).collect();
     for (st, p) in &results {
         let c = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "kpi"]).build();
-        c.append(&gtk::Label::builder().label(match st { Strategy::Avalanche => "Highest Rate First (Avalanche)", Strategy::Snowball => "Smallest Balance First (Snowball)" }).xalign(0.0).css_classes(["dim-label", "caption-heading"]).build());
+        let (title, about) = match st {
+            Strategy::Avalanche => ("Highest Rate First (Avalanche)", "Pay the minimums, then every extra dollar to the debt with the highest interest rate. Mathematically the cheapest: the least interest and usually the soonest debt-free."),
+            Strategy::Snowball => ("Smallest Balance First (Snowball)", "Pay the minimums, then every extra dollar to the smallest balance, whatever its rate. Costs a little more, but whole debts disappear sooner, and those early wins help many people keep going (Dave Ramsey's method)."),
+            Strategy::Minimums => ("Minimums Only", "Just what each statement asks for, nothing extra. The minimum shrinks as the balance does, so this is the slowest and dearest way out — the yardstick for the other two."),
+        };
+        c.append(&gtk::Label::builder().label(title).xalign(0.0).css_classes(["dim-label", "caption-heading"]).build());
         match p {
             Some(p) => {
                 let free = fingraph_core::insights::add_months(month_start(today()), p.months as i32);
@@ -428,17 +433,33 @@ fn payoff_section(app: &Rc<App>, s: &Snap, into: &gtk::Box, redraw: crate::Refre
                 }));
             }
         }
+        c.append(&gtk::Label::builder().label(about).xalign(0.0).wrap(true).css_classes(["caption", "dim-label"]).margin_top(6).build());
         cards.append(&c);
     }
     into.append(&cards);
-    if let [(_, Some(a)), (_, Some(b))] = &results[..] {
+    if let [(_, Some(a)), (_, Some(b)), m] = &results[..] {
         let saved = b.interest - a.interest;
-        into.append(&dim(&if saved > Decimal::ZERO {
+        let mut t = if saved > Decimal::ZERO {
             format!("Highest rate first saves {} in interest; smallest first clears its first debt sooner, which some people find keeps them going.", money(saved))
         } else {
             "Both orders cost the same here.".to_string()
-        }));
+        };
+        if let (_, Some(m)) = m {
+            t.push_str(&format!(" Against minimums only, your plan saves {} in interest and {} months.", money(m.interest - a.interest), m.months.saturating_sub(a.months)));
+        }
+        into.append(&dim(&t));
     }
+    into.append(&info_heading("Other Ways to Tackle Debt", "Approaches that change the debts themselves rather than the order you pay them. FinGraph doesn't model these; try them out by typing the new rate above."));
+    let other = self::list();
+    for (t, about) in [
+        ("Hybrid", "Avalanche, except a debt you can clear within a few months goes first. You get an early win without giving up much interest."),
+        ("Snowflaking", "Put small extras — a refund, a sold item, money saved on a bill — straight onto the target debt as they come, on top of the plan."),
+        ("Balance transfer", "Move a high-rate card to one with a low or 0% introductory rate. Worth it if you clear it before the offer ends; check the transfer fee and the rate after."),
+        ("Consolidation loan", "One loan at a lower rate pays off several debts, leaving a single payment. It only helps if the rate really is lower and the cleared cards don't fill up again."),
+    ] {
+        other.append(&adw::ActionRow::builder().title(t).subtitle(about).subtitle_lines(0).build());
+    }
+    into.append(&other);
 }
 
 fn item_dialog(app: &Rc<App>, item: Option<ManualItem>, done: crate::Refresh) {
