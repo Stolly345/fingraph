@@ -1238,7 +1238,7 @@ fn debug_shot(app: &Rc<App>) {
         if let Some(label) = std::env::var("FINGRAPH_CLICK").ok().and_then(|l| l.split(',').nth(clicked.get()).map(str::to_string)) {
             clicked.set(clicked.get() + 1);
             fn find_button(w: &gtk::Widget, label: &str) -> Option<gtk::Button> {
-                if let Some(b) = w.downcast_ref::<gtk::Button>().filter(|b| b.is_mapped() && (b.label().as_deref() == Some(label) || b.child().and_downcast::<gtk::Label>().is_some_and(|l| l.label() == label) || b.child().and_downcast::<adw::ButtonContent>().is_some_and(|c| c.label() == label))) {
+                if let Some(b) = w.downcast_ref::<gtk::Button>().filter(|b| b.is_mapped() && (b.label().as_deref() == Some(label) || b.child().and_downcast::<gtk::Label>().is_some_and(|l| l.label() == label) || b.child().and_downcast::<adw::ButtonContent>().is_some_and(|c| c.label() == label) || b.tooltip_text().as_deref() == Some(label))) {
                     return Some(b.clone());
                 }
                 let mut c = w.first_child();
