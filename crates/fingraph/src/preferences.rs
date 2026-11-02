@@ -170,6 +170,7 @@ fn general(app: &Rc<App>) -> adw::PreferencesPage {
     g.add(&ws);
     g.add(&range);
     g.add(&ccy);
+    g.add(&switch(app, "Check for updates", "Once a day, ask GitHub whether a newer version is out. Nothing about you or your ledger is sent", p.check_updates, |_, p, v| p.check_updates = v));
     page.add(&g);
 
     let look = adw::PreferencesGroup::builder().title("Appearance").build();

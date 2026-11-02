@@ -667,6 +667,64 @@ pub fn watched(rows: &[TxRow], w: &Watch, from: NaiveDate, to: NaiveDate, ccy: C
     (hits.iter().map(|t| -crate::insights::value(t, ccy, fx)).sum(), hits.iter().map(|t| t.id).collect())
 }
 
+// ──────────────────────────────────────────────────────────────── rules of thumb
+
+/// A well-known way to divide take-home pay. Needs are fixed expenses, non-monthly bills and loan
+/// payments; wants are variable spending; saving is whatever's left (savings and extra debt payments).
+pub struct Rule {
+    pub name: &'static str,
+    /// Percent of take-home: needs, wants (`None`: one limit for all spending, in `spend`), saving.
+    pub needs: Option<u8>,
+    pub wants: Option<u8>,
+    pub spend: u8,
+    pub save: u8,
+    pub about: &'static str,
+}
+
+pub const RULES: &[Rule] = &[
+    Rule {
+        name: "50/30/20",
+        needs: Some(50),
+        wants: Some(30),
+        spend: 80,
+        save: 20,
+        about: "Half your take-home on needs (housing, bills, insurance, minimum loan payments), 30% on wants (eating out, shopping, trips), and 20% saved or paid off debt above the minimums. Made popular by Elizabeth Warren and Amelia Warren Tyagi's book All Your Worth.",
+    },
+    Rule {
+        name: "70/20/10",
+        needs: None,
+        wants: None,
+        spend: 70,
+        save: 30,
+        about: "70% for everything you spend, needs and wants alike, 20% saved, and 10% for paying down debt faster (or giving). Simpler than 50/30/20 when needs and wants are hard to tell apart, and it asks for more saving.",
+    },
+    Rule {
+        name: "80/20 (Pay Yourself First)",
+        needs: None,
+        wants: None,
+        spend: 80,
+        save: 20,
+        about: "Move 20% to savings the day you're paid, then spend the other 80% however you like, without tracking categories. The easiest rule to keep; it works best with an automatic transfer on payday.",
+    },
+];
+
+/// Needs, wants and saving as whole percents of `income` (saving can be negative).
+pub fn shares(needs: Decimal, wants: Decimal, income: Decimal) -> Option<(Decimal, Decimal, Decimal)> {
+    if income <= Decimal::ZERO {
+        return None;
+    }
+    let pct = |v: Decimal| (v / income * Decimal::ONE_HUNDRED).round_dp(0);
+    Some((pct(needs), pct(wants), pct(income - needs - wants)))
+}
+
+#[test]
+fn fifty_thirty_twenty_shares() {
+    let d = |v: i64| Decimal::from(v);
+    assert_eq!(shares(d(2900), d(1300), d(5000)), Some((d(58), d(26), d(16))));
+    assert_eq!(shares(d(4000), d(2000), d(5000)).map(|s| s.2), Some(d(-20)));
+    assert_eq!(shares(d(1), d(1), Decimal::ZERO), None);
+}
+
 // ──────────────────────────────────────────────────────────────── monthly close
 
 /// What a month came to, saved when you close it.
@@ -682,6 +740,9 @@ pub struct CloseSummary {
     pub over: usize,
     /// Regular bills that didn't come.
     pub missed: usize,
+    /// Everything budgeted minus everything spent (unbudgeted categories count as spent): under
+    /// budget is positive. `None` with no budgets set.
+    pub variance: Option<Decimal>,
     pub net_worth: Option<Decimal>,
 }
 

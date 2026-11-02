@@ -21,6 +21,7 @@ mod statement;
 mod statements;
 mod transactions;
 mod txedit;
+mod update;
 mod wealth;
 mod wizard;
 
@@ -345,6 +346,7 @@ impl App {
         app.win.present();
         // today's rates (and any a statement still lacks), quietly, when downloads are on
         app.update_rates(false);
+        update::check(&app);
         statements::watch(&app);
         {
             let w = Rc::downgrade(&app);
