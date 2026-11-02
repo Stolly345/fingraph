@@ -47,6 +47,20 @@ fn stat(title: &str, help: &str) -> (gtk::Box, Kpi) {
     (b, Kpi { value, sub })
 }
 
+/// The month Overview's headline speaks for: this month, unless its statements aren't in yet (the newest
+/// statement ends before it) and the newest statement's month has a budget, which then speaks instead.
+fn headline_month(newest: Option<NaiveDate>, today: NaiveDate, budgeted: impl Fn(NaiveDate) -> bool) -> NaiveDate {
+    let this_month = insights::month_start(today);
+    newest.map(insights::month_start).filter(|m| *m < this_month && budgeted(*m)).unwrap_or(this_month)
+}
+
+/// Change a card's title (the label in its title row).
+fn set_caption(card: &gtk::Box, text: &str) {
+    if let Some(l) = card.first_child().and_then(|row| row.first_child()).and_downcast::<gtk::Label>() {
+        l.set_label(text);
+    }
+}
+
 /// The value classes for an amount: red below zero, green otherwise.
 fn sign_classes(d: Decimal, extra: &str) -> [&str; 3] {
     ["value", extra, if d.is_sign_negative() { "amount-out" } else { "amount-in" }]
@@ -181,6 +195,17 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         "Next Big Bill",
         "The soonest of your big yearly bills (insurance, HOA fees, licences), when it's due, and how much of it has been set aside so far. Add or change them in Budget → Edit Plan.",
     );
+    let add_bills = gtk::Button::builder().label("Add Big Bills…").halign(gtk::Align::Start).css_classes(["flat", "small-toggle"]).visible(false).build();
+    {
+        let w = Rc::downgrade(app);
+        add_bills.connect_clicked(move |_| {
+            if let Some(a) = w.upgrade() {
+                let w2 = Rc::downgrade(&a);
+                crate::budget::wizard(&a, Rc::new(move || if let Some(a) = w2.upgrade() { a.refresh() }));
+            }
+        });
+    }
+    c_bill.insert_child_after(&add_bills, c_bill.first_child().as_ref());
     for c in [&c2, &c_run, &c5, &c3, &c4, &c_bill] {
         strip.append(c);
     }
@@ -306,6 +331,10 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             crate::owed::fill(&a, &owed_box);
             crate::budget::fill_overview(&a, &budget_box);
             crate::budget::fill_big_bills(&a, &bills_box);
+            // an empty section takes no room (it used to leave a gap above the charts)
+            for b in [&owed_box, &budget_box, &bills_box] {
+                b.set_visible(b.first_child().is_some());
+            }
             let k = insights::kpis(&rows, &docs, from, to, ccy, &fx, today());
             // a currency with no exchange rate yet is left out of every total, and said so
             let unrated: Vec<&str> = insights::missing_rates(&rows, ccy, &fx).iter().map(|c| c.code()).collect();
@@ -346,14 +375,21 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 k.value.set_css_classes(&sign_classes(net, "tnum"));
                 k.sub.set_label(&format!("In {} · Out {}\n{what}{unrated}", money(inc), money(exp)));
             }
-            match crate::budget::left_this_month(&a) {
+            // the month the headline speaks for: this one, or before its first statement is in, the last
+            // month that has statements (on 2 Nov, October), so nothing reads "CI$ 0.00 spent" for want of data
+            let newest = docs.iter().filter_map(|d| d.period.map(|p| p.1)).max();
+            let this_month = insights::month_start(today());
+            let shown = headline_month(newest, today(), |m| crate::budget::left_in(&a, m).is_some());
+            set_caption(&c_left, &if shown == this_month { "Left to Spend This Month".to_string() } else { format!("Left to Spend in {}", shown.format("%B")) });
+            match crate::budget::left_in(&a, shown) {
                 Some((funded, spent)) => {
                     let left = funded - spent;
                     k_left.value.set_label(&money(left));
                     k_left.value.set_css_classes(&sign_classes(left, "tnum"));
                     k_left.value.set_visible(true);
                     setup.set_visible(false);
-                    k_left.sub.set_label(&format!("{} spent of {} budgeted", money(spent), money(funded)));
+                    let waiting = if shown == this_month { String::new() } else { format!("\n{}'s statements aren't in yet", this_month.format("%B")) };
+                    k_left.sub.set_label(&format!("{} spent of {} budgeted{waiting}", money(spent), money(funded)));
                 }
                 None => {
                     k_left.value.set_visible(false);
@@ -361,18 +397,22 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     k_left.sub.set_label("Your pay, your usual spending and a savings goal, starting from what your statements already show.");
                 }
             }
-            // what the numbers are measured to: the newest statement, so early-month figures read right
-            let newest = docs.iter().filter_map(|d| d.period.map(|p| p.1)).max();
+            // what the numbers are measured to: the newest statement
             fresh_row.set_visible(newest.is_some());
             fresh.set_label(&newest.map(|d| format!("Verified statements to {}", d.format("%d %b %Y"))).unwrap_or_default());
-            // the Big Yearly Bills section below says so when there are none, so the strip only shows a real one
+            // the strip's last slot: the next big bill, or while none are planned, the way to add them
             match crate::budget::next_big_bill(&a) {
                 Some((name, due, amount, aside)) => {
-                    c_bill.set_visible(true);
+                    k_bill.value.set_visible(true);
+                    add_bills.set_visible(false);
                     k_bill.value.set_label(&money(amount));
                     k_bill.sub.set_label(&format!("{name} · due {}\n{} set aside so far", due.format("%d %b %Y"), money(aside)));
                 }
-                None => c_bill.set_visible(false),
+                None => {
+                    k_bill.value.set_visible(false);
+                    add_bills.set_visible(true);
+                    k_bill.sub.set_label("None planned yet: insurance, licences, school terms");
+                }
             }
             {
                 // cash: the latest balance of every visible account that isn't a card or loan
@@ -621,4 +661,22 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     page.append(&review);
     page.append(&stack);
     (page.upcast(), refresh)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn headline_speaks_for_the_last_month_with_statements() {
+        let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        // 2 Nov, statements to 31 Oct, October budgeted: October
+        assert_eq!(headline_month(Some(d(10, 31)), d(11, 2), |_| true), d(10, 1));
+        // no October budget: this month, whatever it shows
+        assert_eq!(headline_month(Some(d(10, 31)), d(11, 2), |_| false), d(11, 1));
+        // November's first statement is in: November
+        assert_eq!(headline_month(Some(d(11, 15)), d(11, 20), |_| true), d(11, 1));
+        // no statements at all: this month
+        assert_eq!(headline_month(None, d(11, 2), |_| true), d(11, 1));
+    }
 }

@@ -1084,6 +1084,31 @@ pub fn info_heading(text: &str, help: &str) -> gtk::Box {
     with_info(&heading(text), help)
 }
 
+/// The top of a summary page (Net Worth, Outlook, Budget), as Overview does it: one card, the page's
+/// answer large on the left (two fifths), the other numbers quiet beside it. Returns the card and,
+/// for each number, its (value, line below) labels: the lead first.
+pub fn summary_row(lead: (&str, &str), rest: &[(&str, &str)]) -> (gtk::Grid, Vec<(gtk::Label, gtk::Label)>) {
+    let grid = gtk::Grid::builder().column_spacing(24).column_homogeneous(true).css_classes(["card", "summary"]).build();
+    let cell = |title: &str, help: &str, class: &str| {
+        let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).css_classes([class]).build();
+        b.append(&info_caption(title, help));
+        let v = gtk::Label::builder().xalign(0.0).css_classes(["value", "tnum"]).ellipsize(gtk::pango::EllipsizeMode::End).build();
+        let s = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label", "caption"]).build();
+        b.append(&v);
+        b.append(&s);
+        (b, (v, s))
+    };
+    let (b, first) = cell(lead.0, lead.1, "lead");
+    grid.attach(&b, 0, 0, 2, 1);
+    let mut out = vec![first];
+    for (i, (t, h)) in rest.iter().enumerate() {
+        let (b, n) = cell(t, h, "stat");
+        grid.attach(&b, 2 + i as i32, 0, 1, 1);
+        out.push(n);
+    }
+    (grid, out)
+}
+
 /// A small card title (the KPI tiles) with its ⓘ.
 pub fn info_caption(text: &str, help: &str) -> gtk::Box {
     with_info(&gtk::Label::builder().label(text).xalign(0.0).css_classes(["dim-label", "caption-heading"]).build(), help)
@@ -1116,11 +1141,15 @@ fn css() {
          .kpi.headline { padding: 18px 20px; }
          .kpi.headline .value { font-size: 2.6em; }
          .stat-strip { padding: 14px 20px; }
+         .summary { padding: 18px 20px; }
+         .summary .lead .value { font-size: 2.4em; font-weight: 800; }
          .stat .value { font-size: 1.2em; font-weight: 700; }
          .verified { color: @success_color; }
          .verified image { -gtk-icon-size: 12px; }
          .small-toggle { min-height: 0; padding: 2px 10px; font-size: 0.85em; }
          button.row-badge { min-height: 0; padding: 1px 8px; border-radius: 99px; font-size: 0.8em; font-weight: 600; background: alpha(@window_fg_color, 0.08); }
+         label.row-badge { padding: 1px 8px; border-radius: 99px; font-size: 0.8em; font-weight: 600; }
+         .row-badge.needs { background: alpha(@warning_bg_color, 0.18); color: @warning_color; }
          button.row-badge.business { background: alpha(@accent_bg_color, 0.18); color: @accent_color; }
          .chart-card { padding: 12px; }
          .info-button { min-width: 22px; min-height: 22px; padding: 0; opacity: 0.6; }

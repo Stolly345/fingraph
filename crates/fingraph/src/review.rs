@@ -56,6 +56,59 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         });
     }
 
+    // the keyboard: 1–6 pick a chip, Enter takes the highlighted answer, J and K move between merchants.
+    // Bubble phase, so a field you're typing in (the payee) keeps its own keys.
+    {
+        let (list, card) = (list.clone(), card.clone());
+        let keys = gtk::EventControllerKey::builder().propagation_phase(gtk::PropagationPhase::Bubble).build();
+        keys.connect_key_pressed(move |_, key, _, mods| {
+            if mods.intersects(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK) {
+                return glib::Propagation::Proceed;
+            }
+            fn buttons(w: &gtk::Widget, class: &str, out: &mut Vec<gtk::Button>) {
+                if let Some(b) = w.downcast_ref::<gtk::Button>().filter(|b| b.has_css_class(class) && b.is_mapped() && b.is_sensitive()) {
+                    out.push(b.clone());
+                }
+                let mut c = w.first_child();
+                while let Some(ch) = c {
+                    buttons(&ch, class, out);
+                    c = ch.next_sibling();
+                }
+            }
+            let root: gtk::Widget = card.clone().upcast();
+            let step = |d: i32| {
+                let i = list.selected_row().map_or(0, |r| r.index()) + d;
+                if let Some(r) = list.row_at_index(i.max(0)) {
+                    list.select_row(Some(&r));
+                }
+            };
+            match key {
+                gtk::gdk::Key::_1 | gtk::gdk::Key::_2 | gtk::gdk::Key::_3 | gtk::gdk::Key::_4 | gtk::gdk::Key::_5 | gtk::gdk::Key::_6 => {
+                    let n = key.to_unicode().and_then(|c| c.to_digit(10)).unwrap_or(0) as usize;
+                    let mut chips = Vec::new();
+                    buttons(&root, "chip", &mut chips);
+                    match chips.get(n.saturating_sub(1)) {
+                        Some(b) => b.emit_clicked(),
+                        None => return glib::Propagation::Proceed,
+                    }
+                }
+                gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter => {
+                    let mut lead = Vec::new();
+                    buttons(&root, "suggested-action", &mut lead);
+                    match lead.first() {
+                        Some(b) => b.emit_clicked(),
+                        None => return glib::Propagation::Proceed,
+                    }
+                }
+                gtk::gdk::Key::j => step(1),
+                gtk::gdk::Key::k => step(-1),
+                _ => return glib::Propagation::Proceed,
+            }
+            glib::Propagation::Stop
+        });
+        stack.add_controller(keys);
+    }
+
     let refresh: crate::Refresh = {
         let w = Rc::downgrade(app);
         let (list, groups, stack, place) = (list.clone(), groups.clone(), stack.clone(), place.clone());

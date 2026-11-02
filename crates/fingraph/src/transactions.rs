@@ -374,11 +374,11 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 i.update_property(&[gtk::accessible::Property::Label(tip)]);
                 i
             };
-            b.append(&match t.review {
-                ReviewStatus::NeedsReview => icon("dialog-information-symbolic", "Needs review"),
-                ReviewStatus::AutoCategorized => icon("emblem-system-symbolic", "Categorized by a learned rule"),
-                ReviewStatus::Confirmed => icon("object-select-symbolic", "Confirmed"),
-            });
+            // only what needs you gets a mark: a row a rule sorted, or you confirmed, is simply normal
+            if t.review == ReviewStatus::NeedsReview {
+                let l = gtk::Label::builder().label("Review").tooltip_text("Not sorted yet: pick a category, or answer it in To Review").valign(gtk::Align::Center).css_classes(["row-badge", "needs"]).build();
+                b.append(&l);
+            }
             if t.transfer_peer.is_some() {
                 b.append(&icon("media-playlist-repeat-symbolic", "Internal transfer: matched with your other account, excluded from spending"));
             }

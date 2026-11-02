@@ -144,9 +144,9 @@ pub fn alerts(app: &App) -> Vec<(String, Decimal, Decimal, Alert)> {
 }
 
 /// This month's budget for Overview: (funded, spent) in budgeted categories, None without a budget.
-pub fn left_this_month(app: &App) -> Option<(Decimal, Decimal)> {
+/// Left to spend in the month starting `m`: (funded, spent) across the budgeted categories.
+pub fn left_in(app: &App, m: NaiveDate) -> Option<(Decimal, Decimal)> {
     let s = snap(app);
-    let m = month_start(today());
     let end = add_months(m, 1).pred_opt().unwrap_or(m);
     let env = envs(app, &s, m);
     let rolls = app.db.rollovers(&s.scope);
@@ -213,7 +213,7 @@ pub fn fill_overview(app: &Rc<App>, into: &gtk::Box) {
 }
 
 /// Overview's two big-bill cards: the next ones due with what's set aside, and which months the
-/// big spends land in over the next year. Without any, one card offers to add them.
+/// big spends land in over the next year. Without any, nothing (the strip's Next Big Bill offers to add them).
 pub fn fill_big_bills(app: &Rc<App>, into: &gtk::Box) {
     clear(into);
     let s = snap(app);
@@ -224,22 +224,8 @@ pub fn fill_big_bills(app: &Rc<App>, into: &gtk::Box) {
         c.append(&info_heading(title, help));
         c
     };
+    // none yet: Overview's strip offers to add them, so no card stands empty here
     if s.funds.is_empty() {
-        let c = card(
-            "Big Yearly Bills",
-            "Car and home insurance, HOA fees, licences, school terms: bills that don't come every month. Add them and FinGraph sets a share aside each month, shows them here before they're due, and counts them in your budget.",
-        );
-        c.append(&dim("None planned yet. Add the big bills you pay once or a few times a year, so they're saved for before they land."));
-        let add = gtk::Button::builder().label("Add Big Bills…").halign(gtk::Align::Start).css_classes(["pill"]).build();
-        let w = Rc::downgrade(app);
-        add.connect_clicked(move |_| {
-            if let Some(a) = w.upgrade() {
-                let w2 = Rc::downgrade(&a);
-                wizard(&a, Rc::new(move || if let Some(a) = w2.upgrade() { a.refresh() }));
-            }
-        });
-        c.append(&add);
-        into.append(&c);
         return;
     }
     let row = gtk::Box::builder().spacing(12).homogeneous(true).build();
@@ -345,16 +331,6 @@ fn usual_text(name: &str, u: Decimal, subs: Decimal, one_off: Decimal, ccy: Curr
     }
 }
 
-fn kpi(title: &str, help: &str) -> (gtk::Box, gtk::Label, gtk::Label) {
-    let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).css_classes(["card", "kpi"]).build();
-    b.append(&info_caption(title, help));
-    let v = gtk::Label::builder().xalign(0.0).css_classes(["value", "tnum"]).build();
-    let s = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label", "caption"]).build();
-    b.append(&v);
-    b.append(&s);
-    (b, v, s)
-}
-
 /// Loan and card instalments (Loan Payments) per month: the median of the last six months.
 fn usual_loans(s: &Snap, m: NaiveDate) -> Decimal {
     let mut v: Vec<Decimal> = (1..=MONTHS)
@@ -394,24 +370,13 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     nav.append(&fill);
     body.append(&nav);
 
-    let ribbon = gtk::Box::builder().spacing(12).homogeneous(true).build();
-    let (k1, budgeted, budgeted_s) = kpi(
-        "Budgeted",
-        "This month's budgets added up across your categories. If money rolled over from last month or you moved money between categories, the line below shows what you actually have to spend.",
+    // the answer first: what's left, then what it's made of
+    let (summary, nums) = crate::summary_row(
+        ("Left", "What's left in your budgeted categories: the budget (with rollovers and moves) minus what's been spent in them. Red means you're over."),
+        &[("Budgeted", "This month's budgets added up across your categories. If money rolled over from last month or you moved money between categories, the line below shows what you actually have to spend."), ("Spent", "What you've spent this month as far as your statements go, split into categories with a budget and categories without one. Statements arrive after the month ends, so it fills in late."), ("Heading For", "Where this month's spending ends up if you keep the same pace: what's spent up to your newest statement, stretched to the whole month. A big bill early in the month makes it look higher than it will be.")],
     );
-    let (k2, spent, spent_s) = kpi(
-        "Spent",
-        "What you've spent this month as far as your statements go, split into categories with a budget and categories without one. Statements arrive after the month ends, so it fills in late.",
-    );
-    let (k3, left, left_s) = kpi("Left", "What's left in your budgeted categories: the budget (with rollovers and moves) minus what's been spent in them. Red means you're over.");
-    let (k4, pace, pace_s) = kpi(
-        "Heading For",
-        "Where this month's spending ends up if you keep the same pace: what's spent up to your newest statement, stretched to the whole month. A big bill early in the month makes it look higher than it will be.",
-    );
-    for k in [&k1, &k2, &k3, &k4] {
-        ribbon.append(k);
-    }
-    body.append(&ribbon);
+    let [(left, left_s), (budgeted, budgeted_s), (spent, spent_s), (pace, pace_s)] = <[(gtk::Label, gtk::Label); 4]>::try_from(nums).unwrap();
+    body.append(&summary);
 
     // the plan: pay in, budget out, what's left to save, and where that leads
     let plan_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
@@ -515,7 +480,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             title.set_label(&m.format("%B %Y").to_string());
             next.set_sensitive(m < month_start(today()));
             setup.set_label(if s.plan.is_some() { "Edit Plan…" } else { "Set Up Budget…" });
-            setup.set_css_classes(if s.plan.is_none() { &["suggested-action"] } else { &[] });
+            // the colour points at the next step: only while there's no budget at all
+            setup.set_css_classes(if s.plan.is_none() && s.budgets.is_empty() { &["suggested-action"] } else { &[] });
             {
                 // fill: categories without a budget get their usual amount
                 let (w, sc, redraw, usual, cats) = (Rc::downgrade(&a), s.scope.clone(), redraw.clone(), usual.clone(), s.cats.clone());
@@ -554,7 +520,14 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             spent.set_label(&money(total_s));
             spent_s.set_label(&format!("{} in budgeted categories · {} outside", money(in_b), money(total_s - in_b)));
             left.set_label(&money(funded - in_b));
-            left_s.set_label(if funded.is_zero() { "Set a budget below, or fill it from your spending" } else if in_b > funded { "Over budget" } else { "Left in budgeted categories" });
+            // the line under the headline says what it's out of, not the title again
+            left_s.set_label(&if funded.is_zero() {
+                "Set a budget below, or fill it from your spending".to_string()
+            } else if in_b > funded {
+                format!("Over budget: {} spent of {}", money(in_b), money(funded))
+            } else {
+                format!("{} spent of {} in budgeted categories", money(in_b), money(funded))
+            });
             left.set_css_classes(&["value", "tnum", if in_b > funded { "amount-out" } else { "amount-in" }]);
             let proj = if share.is_zero() { total_s } else { (total_s / share).round_dp(2) };
             pace.set_label(&money(proj));

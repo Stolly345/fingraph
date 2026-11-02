@@ -270,9 +270,8 @@ pub fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn(
         let Some(c) = cats.iter().find(|c| c.id == *id) else { continue };
         // one highlighted answer: the best guess
         let b = gtk::Button::builder().label(&c.name).css_classes(if i == 0 && !lead.is_empty() { vec!["chip", "suggested-action"] } else { vec!["chip"] }).build();
-        if let Some(p) = c.parent_id.and_then(|p| cats.iter().find(|x| x.id == p)) {
-            b.set_tooltip_text(Some(&format!("{} · {}", c.name, p.name)));
-        }
+        let parent = c.parent_id.and_then(|p| cats.iter().find(|x| x.id == p)).map(|p| format!(" · {}", p.name)).unwrap_or_default();
+        b.set_tooltip_text(Some(&format!("{}{parent} (key {})", c.name, i + 1)));
         let (w, g2, id, payee, scope, next, ans, rec) = (Rc::downgrade(app), g.clone(), Some(*id), payee.clone(), scope.clone(), next.clone(), answered.clone(), recurring.clone());
         b.connect_clicked(move |_| {
             if let Some(a) = w.upgrade() {
@@ -301,6 +300,8 @@ pub fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn(
         });
     }
     chips_box.append(&more);
+    // the keys, said once where they apply
+    chips_box.append(&gtk::Label::builder().label("Keys: 1–6 pick a category · Enter takes the highlighted one · J and K move between merchants").xalign(0.0).wrap(true).css_classes(["dim-label", "caption"]).build());
 
     let buttons = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
     match g.kind {

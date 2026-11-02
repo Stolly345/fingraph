@@ -105,7 +105,10 @@ fn doc_row(app: &Rc<App>, d: &DocumentRow) -> adw::ActionRow {
     }
     row.add_suffix(&reconciliation_pill(&d.reconciliation, d.currency));
     if !d.review.is_empty() {
-        row.set_subtitle(&glib::markup_escape_text(&format!("{} · waiting for review: {}", row.subtitle().unwrap_or_default(), d.review.iter().map(|r| r.text()).collect::<Vec<_>>().join("; "))));
+        // a short status on the row; the reasons are in Approve… (and on hover)
+        let why = d.review.iter().map(|r| r.text()).collect::<Vec<_>>().join("; ");
+        row.set_subtitle(&glib::markup_escape_text(&format!("{} · waiting for your approval", row.subtitle().unwrap_or_default())));
+        row.set_tooltip_text(Some(&format!("{}\nWaiting because {why}", d.filename)));
         let approve = gtk::Button::builder().label("Approve…").valign(gtk::Align::Center).css_classes(["suggested-action"]).build();
         row.add_suffix(&approve);
         let (w, id, name, why, n) = (Rc::downgrade(app), d.id, d.filename.clone(), d.review.clone(), d.tx_count);
