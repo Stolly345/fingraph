@@ -1,6 +1,6 @@
 pkgbase = fingraph-bin
 	pkgdesc = Local-first ledger and statement scanner for Cayman bank statements
-	pkgver = 0.2.15
+	pkgver = 0.2.17
 	pkgrel = 1
 	url = https://github.com/Stolly345/fingraph
 	arch = x86_64
@@ -16,12 +16,12 @@ pkgbase = fingraph-bin
 	depends = poppler
 	optdepends = tesseract: reads scanned (picture-only) statements
 	optdepends = tesseract-data-eng: English data for tesseract
-	optdepends = curl: daily exchange rates (when switched on)
+	optdepends = curl: update check and daily exchange rates
 	provides = fingraph
 	conflicts = fingraph
 	options = !debug
 	options = !strip
-	source = https://github.com/Stolly345/fingraph/releases/download/v0.2.15/fingraph_0.2.15-1_amd64.deb
-	sha256sums = b5c954fbca2eb9c43d85e7dec1bf67565dd6feec60433539863fbe43f77b7b4a
+	source = https://github.com/Stolly345/fingraph/releases/download/v0.2.17/fingraph_0.2.17-1_amd64.deb
+	sha256sums = aaebef01f4cde708a9630bd6116746f3c0d529c99adda16e64c1c9e289d9d376
 
 pkgname = fingraph-bin

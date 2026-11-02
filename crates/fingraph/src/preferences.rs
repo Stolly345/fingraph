@@ -660,7 +660,7 @@ fn workspaces(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPa
 fn data(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPage {
     let p = app.db.prefs();
     let page = adw::PreferencesPage::builder().name("data").title("Data").icon_name("drive-harddisk-symbolic").build();
-    let where_ = adw::PreferencesGroup::builder().title("Your Ledger").description("Your statements and ledger stay on this computer. The only thing ever sent is a request for exchange rates (currency codes and dates), and only with Download exchange rates on (Money).").build();
+    let where_ = adw::PreferencesGroup::builder().title("Your Ledger").description("Your statements and ledger stay on this computer. Only two requests are ever sent: a daily check for a newer release on GitHub (Check for updates, General), and exchange rates (currency codes and dates), only with Download exchange rates on (Money).").build();
     let path = app.db.path().unwrap_or_default();
     let ledger = adw::ActionRow::builder()
         .title(glib::markup_escape_text(&path.display().to_string()))

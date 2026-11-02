@@ -409,7 +409,7 @@ impl App {
                     .application_name("FinGraph")
                     .application_icon(APP_ID)
                     .version(env!("CARGO_PKG_VERSION"))
-                    .comments("Local-first ledger and 5-pass statement scanner for bank statements. Your statements and ledger never leave this computer; with exchange-rate downloads on, only currency codes and dates are sent.")
+                    .comments("Local-first ledger and 5-pass statement scanner for bank statements. Your statements and ledger never leave this computer. It checks GitHub once a day for a newer release (can be turned off), and with exchange-rate downloads on, only currency codes and dates are sent.")
                     .license_type(gtk::License::MitX11)
                     .build();
                 d.present(Some(&a.win));

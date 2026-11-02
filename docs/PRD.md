@@ -602,7 +602,8 @@ only).
   Sort What's New (uncategorised count, Start Smart Triage) → Budget (overspent first, Cover…) →
   Bills (the checklist below) → Goals (progress; record contributions to unlinked goals) → Close the
   Month (money in, spending, saved and rate, Age of Money, net worth, over-budget count, bills
-  missed; earlier closes for comparison; Close / Close Again / Reopen). Closing also remembers the
+  missed, Against budget = total budgeted − total spent (0.2.17, `CloseSummary.variance`; unbudgeted
+  categories count as spent, older closes leave it out); earlier closes for comparison; Close / Close Again / Reopen). Closing also remembers the
   balance forecast for the end of next month.
 - **Outlook** page (between statements):
   - **Balance forecast** per bank account (not cards/loans): from the last verified balance, regular
@@ -634,9 +635,17 @@ only).
     ≤ 80% of the plan, else On track; without — pace since creation (≥ 110% Ahead, ≥ 90% On track).
   - **Paying Off Debt** (PocketGuard): cards/loans owing money + hand-added debts; rate estimated
     from the last three months of interest charges against what's owed now (typed rate wins,
-    `apr:<id>`); minimum 3% of the balance, at least CI$ 25; avalanche vs snowball side by side
-    (debt-free month, interest, payoff order) for the monthly amount (default the plan's loan
-    payments, else the minimums).
+    `apr:<id>`); minimum 3% of the balance, at least CI$ 25; avalanche vs snowball vs minimums only
+    (0.2.17: `Strategy::Minimums`, the shrinking minimum and nothing extra, the yardstick) side by side
+    (debt-free month, interest, payoff order, a plain-English explanation per card) for the monthly
+    amount (default the plan's loan payments, else the minimums), and what the plan saves against
+    minimums only. "Other Ways to Tackle Debt" explains hybrid, snowflaking, balance transfer and
+    consolidation loans (text only, not modelled).
+  - **Budgeting Rules of Thumb** (Budget page, under Fixed vs Variable, 0.2.17): needs (fixed +
+    non-monthly bills + loan payments) / wants (variable) / saving (the rest) as % of take-home
+    (`budget::shares`) against `budget::RULES` — 50/30/20, 70/20/10 and 80/20 Pay Yourself First, each
+    with its explanation and a verdict in points over/short — plus zero-based explained. Needs the
+    pay plan. Came from a Mastodon reply suggesting 50/30/20 and one monthly variance number.
 - **Combined Statement**: every transaction of the ticked accounts (default all in the workspace)
   in date order, a heading per month (in / out / net, transfers not counted, closing combined
   balance), the combined balance after each line (printed balances, else carried from the
@@ -768,6 +777,12 @@ Fixes found while testing the guide on the owner's real statements:
   image, then delete the ledger. The images stay out of the `.deb`.
 
 ---
+
+- **Update notice** (0.2.17, `crates/fingraph/src/update.rs`, same as Kestrel): at startup, at most
+  once a day (`last_update_check` setting, stamped before the request), `curl` reads the tag from
+  the `releases/latest` redirect; newer → toast with **View Release** (opens the page; nothing is
+  downloaded or installed). `Prefs.check_updates`, default on, Preferences → General. README,
+  About, Preferences → Data and the `.deb` description list it.
 
 ## 11. Quality
 
