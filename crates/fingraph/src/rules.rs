@@ -10,6 +10,9 @@ use std::rc::Rc;
 
 use crate::{App, today};
 
+/// The Subscriptions page's sort orders (index saved in `Prefs::subscription_sort`).
+const SUB_SORTS: [&str; 6] = ["Date: Newest First", "Date: Oldest First", "Amount: Highest First", "Amount: Lowest First", "Name: A to Z", "Name: Z to A"];
+
 /// Which page: Subscriptions (checked often) or Rules & Categories (set up once).
 #[derive(Clone, Copy, PartialEq)]
 pub enum Part {
@@ -27,6 +30,23 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
     suffix.append(&gtk::Button::builder().label("Rescan…").css_classes(["flat"]).action_name("win.rescan").build());
     suffix.append(&add);
     rules.set_header_suffix(Some(&suffix));
+    // sort the subscriptions by date, amount or name, either way round
+    let sort = gtk::DropDown::builder().model(&gtk::StringList::new(&SUB_SORTS)).valign(gtk::Align::Center).tooltip_text("Sort by").build();
+    sort.set_selected(app.db.prefs().subscription_sort.min(SUB_SORTS.len() as u32 - 1));
+    {
+        let w = Rc::downgrade(app);
+        sort.connect_selected_notify(move |d| {
+            let Some(a) = w.upgrade() else { return };
+            let mut p = a.db.prefs();
+            if p.subscription_sort != d.selected() {
+                p.subscription_sort = d.selected();
+                if a.db.save_prefs(&p).is_ok() {
+                    a.refresh();
+                }
+            }
+        });
+    }
+    subs.set_header_suffix(Some(&sort));
     if part == Part::Subscriptions {
         page.add(&subs);
     } else {
@@ -59,9 +79,11 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
 
     let refresh: crate::Refresh = {
         let w = Rc::downgrade(app);
-        let (subs, rules) = (subs.clone(), rules.clone());
+        let (subs, rules, page) = (subs.clone(), rules.clone(), page.clone());
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
+            // keep your place: the rows are rebuilt, which would otherwise jump back to the top
+            keep_scroll(&page);
             for r in sub_rows.borrow_mut().drain(..) {
                 subs.remove(&r);
             }
@@ -71,7 +93,15 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
             if part == Part::Subscriptions {
                 let rows = a.all_rows();
                 let fx = a.db.fx().unwrap_or_default();
-                let list = insights::subscriptions(&rows, a.display(), &fx, today());
+                let mut list = insights::subscriptions(&rows, a.display(), &fx, today());
+                match a.db.prefs().subscription_sort {
+                    0 => list.sort_by_key(|x| std::cmp::Reverse(x.last_charged)),
+                    1 => list.sort_by_key(|x| x.last_charged),
+                    3 => list.sort_by_key(|x| x.annual),
+                    4 => list.sort_by_key(|x| x.payee.to_lowercase()),
+                    5 => list.sort_by_key(|x| std::cmp::Reverse(x.payee.to_lowercase())),
+                    _ => list.sort_by_key(|x| std::cmp::Reverse(x.annual)),
+                }
                 let total: fingraph_core::Decimal = list.iter().filter(|s| s.active).map(|s| s.annual).sum();
                 subs.set_description(Some(&format!("{} active · {} a year", list.iter().filter(|s| s.active).count(), a.money(total))));
                 if list.is_empty() {
@@ -99,7 +129,7 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
                             s.charges,
                             if s.charges == 1 { "" } else { "s" },
                             s.last_rise.map(|(o, n, _)| format!(" · ▲ price rose {o} → {n}")).unwrap_or_default(),
-                            if s.active { "" } else { " · lapsed" }
+                            if s.cancelled { " · cancelled" } else if s.active { "" } else { " · lapsed" }
                         )))
                         .subtitle_lines(3)
                         .build();
@@ -134,7 +164,50 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
                         });
                     }
                     r.add_suffix(&cycle);
-                    r.add_suffix(&gtk::Label::builder().label(format!("{}/yr", a.money(s.annual))).css_classes(["tnum", "heading"]).build());
+                    // the amount: click it to say it's cancelled (or running after all)
+                    let amount = gtk::Label::builder().css_classes(["tnum", "heading"]).build();
+                    let yearly = glib::markup_escape_text(&format!("{}/yr", a.money(s.annual)));
+                    amount.set_markup(&if s.cancelled { format!("<s>{yearly}</s>") } else { yearly.to_string() });
+                    let status = gtk::MenuButton::builder()
+                        .child(&amount)
+                        .valign(gtk::Align::Center)
+                        .css_classes(["flat"])
+                        .tooltip_text(if s.cancelled { "Cancelled — click if it's still running" } else { "Click to mark it cancelled" })
+                        .build();
+                    {
+                        let (w, stem, was) = (Rc::downgrade(&a), s.stem.clone(), s.cancelled);
+                        status.set_create_popup_func(move |mb| {
+                            let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+                            let pop = gtk::Popover::builder().child(&col).build();
+                            for (label, cancel) in [("Still Active", false), ("Cancelled", true)] {
+                                let b = gtk::CheckButton::builder().label(label).active(cancel == was).build();
+                                if let Some(first) = col.first_child().and_downcast::<gtk::CheckButton>() {
+                                    b.set_group(Some(&first));
+                                }
+                                let (w, stem, pop) = (w.clone(), stem.clone(), pop.clone());
+                                b.connect_toggled(move |b| {
+                                    if !b.is_active() || cancel == was {
+                                        return;
+                                    }
+                                    pop.popdown();
+                                    let Some(a) = w.upgrade() else { return };
+                                    let mut p = a.db.prefs();
+                                    if cancel {
+                                        p.cancelled.insert(stem.clone(), today().format("%Y-%m-%d").to_string());
+                                    } else {
+                                        p.cancelled.remove(&stem);
+                                    }
+                                    if a.db.save_prefs(&p).is_ok() {
+                                        a.refresh();
+                                        a.toast(if cancel { "Marked cancelled: no longer counted" } else { "Counted again" });
+                                    }
+                                });
+                                col.append(&b);
+                            }
+                            mb.set_popover(Some(&pop));
+                        });
+                    }
+                    r.add_suffix(&status);
                     if let Some(url) = fingraph_core::merchants::manage_url(&format!("{} {}", s.payee, s.stem)) {
                         let manage = gtk::Button::builder().icon_name("adw-external-link-symbolic").tooltip_text(format!("Manage or cancel — opens {url}")).valign(gtk::Align::Center).css_classes(["flat", "circular"]).build();
                         let w = Rc::downgrade(&a);
@@ -237,6 +310,41 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
         })
     };
     (page.upcast(), refresh)
+}
+
+/// The page's scroller.
+fn scroller(w: &gtk::Widget) -> Option<gtk::ScrolledWindow> {
+    if let Some(sw) = w.downcast_ref::<gtk::ScrolledWindow>() {
+        return Some(sw.clone());
+    }
+    let mut c = w.first_child();
+    while let Some(ch) = c {
+        if let Some(x) = scroller(&ch) {
+            return Some(x);
+        }
+        c = ch.next_sibling();
+    }
+    None
+}
+
+/// Put the scroll position back once the rebuilt rows are laid out, and hold it for a few frames.
+fn keep_scroll(page: &adw::PreferencesPage) {
+    let Some(sw) = scroller(page.upcast_ref()) else { return };
+    let adj = sw.vadjustment();
+    let at = adj.value();
+    if at <= 0.0 {
+        return;
+    }
+    let frames = std::cell::Cell::new(0);
+    sw.add_tick_callback(move |sw, _| {
+        let adj = sw.vadjustment();
+        frames.set(frames.get() + 1);
+        // held for a few frames: the closing menu hands focus back, which can scroll too
+        if adj.upper() - adj.page_size() >= at {
+            adj.set_value(at);
+        }
+        if frames.get() > 8 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+    });
 }
 
 /// New rule, or edit one (saved as a new rule replacing the old).

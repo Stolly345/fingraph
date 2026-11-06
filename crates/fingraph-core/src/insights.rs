@@ -426,12 +426,30 @@ pub struct Subscription {
     pub monthly: Decimal,
     pub annual: Decimal,
     pub active: bool,
+    /// You said you cancelled it, and it hasn't charged since (so it isn't active either).
+    pub cancelled: bool,
     pub tx_ids: Vec<i64>,
     /// The billing cycle is a guess (one charge, recent): set it on the Subscriptions page.
     pub cadence_guessed: bool,
 }
 
 static CADENCE: LazyLock<RwLock<BTreeMap<String, i64>>> = LazyLock::new(Default::default);
+
+static CANCELLED: LazyLock<RwLock<BTreeMap<String, NaiveDate>>> = LazyLock::new(Default::default);
+
+/// Bills and subscriptions you said you cancelled (merchant → the day you said so). From `Prefs::apply_globals`.
+pub fn set_cancelled(m: &BTreeMap<String, NaiveDate>) {
+    if let Ok(mut c) = CANCELLED.write() {
+        *c = m.clone();
+    }
+}
+
+/// Cancelled, and no charge from it since: a charge after the day you cancelled means it's back.
+/// Checked by both spellings of the merchant (the subscription's and the bill rhythm's).
+pub fn is_cancelled(t: &TxRow) -> bool {
+    let Ok(c) = CANCELLED.read() else { return false };
+    [merchant_stem(&t.raw_description, &t.memo), rules::payer_key(&t.raw_description, &t.memo)].iter().any(|k| c.get(k).is_some_and(|&d| t.posted <= d))
+}
 
 /// Billing cycles you set on the Subscriptions page (merchant → days). From `Prefs::apply_globals`.
 pub fn set_cadence_overrides(m: &BTreeMap<String, i64>) {
@@ -497,13 +515,33 @@ pub fn subscriptions(rows: &[TxRow], ccy: Currency, fx: &Fx, today: NaiveDate) -
                 charges: v.len(),
                 monthly,
                 annual: round2(latest_disp * per_year),
-                active: (today - last.posted).num_days() <= 2 * cad + 7,
+                active: (today - last.posted).num_days() <= 2 * cad + 7 && !is_cancelled(last),
+                cancelled: is_cancelled(last),
                 tx_ids: v.iter().map(|t| t.id).collect(),
                 cadence_guessed: guessed,
                 stem,
             }
         })
         .collect();
+    // cancelling a service covers every spelling of it (HULU, HLU*HULUPLUS): same name, and no
+    // charge since the day you cancelled
+    let gone: BTreeMap<String, NaiveDate> = {
+        let c = CANCELLED.read().map(|c| c.clone()).unwrap_or_default();
+        let mut m: BTreeMap<String, NaiveDate> = BTreeMap::new();
+        for s in out.iter().filter(|s| s.cancelled) {
+            if let Some(&d) = c.get(&s.stem).or_else(|| c.get(&rules::payer_key(&s.stem, ""))) {
+                let e = m.entry(s.payee.to_lowercase()).or_insert(d);
+                *e = (*e).max(d);
+            }
+        }
+        m
+    };
+    for s in out.iter_mut().filter(|s| !s.cancelled) {
+        if gone.get(&s.payee.to_lowercase()).is_some_and(|&d| s.last_charged <= d) {
+            s.cancelled = true;
+            s.active = false;
+        }
+    }
     out.sort_by_key(|x| std::cmp::Reverse(x.monthly));
     out
 }
@@ -1007,6 +1045,29 @@ pub(crate) mod tests {
         set_cadence_overrides(&[(s.stem.clone(), 30)].into_iter().collect());
         assert_eq!((vpn().cadence_days, vpn().cadence_guessed), (30, false));
         set_cadence_overrides(&BTreeMap::new());
+    }
+
+    #[test]
+    fn cancelled_until_it_charges_again() {
+        let d = |m, dd| NaiveDate::from_ymd_opt(2026, m, dd).unwrap();
+        let mut rows: Vec<TxRow> = (1..=9).map(|m| row(m as i64, d(m, 5), "ZZTESTFLIX MONTHLY", "-12.00", "Subscriptions & Digital", "")).collect();
+        for r in &mut rows {
+            r.is_subscription = true;
+        }
+        let fx = Fx::default();
+        let sub = |rows: &[TxRow]| subscriptions(rows, Currency::KYD, &fx, d(10, 1)).into_iter().find(|s| s.stem.contains("ZZTESTFLIX")).unwrap();
+        assert!(sub(&rows).active);
+        let stem = sub(&rows).stem;
+        set_cancelled(&[(stem.clone(), d(9, 20))].into_iter().collect());
+        let s = sub(&rows);
+        assert!(s.cancelled && !s.active, "cancelled: no longer counted");
+        // a charge after the day you cancelled brings it back
+        let mut again = row(99, d(9, 25), "ZZTESTFLIX MONTHLY", "-12.00", "Subscriptions & Digital", "");
+        again.is_subscription = true;
+        rows.push(again);
+        let s = sub(&rows);
+        assert!(!s.cancelled && s.active);
+        set_cancelled(&BTreeMap::new());
     }
 
     #[test]

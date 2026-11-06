@@ -13,6 +13,7 @@ mod guide;
 mod outlook;
 mod owed;
 mod picker;
+mod planpdf;
 mod preferences;
 mod profiles;
 mod review;
@@ -1211,6 +1212,10 @@ fn debug_shot(app: &Rc<App>) {
         if let Some(i) = items.iter().position(|x| x.label() == r) {
             app.range_dd.set_selected(i as u32);
         }
+    }
+    // FINGRAPH_EXPORT=plan:/tmp/p.pdf (or card:…, ics:…): write it without asking where
+    if let Some((what, path)) = std::env::var("FINGRAPH_EXPORT").ok().as_deref().and_then(|s| s.split_once(':')) {
+        planpdf::export_debug(app, what, path.into());
     }
     match std::env::var("FINGRAPH_DIALOG").as_deref() {
         Ok("triage") => wizard::triage(app),

@@ -2602,7 +2602,9 @@ impl Db {
 
     /// File uncategorized charges from businesses in the merchant directory (and, if allowed in
     /// Preferences, keyword guesses). Your rules always run first; a transaction you deliberately set
-    /// to Uncategorized is left alone. Returns how many were filed.
+    /// to Uncategorized is left alone. Only money going out: a deposit from a business in the
+    /// directory is usually pay or a refund (an airline's payroll is not a flight), so it's asked
+    /// about instead. Returns how many were filed.
     pub fn apply_directory(&self) -> Result<usize> {
         let p = self.prefs();
         if !p.auto_directory {
@@ -2618,7 +2620,7 @@ impl Db {
         let rows = self.transactions(&TxFilter { uncategorized_only: true, ..Default::default() })?;
         let tx = self.sp()?;
         let mut n = 0;
-        for t in rows.iter().filter(|t| t.review != ReviewStatus::Confirmed) {
+        for t in rows.iter().filter(|t| t.review != ReviewStatus::Confirmed && t.amount.is_sign_negative()) {
             let Some((cat, name)) = rules::auto_category(&t.raw_description, &t.memo, p.auto_keywords) else { continue };
             let Some(&id) = ids.get(cat) else { continue };
             tx.execute(
@@ -3455,6 +3457,12 @@ mod tests {
         db.set_category(&[t.id], None).unwrap();
         db.apply_directory().unwrap();
         assert_eq!(db.transaction(t.id).unwrap().category_id, None);
+        // a deposit from a business in the directory is pay or a refund, not a purchase
+        let dep = db.transactions(&TxFilter::default()).unwrap().into_iter().find(|t| t.amount.is_sign_positive() && t.transfer_peer.is_none()).unwrap();
+        db.conn.execute("UPDATE transactions SET raw_description = 'ELECTRONIC CREDIT, CAYMAN AIRWAYS REFUND', category_id = NULL, review_status = 'NeedsReview' WHERE id = ?1", [dep.id]).unwrap();
+        assert!(crate::merchants::lookup("CAYMAN AIRWAYS REFUND").is_some(), "the airline is in the directory");
+        db.apply_directory().unwrap();
+        assert_eq!(db.transaction(dep.id).unwrap().category_id, None);
         // and switching it off in Preferences stops it
         let mut p = db.prefs();
         p.auto_directory = false;

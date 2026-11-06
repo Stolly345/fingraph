@@ -191,6 +191,15 @@ pub struct Plan {
     /// Per month.
     pub savings_goal: Decimal,
     pub currency: Option<Currency>,
+    /// Which account does what, for the payday checklist.
+    #[serde(default)]
+    pub accounts: crate::plan_doc::Roles,
+    /// The budgeting method the budget was built with.
+    #[serde(default)]
+    pub method: crate::method::Method,
+    /// Paid off debt each month on top of the minimums (70/20/10's 10%), until it's gone.
+    #[serde(default)]
+    pub debt_extra: Decimal,
 }
 
 impl Plan {
@@ -204,9 +213,19 @@ impl Plan {
     pub fn monthly_income(&self) -> Decimal {
         (self.net_pay() * self.cycle.per_year() / Decimal::from(12)).round_dp(2) + self.other_income
     }
-    /// What's left each month after the budget and loan payments.
+    /// What's left each month after the budget, loan payments and extra debt payments.
     pub fn monthly_savings(&self, budgeted: Decimal) -> Decimal {
-        self.monthly_income() - budgeted - self.loan_payments
+        self.monthly_income() - budgeted - self.loan_payments - self.debt_extra
+    }
+    /// Your pension contribution a month: the deductions named "pension". Money saved for you, so it
+    /// counts toward a method's savings share.
+    pub fn pension_monthly(&self) -> Decimal {
+        let per_pay: Decimal = self.deductions.iter().filter(|d| d.name.to_lowercase().contains("pension")).map(|d| self.deduction(d)).sum();
+        (per_pay * self.cycle.per_year() / Decimal::from(12)).round_dp(2)
+    }
+    /// What a method divides: take-home a month plus the pension.
+    pub fn method_base(&self) -> Decimal {
+        self.monthly_income() + self.pension_monthly()
     }
     /// The next `n` paydays from `today`.
     pub fn paydays(&self, today: NaiveDate, n: usize) -> Vec<NaiveDate> {
@@ -233,7 +252,7 @@ impl Plan {
         if flexible <= Decimal::ZERO {
             return None;
         }
-        let k = (self.monthly_income() - self.loan_payments - fixed - self.savings_goal) / flexible;
+        let k = (self.monthly_income() - self.loan_payments - self.debt_extra - fixed - self.savings_goal) / flexible;
         (k >= Decimal::ZERO).then(|| k.min(Decimal::ONE).round_dp(4))
     }
 }
@@ -616,7 +635,7 @@ pub fn fund_ideas(rows: &[TxRow], ccy: Currency, fx: &Fx, today: NaiveDate) -> V
         let dates: Vec<NaiveDate> = v.iter().map(|t| t.posted).collect();
         let steady = v.iter().all(|t| (t.amount - last.amount).abs() <= last.amount.abs() / Decimal::from(4));
         match crate::rules::cadence(&dates) {
-            Some(c @ (91 | 365)) if steady => out.push(idea(stem, last, c)),
+            Some(c @ (91 | 365)) if steady && !crate::insights::is_cancelled(last) => out.push(idea(stem, last, c)),
             _ => {}
         }
     }

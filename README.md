@@ -185,7 +185,7 @@ The steps are tried in this order:
 1. Your rules. A rule can be limited to an amount (*only when CI$ 125.00*) or match a reference
    number.
 2. Transfers between your accounts and credit card payments.
-3. A directory of 582 Cayman businesses and online services.
+3. A directory of 1,270 Cayman businesses and online services, plus the US and Canadian stores, restaurants, airlines and hotels people from Cayman use when they travel. It only files money going out: a deposit from a business in it (pay from an airline, a refund) is asked about instead.
 4. Keyword guesses (MARKET → groceries, DIGITAL → subscriptions).
 5. Whatever's left goes to **To Review**. There's one card per merchant with every charge listed;
    answer it once and the answer is applied to past and future statements. Suggestions come from
@@ -204,9 +204,20 @@ The steps are tried in this order:
 - **Setting it up:**
   - **Monthly amounts** per category, filled from what you usually spend (the median of the last
     six months).
-  - **Setup wizard (5 steps):** pay cycle, gross pay and deductions; other income and loan
-    payments; **big yearly bills**; spending; a savings goal. It does the arithmetic, including how
-    much flexible spending must shrink to reach the goal.
+  - **Setup wizard (7 steps):** pay cycle, gross pay and deductions; other income and loan
+    payments; **big yearly bills**; **a budgeting method**; spending; savings and paying down debt;
+    and which account does what (pay, bills, everyday spending, big-bill money, savings, debt). It
+    does the arithmetic, including how much flexible spending must shrink to reach the goal.
+  - **Budgeting methods:** **50/30/20**, **70/20/10** (the 10% pays down cards and loans until
+    they're cleared, then it's saved), **80/20 pay yourself first** (one weekly allowance), **zero-based**
+    (every dollar gets a job before you can save), or your own numbers. The method step shows what
+    each one means with your figures. Needs are kept at what they usually cost and wants are trimmed
+    to fit, so mark each category a **Need** or a **Want**. Your pension counts toward the savings
+    share.
+  - **Cancelled something?** Mark it **Cancelled** in the setup or on the Subscriptions page (click
+    the amount). It stops counting, and comes back by itself if it ever charges again.
+  - **More than one car?** The **+** on a big bill adds another like it (a motorcycle's insurance, a
+    second car's licence).
   - **Big yearly bills:** the setup asks about the costs a normal month never shows. These include car and
     home insurance, HOA or strata fees, vehicle licence, school terms, memberships, travel, and
     Christmas. Bills seen in your statements are filled in. Each one gets a monthly set-aside, which
@@ -223,7 +234,19 @@ The steps are tried in this order:
 
 - **Monthly Close** takes you through the month once its statements are in. It checks they're all
   there, sorts what's new, settles the budget, ticks off the regular bills (paid, missed, or not on
-  a statement yet), updates goals, and ends with a summary.
+  a statement yet), updates goals, and ends with a summary and a **Report Card** to save or print.
+- **Take it with you** (Budget → **Budget Plan**):
+  - **Budget Plan** (PDF, save or print). Page 1 has a tick-box **payday checklist** (move this much
+    to each account, leave this much), the bills due in the next month and big bills in the next
+    three, **weekly spending limits**, and where your savings lead. The detail pages cover every
+    category against what it usually costs, every big bill with what should be saved by now, the
+    arithmetic, and what cancelling saved you.
+  - **Report Card** (PDF) for a month: saved, spent and income against the plan, how the month
+    scored against your method (needs, wants and saving as shares of what came in), what to do
+    next, and every category's budget against what you spent.
+  - **Calendar file** (.ics) of the next 12 months. It has your paydays with the checklist, every
+    regular bill with a reminder three days before, and big bills two weeks before. Open it in any
+    calendar app. Importing a newer one updates the events rather than doubling them.
 
 ### Outlook and Net Worth
 
