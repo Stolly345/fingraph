@@ -48,6 +48,11 @@ pub struct Prefs {
     pub ask_subscriptions: bool,
     /// Billing cycles you set for subscriptions: merchant → days between charges.
     pub subscription_cadence: std::collections::BTreeMap<String, i64>,
+    /// Bills and subscriptions you cancelled: merchant → the day you said so (YYYY-MM-DD). A charge
+    /// after that day brings it back.
+    pub cancelled: std::collections::BTreeMap<String, String>,
+    /// How the Subscriptions page is sorted: an index into `SUB_SORTS` in the app.
+    pub subscription_sort: u32,
     /// File charges from businesses in the directory automatically.
     pub auto_directory: bool,
     /// Also file keyword guesses (MARKET → Groceries) instead of only suggesting them.
@@ -92,6 +97,8 @@ impl Default for Prefs {
             rules_all_workspaces: false,
             ask_subscriptions: true,
             subscription_cadence: Default::default(),
+            cancelled: Default::default(),
+            subscription_sort: 2,
             auto_directory: true,
             auto_keywords: false,
             rescan_keeps_edits: true,
@@ -111,5 +118,6 @@ impl Prefs {
         crate::money::set_style(self.currency_codes, self.brackets, self.statement_fx_wins);
         crate::rules::set_fuzzy(self.fuzzy_merchants);
         crate::insights::set_cadence_overrides(&self.subscription_cadence);
+        crate::insights::set_cancelled(&self.cancelled.iter().filter_map(|(k, v)| Some((k.clone(), chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").ok()?))).collect());
     }
 }

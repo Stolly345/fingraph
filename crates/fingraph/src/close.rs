@@ -322,6 +322,20 @@ fn fill(app: &Rc<App>, i: usize, m: NaiveDate, b: &gtk::Box, redo: crate::Refres
                 }
             });
             b.append(&btn);
+            // the month on paper: plan against actual, and what to change
+            let paper = gtk::Box::builder().spacing(6).halign(gtk::Align::Start).build();
+            let save = gtk::Button::builder().label(format!("Save {} Report Card…", m.format("%B"))).css_classes(["pill"]).tooltip_text("A one-page PDF: the budget against what happened, category by category, and what to change").build();
+            let print = gtk::Button::builder().label("Print…").css_classes(["pill"]).build();
+            for (bt, saving) in [(&save, true), (&print, false)] {
+                let w = Rc::downgrade(app);
+                bt.connect_clicked(move |_| {
+                    if let Some(a) = w.upgrade() {
+                        if saving { crate::planpdf::save_card(&a, m) } else { crate::planpdf::print_card(&a, m) }
+                    }
+                });
+                paper.append(bt);
+            }
+            b.append(&paper);
             if is_closed {
                 let reopen = gtk::Button::builder().label("Reopen").halign(gtk::Align::Start).css_classes(["flat"]).build();
                 let (w, sc) = (Rc::downgrade(app), s.scope.clone());

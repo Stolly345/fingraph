@@ -17,6 +17,8 @@ pub mod rules;
 pub mod workflows;
 pub mod budget;
 pub mod outlook;
+pub mod plan_doc;
+pub mod method;
 pub mod wealth;
 
 pub use money::{Currency, Fx};
