@@ -190,6 +190,11 @@ People need one job per screen, and categories they recognise at a glance.
 - **A light/dark button sits beside the main menu.** It sets the same Appearance preference as
   Preferences, so the two always agree.
 
+- **Setup asks when a big bill might really be monthly.** On the Big Yearly Bills step, a bill seen in the
+  statements can be marked Monthly. Setup asks outright when how often it comes is a guess or it's under
+  CI$ 50, and remembers the answer. Monthly takes it off big bills for good and adds it to Subscriptions &
+  Digital; anything else keeps it as a big bill and replaces the guess.
+
 ### Status
 
 - [x] **Step 1. Category identity and polish.** Every category has a symbolic icon and a named colour,

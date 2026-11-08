@@ -651,6 +651,52 @@ pub fn fund_ideas(rows: &[TxRow], ccy: Currency, fx: &Fx, today: NaiveDate) -> V
     out
 }
 
+/// A big bill smaller than this looks more like a monthly charge, so setup asks.
+pub const SMALL_BIG_BILL: Decimal = Decimal::from_parts(50, 0, 0, false, 0);
+
+/// Should setup ask whether this is really monthly? Only for a charge seen in the statements, when
+/// how often it comes is a guess or it's small, and only until you've answered.
+pub fn ask_if_monthly(guessed: bool, amount: Decimal, answered: bool) -> bool {
+    !answered && (guessed || amount < SMALL_BIG_BILL)
+}
+
+impl Db {
+    fn listed(&self, key: &str) -> Vec<String> {
+        self.setting(key).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
+    }
+
+    fn list_add(&self, key: &str, stem: &str) -> Result<()> {
+        let mut v = self.listed(key);
+        if !v.iter().any(|x| x == stem) {
+            v.push(stem.to_string());
+            self.set_setting(key, &serde_json::to_string(&v)?)?;
+        }
+        Ok(())
+    }
+
+    /// Merchants you said are monthly: never suggested as big bills again.
+    pub fn not_big_bills(&self) -> Vec<String> {
+        self.listed("not_big_bills")
+    }
+    pub fn mark_not_big_bill(&self, stem: &str) -> Result<()> {
+        self.list_add("not_big_bills", stem)
+    }
+
+    /// Small or guessed bills you confirmed really are big bills: setup doesn't ask again.
+    pub fn kept_big_bills(&self) -> Vec<String> {
+        self.listed("kept_big_bills")
+    }
+    pub fn keep_big_bill(&self, stem: &str) -> Result<()> {
+        self.list_add("kept_big_bills", stem)
+    }
+
+    /// `fund_ideas`, without the merchants you've said are monthly.
+    pub fn big_bill_ideas(&self, rows: &[TxRow], ccy: Currency, fx: &Fx, today: NaiveDate) -> Vec<FundIdea> {
+        let no = self.not_big_bills();
+        fund_ideas(rows, ccy, fx, today).into_iter().filter(|i| !no.contains(&i.stem)).collect()
+    }
+}
+
 // ──────────────────────────────────────────────────────────────── watchlists
 
 /// A merchant (or any wording) with a monthly limit: "Amazon, CI$ 150".
@@ -1021,6 +1067,27 @@ mod tests {
         assert!(db.closes("1").unwrap().is_empty());
         let ideas = fund_ideas(&rows, Currency::KYD, &fx, NaiveDate::from_ymd_opt(2026, 10, 27).unwrap());
         println!("{ideas:?}");
+    }
+
+    #[test]
+    fn setup_asks_about_small_or_guessed_bills_until_answered() {
+        assert!(ask_if_monthly(false, Decimal::from(22), false), "small");
+        assert!(ask_if_monthly(true, Decimal::from(900), false), "guessed");
+        assert!(!ask_if_monthly(false, Decimal::from(900), false), "a known big bill");
+        assert!(!ask_if_monthly(true, Decimal::from(22), true), "already answered");
+    }
+
+    #[test]
+    fn a_bill_you_call_monthly_is_not_suggested_again() {
+        let ymd = |y, m, dd| NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        let rows: Vec<TxRow> = [(1, ymd(2026, 1, 10)), (2, ymd(2026, 7, 11))].into_iter().map(|(id, day)| TxRow { is_subscription: true, ..crate::insights::tests::row(id, day, "NORDVPN", "-60.00", "Subscriptions", "") }).collect();
+        let db = Db::open_in_memory().unwrap();
+        let ideas = db.big_bill_ideas(&rows, Currency::KYD, &Fx::default(), ymd(2026, 10, 1));
+        assert_eq!(ideas.len(), 1);
+        db.mark_not_big_bill(&ideas[0].stem).unwrap();
+        db.mark_not_big_bill(&ideas[0].stem).unwrap();
+        assert_eq!(db.not_big_bills().len(), 1);
+        assert!(db.big_bill_ideas(&rows, Currency::KYD, &Fx::default(), ymd(2026, 10, 1)).is_empty());
     }
 
     #[test]

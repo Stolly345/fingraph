@@ -975,7 +975,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     "Insurance, licences, registrations, annual plans: bills that come once a quarter or once a year.",
                 ));
                 let lb = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
-                let ideas: Vec<core::FundIdea> = core::fund_ideas(&s.rows, ccy, &s.fx, today()).into_iter().filter(|i| !s.funds.iter().any(|f| f.stem == i.stem)).collect();
+                let ideas: Vec<core::FundIdea> = a.db.big_bill_ideas(&s.rows, ccy, &s.fx, today()).into_iter().filter(|i| !s.funds.iter().any(|f| f.stem == i.stem)).collect();
                 for fd in &s.funds {
                     let due = fd.due(today());
                     let aside = s.fx.convert(fd.set_aside(today()), fd.currency, ccy);
@@ -1583,11 +1583,19 @@ struct BillLine {
     due: Option<NaiveDate>,
     /// You said you cancelled it: dropped from the budget, and not suggested again.
     cancelled: Rc<Cell<bool>>,
+    /// You said it's really monthly: not a big bill at all.
+    monthly: Rc<Cell<bool>>,
+    /// Setup asked whether it's monthly; saving without saying so is a no.
+    asked: bool,
+    /// The subscription it is, if it's one: where a monthly answer is recorded.
+    sub_stem: Option<String>,
+    /// How often it comes is a guess, so a "no" also records the cycle.
+    guessed: bool,
 }
 
 impl BillLine {
     fn amount(&self) -> Option<Decimal> {
-        if self.cancelled.get() {
+        if self.cancelled.get() || self.monthly.get() {
             return None;
         }
         parse_user(&self.amount.text()).map(|d| d.abs()).filter(|d| !d.is_zero())
@@ -2241,8 +2249,15 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
     let widths = [gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal), gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal), gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal)];
     let add_bill: AddBill = {
         let (bills, bill_list, recalc, adder) = (bills.clone(), bill_list.clone(), recalc.clone(), adder.clone());
+        let (cat_entries, fortnightly, fx) = (cat_entries.clone(), fortnightly.clone(), s.fx.clone());
         Rc::new(move |l: BillLine, hint: &str, at: Option<i32>| {
-            let r = adw::ActionRow::builder().title(glib::markup_escape_text(&l.title)).subtitle(glib::markup_escape_text(hint)).build();
+            // a bill you have or that was seen in your statements gets a second line: what FinGraph
+            // knows or is asking, and the buttons to answer
+            let answers = l.id != 0 || !l.stem.is_empty();
+            let r = adw::ActionRow::builder().title(glib::markup_escape_text(&l.title)).subtitle(if answers { String::new() } else { glib::markup_escape_text(hint).to_string() }).build();
+            let note_label = gtk::Label::builder().label(hint).xalign(0.0).hexpand(true).wrap(true).css_classes(if l.asked { ["caption", "warning"] } else { ["caption", "dim-label"] }).build();
+            let second = gtk::Box::builder().spacing(8).margin_top(4).margin_bottom(8).margin_start(12).margin_end(12).build();
+            second.append(&note_label);
             if let Some(e) = &l.name {
                 e.set_hexpand(true);
                 e.set_valign(gtk::Align::Center);
@@ -2260,10 +2275,44 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
                 let rc = recalc.clone();
                 d.connect_selected_notify(move |_| rc());
             }
+            // one seen in your statements may really be monthly: FinGraph can be wrong about that
+            let monthly_btn = (!l.stem.is_empty()).then(|| {
+                let m = gtk::ToggleButton::builder().label(if l.asked { "Yes, Monthly" } else { "Monthly" }).valign(gtk::Align::Center).tooltip_text("This is charged every month: count it with everyday spending and don't set money aside for it").build();
+                let (flag, rc, label, hint, widgets) = (l.monthly.clone(), recalc.clone(), note_label.clone(), hint.to_string(), [l.amount.clone().upcast::<gtk::Widget>(), l.every.clone().upcast(), l.month.clone().upcast()]);
+                let (amount, cur, is_sub, cats, fortnightly, fx) = (l.amount.clone(), l.currency, l.sub_stem.is_some(), cat_entries.clone(), fortnightly.clone(), fx.clone());
+                // what this row put into Subscriptions & Digital, so pressing again takes out the same
+                let added: Rc<Cell<Decimal>> = Rc::default();
+                m.connect_toggled(move |m| {
+                    let on = m.is_active();
+                    flag.set(on);
+                    for w in &widgets {
+                        w.set_sensitive(!on);
+                    }
+                    let subs = cats.iter().find(|c| c.cat.name == SUBS).filter(|_| is_sub);
+                    if let Some(c) = subs {
+                        let per = if fortnightly.get() { Decimal::from(12) / Decimal::from(26) } else { Decimal::ONE };
+                        let now = parse_user(&c.entry.text()).unwrap_or_default();
+                        let change = if on { (fx.convert(parse_user(&amount.text()).unwrap_or_default().abs(), cur, ccy) * per).round_dp(2) } else { added.get() };
+                        added.set(if on { change } else { Decimal::ZERO });
+                        c.entry.set_text(&amount_text(if on { now + change } else { (now - change).max(Decimal::ZERO) }));
+                    }
+                    let note = if !on {
+                        hint.clone()
+                    } else if subs.is_some() {
+                        format!("Monthly: added to {SUBS} on the Your Spending step, and not set aside for")
+                    } else {
+                        "Monthly: counted with your everyday spending, and not set aside for".to_string()
+                    };
+                    label.set_label(&note);
+                    rc();
+                });
+                second.append(&m);
+                m
+            });
             // one you had (saved, or seen in your statements) can be marked cancelled
             if l.id != 0 || !l.stem.is_empty() {
                 let c = gtk::ToggleButton::builder().label("Cancelled").valign(gtk::Align::Center).tooltip_text("I've cancelled this: drop it from the budget and stop suggesting it (unless it charges again)").build();
-                let (flag, rc, row, hint, widgets) = (l.cancelled.clone(), recalc.clone(), r.clone(), hint.to_string(), [l.amount.clone().upcast::<gtk::Widget>(), l.every.clone().upcast(), l.month.clone().upcast()]);
+                let (flag, rc, row, label, hint, widgets) = (l.cancelled.clone(), recalc.clone(), r.clone(), note_label.clone(), hint.to_string(), [l.amount.clone().upcast::<gtk::Widget>(), l.every.clone().upcast(), l.month.clone().upcast()]);
                 c.connect_toggled(move |c| {
                     let on = c.is_active();
                     flag.set(on);
@@ -2271,10 +2320,15 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
                         w.set_sensitive(!on);
                     }
                     row.set_opacity(if on { 0.55 } else { 1.0 });
-                    row.set_subtitle(&glib::markup_escape_text(if on { "Cancelled: not budgeted, and not suggested again unless it charges again" } else { &hint }));
+                    label.set_label(if on { "Cancelled: not budgeted, and not suggested again unless it charges again" } else { &hint });
                     rc();
                 });
-                r.add_suffix(&c);
+                if let Some(m) = &monthly_btn {
+                    // one or the other, not both
+                    m.bind_property("active", &c, "sensitive").invert_boolean().sync_create().build();
+                    c.bind_property("active", m, "sensitive").invert_boolean().sync_create().build();
+                }
+                second.append(&c);
             }
             // another of the same kind: a second vehicle's insurance, another child's fees
             let more = gtk::Button::builder().icon_name("list-add-symbolic").valign(gtk::Align::Center).css_classes(["flat", "circular"]).tooltip_text("Add another like this (another vehicle, say)").build();
@@ -2295,14 +2349,25 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
                         month: gtk::DropDown::builder().model(&gtk::StringList::new(&MONTH_NAMES)).valign(gtk::Align::Center).tooltip_text("The month it's next due").selected(add_months(month_start(today()), 1).month() - 1).build(),
                         due: None,
                         cancelled: Rc::default(),
+                        monthly: Rc::default(),
+                        asked: false,
+                        sub_stem: None,
+                        guessed: false,
                     };
-                    add(new, "Rename it to say which (Motorcycle insurance, Wife's SUV insurance)", Some(row.index() + 1));
+                    add(new, "Rename it to say which (Motorcycle insurance, Wife's SUV insurance)", Some(row.index() + if answers { 2 } else { 1 }));
                 });
             }
             r.add_suffix(&more);
             match at {
                 Some(i) => bill_list.insert(&r, i),
                 None => bill_list.append(&r),
+            }
+            if answers {
+                let row2 = gtk::ListBoxRow::builder().child(&second).activatable(false).selectable(false).build();
+                match at {
+                    Some(i) => bill_list.insert(&row2, i + 1),
+                    None => bill_list.append(&row2),
+                }
             }
             bills.borrow_mut().push(l);
             recalc();
@@ -2317,20 +2382,34 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
         let mo = gtk::DropDown::builder().model(&gtk::StringList::new(&months)).valign(gtk::Align::Center).tooltip_text("The month it's next due").build();
         mo.set_selected(month.clamp(1, 12) - 1);
         let name = typed.then(|| gtk::Entry::builder().placeholder_text("What is it?").text(title).build());
-        BillLine { id, stem: stem.to_string(), currency: cur, title: title.to_string(), name, amount: a, every: ev, month: mo, due, cancelled: Rc::default() }
+        BillLine { id, stem: stem.to_string(), currency: cur, title: title.to_string(), name, amount: a, every: ev, month: mo, due, cancelled: Rc::default(), monthly: Rc::default(), asked: false, sub_stem: None, guessed: false }
     };
     let next_month = add_months(month_start(today()), 1).month();
+    // is it really a big bill? ask when the charge is small, or how often it comes is only a guess
+    let all_subs = fingraph_core::insights::subscriptions(&s.rows, ccy, &s.fx, today());
+    let answered = app.db.kept_big_bills();
+    let question = |l: &mut BillLine, name: &str, amount: Decimal, stated: String| -> String {
+        let sub = all_subs.iter().find(|x| x.stem == l.stem || fingraph_core::rules::payer_key(&x.stem, "") == l.stem || x.payee.eq_ignore_ascii_case(name));
+        l.sub_stem = sub.map(|x| x.stem.clone());
+        l.guessed = sub.is_some_and(|x| x.cadence_guessed);
+        l.asked = !l.stem.is_empty() && core::ask_if_monthly(l.guessed, amount, answered.contains(&l.stem));
+        match (l.asked, l.guessed) {
+            (true, true) => format!("{stated}. Is this a monthly charge? FinGraph hasn't seen enough charges to tell"),
+            (true, false) => format!("{stated}. Is this a monthly charge? It's small for a big bill"),
+            _ => stated,
+        }
+    };
     for f in &s.funds {
         let d = f.due(today());
-        add_bill(line(f.id, &f.stem, f.currency, &f.name, false, f.amount, f.every_months, Some(d), d.month()), &format!("Already planned · {}", fmt_money(f.amount, f.currency)), None);
+        let mut l = line(f.id, &f.stem, f.currency, &f.name, false, f.amount, f.every_months, Some(d), d.month());
+        let hint = question(&mut l, &f.name, s.fx.convert(f.amount, f.currency, ccy), format!("Already planned · {}", fmt_money(f.amount, f.currency)));
+        add_bill(l, &hint, None);
     }
-    let ideas: Vec<core::FundIdea> = core::fund_ideas(&s.rows, ccy, &s.fx, today()).into_iter().filter(|i| !s.funds.iter().any(|f| f.stem == i.stem)).collect();
+    let ideas: Vec<core::FundIdea> = app.db.big_bill_ideas(&s.rows, ccy, &s.fx, today()).into_iter().filter(|i| !s.funds.iter().any(|f| f.stem == i.stem)).collect();
     for i in &ideas {
-        add_bill(
-            line(0, &i.stem, ccy, &i.payee, false, i.amount.round_dp(0), i.every_months, Some(i.next_due), i.next_due.month()),
-            &format!("Seen in your statements: {} {}", money(i.amount), if i.every_months == 12 { "once a year" } else { "every 3 months" }),
-            None,
-        );
+        let mut l = line(0, &i.stem, ccy, &i.payee, false, i.amount.round_dp(0), i.every_months, Some(i.next_due), i.next_due.month());
+        let hint = question(&mut l, &i.payee, i.amount, format!("Seen in your statements: {} {}", money(i.amount), if i.every_months == 12 { "once a year" } else { "every 3 months" }));
+        add_bill(l, &hint, None);
     }
     let taken: Vec<String> = s.funds.iter().map(|f| f.name.to_lowercase()).chain(ideas.iter().map(|i| i.payee.to_lowercase())).collect();
     for (name, hint, every, month) in BIG_BILLS {
@@ -2530,10 +2609,24 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
             }
             // what you cancelled, remembered so it's not suggested or counted again
             let mut prefs = a.db.prefs();
-            let before = prefs.cancelled.clone();
+            let before = (prefs.cancelled.clone(), prefs.subscription_cadence.clone());
             let day = today().format("%Y-%m-%d").to_string();
             for l in bills.borrow().iter().filter(|l| l.cancelled.get() && !l.stem.is_empty()) {
                 prefs.cancelled.insert(l.stem.clone(), day.clone());
+            }
+            // your answer to "is it monthly?" replaces FinGraph's guess, here and on every later screen
+            for l in bills.borrow().iter().filter(|l| !l.cancelled.get() && !l.stem.is_empty()) {
+                if l.monthly.get() {
+                    a.saved(a.db.mark_not_big_bill(&l.stem));
+                    if let Some(st) = &l.sub_stem {
+                        prefs.subscription_cadence.insert(st.clone(), 30);
+                    }
+                } else if l.asked && l.amount().is_some() {
+                    a.saved(a.db.keep_big_bill(&l.stem));
+                    if let (true, Some(st)) = (l.guessed, &l.sub_stem) {
+                        prefs.subscription_cadence.insert(st.clone(), (l.every() * 3044 + 50) as i64 / 100);
+                    }
+                }
             }
             for (stem, was, b) in sub_marks.iter() {
                 match (b.is_active(), *was) {
@@ -2546,7 +2639,7 @@ pub fn wizard(app: &Rc<App>, done: crate::Refresh) {
                     _ => {}
                 }
             }
-            if prefs.cancelled != before {
+            if (prefs.cancelled.clone(), prefs.subscription_cadence.clone()) != before {
                 a.saved(a.db.save_prefs(&prefs));
             }
             dlg.close();

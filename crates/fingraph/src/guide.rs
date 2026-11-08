@@ -947,7 +947,7 @@ fn budget(g: &G, app: &Rc<App>) {
         g.body.append(&l);
     }
     // the big bills a normal month never shows: what's planned, else what the statements suggest
-    let ideas = fingraph_core::budget::fund_ideas(&s.rows, ccy, &s.fx, today());
+    let ideas = app.db.big_bill_ideas(&s.rows, ccy, &s.fx, today());
     if !s.funds.is_empty() || !ideas.is_empty() {
         let l = list();
         let (title, sub) = if s.funds.is_empty() {
