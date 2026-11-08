@@ -200,6 +200,9 @@ pub struct Plan {
     /// Paid off debt each month on top of the minimums (70/20/10's 10%), until it's gone.
     #[serde(default)]
     pub debt_extra: Decimal,
+    /// The extra goes to whichever debt charges the highest rate, rather than one you picked.
+    #[serde(default)]
+    pub debt_avalanche: bool,
 }
 
 impl Plan {
@@ -660,6 +663,37 @@ pub fn ask_if_monthly(guessed: bool, amount: Decimal, answered: bool) -> bool {
     !answered && (guessed || amount < SMALL_BIG_BILL)
 }
 
+/// The category a big bill stands in for, when a yearly bill really does replace monthly spending
+/// there. Never Housing, Utilities or Subscriptions: a yearly fee doesn't replace the rent.
+pub fn lumpy_category(category: &str) -> Option<&'static str> {
+    ["Insurance", "Education", "Government & Fees", "Travel", "Gifts & Donations"].into_iter().find(|c| *c == category)
+}
+
+/// The category a bill's name points to.
+pub fn category_for_bill(name: &str) -> Option<&'static str> {
+    let n = name.to_lowercase();
+    let has = |w: &[&str]| w.iter().any(|x| n.contains(x));
+    if has(&["insurance"]) {
+        Some("Insurance")
+    } else if has(&["licence", "license", "registration"]) {
+        Some("Government & Fees")
+    } else if has(&["school", "tuition"]) {
+        Some("Education")
+    } else if has(&["travel", "flight"]) {
+        Some("Travel")
+    } else if has(&["christmas", "birthday"]) {
+        Some("Gifts & Donations")
+    } else {
+        None
+    }
+}
+
+/// Debts in avalanche order: highest rate first, unknown rates last, the most owed first among equals.
+pub fn avalanche_order<T>(mut debts: Vec<(T, Decimal, Option<Decimal>)>) -> Vec<(T, Decimal, Option<Decimal>)> {
+    debts.sort_by_key(|d| (std::cmp::Reverse(d.2.is_some()), std::cmp::Reverse(d.2.unwrap_or_default()), std::cmp::Reverse(d.1)));
+    debts
+}
+
 impl Db {
     fn listed(&self, key: &str) -> Vec<String> {
         self.setting(key).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
@@ -1075,6 +1109,22 @@ mod tests {
         assert!(ask_if_monthly(true, Decimal::from(900), false), "guessed");
         assert!(!ask_if_monthly(false, Decimal::from(900), false), "a known big bill");
         assert!(!ask_if_monthly(true, Decimal::from(22), true), "already answered");
+    }
+
+    #[test]
+    fn only_lumpy_categories_stand_aside_for_a_big_bill() {
+        assert_eq!(category_for_bill("Car insurance"), Some("Insurance"));
+        assert_eq!(category_for_bill("Memberships & annual plans"), None);
+        assert_eq!(lumpy_category("Insurance"), Some("Insurance"));
+        assert_eq!(lumpy_category("Housing"), None);
+        assert_eq!(lumpy_category("Subscriptions & Digital"), None);
+    }
+
+    #[test]
+    fn avalanche_puts_the_dearest_debt_first() {
+        let d = |s: &str| s.parse::<Decimal>().unwrap();
+        let order = avalanche_order(vec![(1, d("9000"), Some(d("8"))), (2, d("500"), Some(d("24"))), (3, d("9999"), None), (4, d("700"), Some(d("24")))]);
+        assert_eq!(order.iter().map(|x| x.0).collect::<Vec<_>>(), vec![4, 2, 1, 3]);
     }
 
     #[test]

@@ -195,6 +195,15 @@ People need one job per screen, and categories they recognise at a glance.
   CI$ 50, and remembers the answer. Monthly takes it off big bills for good and adds it to Subscriptions &
   Digital; anything else keeps it as a big bill and replaces the guess.
 
+- **Setup doesn't count anything twice.** A yearly bill clears the monthly amount of Insurance, Education,
+  Government & Fees, Travel or Gifts on the spending step (never Housing, Utilities or Subscriptions, where a
+  yearly charge doesn't replace monthly spending), and gives it back if the bill is removed.
+- **Subscriptions & Digital starts as exactly what the list under it adds up to.** One-off digital purchases
+  are a line in that list.
+- **The savings step asks where the rest goes: savings or debt.** With debt, you pick a card or loan or
+  Highest Interest First (avalanche). Debts added by hand aren't offered yet.
+- **Setup's account menus lead with the account number**, so a long name can't cut it off.
+
 ### Status
 
 - [x] **Step 1. Category identity and polish.** Every category has a symbolic icon and a named colour,

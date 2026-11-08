@@ -48,6 +48,19 @@ fn snap(app: &App) -> Snap {
     Snap { ccy: app.display(), fx: app.db.fx().unwrap_or_default(), accounts, items: app.db.manual_items(&ids).unwrap_or_default(), scope: scope(&ids), rows }
 }
 
+/// Each card and loan with a balance: (account, owed in the display currency, yearly rate if known).
+pub(crate) fn account_debts(app: &App) -> Vec<(i64, Decimal, Option<Decimal>)> {
+    let s = snap(app);
+    s.accounts
+        .iter()
+        .filter(|(_, x)| x.liability)
+        .filter_map(|(id, x)| {
+            let (_, v) = x.points.last().filter(|(_, v)| v.is_sign_negative() && !v.is_zero())?;
+            Some((*id, s.fx.convert(-*v, x.currency, s.ccy).round_dp(2), apr_for(app, &s, *id, -*v).0))
+        })
+        .collect()
+}
+
 /// What 70/20/10's extra payment buys.
 pub(crate) struct Outlook {
     pub owed: Decimal,
