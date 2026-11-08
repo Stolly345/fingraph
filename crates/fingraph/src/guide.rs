@@ -337,7 +337,7 @@ fn welcome(g: &G, app: &Rc<App>) {
                     a.toast(&format!("Loaded {n} demo transactions"));
                     a.saved(a.db.set_setting("onboarded", "1"));
                     g.dlg.close();
-                    a.show_view("overview");
+                    a.show_view("budget");
                 }
                 Err(e) => a.toast(&e.to_string()),
             }
@@ -862,7 +862,7 @@ fn sort(g: &G, app: &Rc<App>) {
             .description(if waiting == 0 {
                 "Every transaction has a category. New statements are sorted the same way, and anything new waits in To Review."
             } else {
-                "You skipped the rest. They wait in To Review (Overview shows a Review button while any are left) whenever you're ready."
+                "You skipped the rest. They wait in To Review (Budget shows a Review button while any are left) whenever you're ready."
             })
             .build();
         st.add_css_class("compact");
@@ -992,7 +992,7 @@ fn budget(g: &G, app: &Rc<App>) {
         });
     }
     g.body.append(&go);
-    g.body.append(&dim("Later, on the Budget page: let leftovers roll into next month, and move money to cover an overspend. Your big bills show on Overview before they're due."));
+    g.body.append(&dim("Later, on the Budget page: let leftovers roll into next month, and move money to cover an overspend. Your big bills show on Summary before they're due."));
     next_to(g, if has { "Continue" } else { "Skip for Now" }, None);
 }
 
@@ -1013,12 +1013,12 @@ fn monthly(g: &G, app: &Rc<App>) {
         "Run Monthly Close",
         "On the Budget page. It walks you through the month: are all the statements in, sort anything new, cover overspending, tick off the regular bills, update your goals, then close the month with a summary.",
     ));
-    l.append(&numbered(3, "In between, look at Outlook", "Where each account's balance is probably heading until the next statement, what's safe to spend, and the bills still to come."));
+    l.append(&numbered(3, "In between, look at Outlook under Reports", "Where each account's balance is probably heading until the next statement, what's safe to spend, and the bills still to come."));
     g.body.append(&l);
     g.body.append(&heading("When you have a moment"));
     let l = list();
-    l.append(&icon_row("starred-symbolic", "Net Worth", "Add what you own and owe that no statement shows — a car, a house, a pension — and set goals: saving up, or paying a card off."));
-    l.append(&icon_row("media-playlist-repeat-symbolic", "Subscriptions", "Everything charging you on a schedule, with its yearly cost and a link to cancel the ones FinGraph knows."));
+    l.append(&icon_row("starred-symbolic", "Summary", "Your net worth and the bigger picture. Under the charts, add what you own and owe that no statement shows — a car, a house, a pension — and set goals: saving up, or paying a card off."));
+    l.append(&icon_row("media-playlist-repeat-symbolic", "Subscriptions, under Reports", "Everything charging you on a schedule, with its yearly cost and a link to cancel the ones FinGraph knows."));
     // the 5th: a few days after most statements are issued
     l.append(&icon_row("x-office-calendar-symbolic", "A reminder", "Put a monthly reminder in your calendar for the 5th — “Download statements, Monthly Close”."));
     g.body.append(&l);
@@ -1029,6 +1029,6 @@ fn monthly(g: &G, app: &Rc<App>) {
         a.saved(a.db.set_setting("onboarded", "1"));
         g.dlg.close();
         crate::statements::watch(&a);
-        a.show_view("overview");
+        a.show_view("budget");
     }));
 }

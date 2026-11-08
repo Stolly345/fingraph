@@ -16,8 +16,6 @@ pub struct Prefs {
     pub default_range: String,
     /// `system`, `light` or `dark`.
     pub appearance: String,
-    /// The page that was open last (FinGraph reopens on it).
-    pub last_page: String,
     /// Once a day, ask GitHub whether a newer release is out (only the release page is fetched).
     pub check_updates: bool,
 
@@ -82,7 +80,6 @@ impl Default for Prefs {
             last_workspace: String::new(),
             default_range: "This Year".into(),
             appearance: "system".into(),
-            last_page: "overview".into(),
             check_updates: true,
             statement_fx_wins: true,
             currency_codes: false,

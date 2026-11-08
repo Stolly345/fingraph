@@ -294,6 +294,10 @@ DELETE FROM manual_items WHERE entity_id NOT IN (SELECT id FROM entities);
 DELETE FROM attachments WHERE account_id NOT IN (SELECT id FROM accounts);
 DELETE FROM reimbursements WHERE account_id NOT IN (SELECT id FROM accounts);
 DELETE FROM settings WHERE key LIKE 'apr:%' AND CAST(substr(key, 5) AS INTEGER) NOT IN (SELECT id FROM accounts);
+"#, r#"
+-- your own icon and colour for a category; empty means its default
+ALTER TABLE categories ADD COLUMN icon TEXT;
+ALTER TABLE categories ADD COLUMN color TEXT;
 "#];
 
 /// (name, kind, children). Missing ones are added to existing ledgers on open; lists are shown A–Z.
@@ -367,6 +371,9 @@ pub struct Category {
     pub name: String,
     pub parent_id: Option<i64>,
     pub kind: CategoryKind,
+    /// Your own choice of icon and colour; see `looks` for the defaults.
+    pub icon: Option<String>,
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2476,11 +2483,16 @@ impl Db {
     pub fn categories(&self) -> Result<Vec<Category>> {
         // A–Z by top-level category, each followed by its own sub-categories A–Z
         let mut st = self.conn.prepare(
-            "SELECT c.id, c.name, c.parent_id, c.kind FROM categories c LEFT JOIN categories p ON p.id = c.parent_id
+            "SELECT c.id, c.name, c.parent_id, c.kind, c.icon, c.color FROM categories c LEFT JOIN categories p ON p.id = c.parent_id
              ORDER BY COALESCE(p.name, c.name) COLLATE NOCASE, COALESCE(p.id, c.id), c.parent_id IS NOT NULL, c.name COLLATE NOCASE",
         )?;
-        let rows = st.query_map([], |r| Ok(Category { id: r.get(0)?, name: r.get(1)?, parent_id: r.get(2)?, kind: cat_kind(&r.get::<_, String>(3)?) }))?;
+        let rows = st.query_map([], |r| Ok(Category { id: r.get(0)?, name: r.get(1)?, parent_id: r.get(2)?, kind: cat_kind(&r.get::<_, String>(3)?), icon: r.get(4)?, color: r.get(5)? }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_category_look(&self, id: i64, icon: Option<&str>, color: Option<&str>) -> Result<()> {
+        self.conn.execute("UPDATE categories SET icon = ?2, color = ?3 WHERE id = ?1", params![id, icon, color])?;
+        Ok(())
     }
 
     pub fn category_id(&self, name: &str) -> Result<Option<i64>> {
@@ -2875,7 +2887,7 @@ impl Db {
             n += self.import_scan_reviewed(ent, &doc.filename, &sha, &scan, &targets, &all)?.inserted;
         }
         // a few answers already learned, so triage starts with the interesting merchants
-        for (pattern, cat, payee) in [("SALARY", "Salary", "Harbour Freight (Salary)"), ("RENT RECEIVED", "Rental Income", "Rent"), ("SERVICE CHARGE", "Bank Fees & Interest", "Scotiabank")] {
+        for (pattern, cat, payee) in [("SALARY", "Salary", "Harbour Freight (Salary)"), ("RENT RECEIVED", "Rental Income", "Rent"), ("SERVICE CHARGE", "Bank Fees & Interest", "Scotiabank"), ("MONTHLY ACCOUNT FEE", "Bank Fees & Interest", "CNB"), ("MONTHLY FEE", "Bank Fees & Interest", "RBC"), ("FOREIGN TRANSACTION FEE", "Bank Fees & Interest", "Butterfield"), ("LOAN INTEREST", "Bank Fees & Interest", "CICSA Loan"), ("STAMP DUTY", "Government & Fees", "Stamp Duty"), ("HOME LOAN", "Housing", "Home Loan")] {
             let category_id = self.category_id(cat)?;
             self.learn(&Rule { id: 0, kind: RuleKind::Substring, pattern: pattern.into(), clean_payee: Some(payee.into()), category_id, is_subscription: false, is_transfer: false, expected_cadence: None, entity_id: None, business_entity_id: None, ..Default::default() })?;
         }

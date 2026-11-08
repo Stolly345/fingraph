@@ -76,6 +76,75 @@ impl Method {
     }
 }
 
+/// One part of a method's split, as the Budget page shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Share {
+    pub name: &'static str,
+    /// The method's target, in percent.
+    pub target: u8,
+    /// This plan's share of the base, in percent.
+    pub share: Decimal,
+    pub amount: Decimal,
+    pub note: &'static str,
+    /// On the right side of the target.
+    pub ok: bool,
+}
+
+impl Method {
+    /// How the Budget page groups categories. 80/20 has no category table: one weekly allowance.
+    pub fn groups(self) -> &'static [&'static str] {
+        match self {
+            Self::Own | Self::ZeroBased => &["Bills", "Everyday"],
+            Self::FiftyThirtyTwenty => &["Needs", "Wants"],
+            Self::SeventyTwentyTen => &["Spending"],
+            Self::EightyTwenty => &[],
+        }
+    }
+
+    /// Which of `groups` a category belongs in.
+    pub fn group_of(self, fixed: bool, need: bool) -> Option<usize> {
+        match self {
+            Self::Own | Self::ZeroBased => Some(if fixed { 0 } else { 1 }),
+            Self::FiftyThirtyTwenty => Some(if need { 0 } else { 1 }),
+            Self::SeventyTwentyTen => Some(0),
+            Self::EightyTwenty => None,
+        }
+    }
+
+    /// How a plan stands against the method's split. `needs` includes big bills and loan payments;
+    /// what isn't spent or paid off counts as saved (the pension is in `base`, and unspent).
+    pub fn shares(self, base: Decimal, needs: Decimal, wants: Decimal, debt: Decimal) -> Vec<Share> {
+        let saved = base - needs - wants - debt;
+        let of = |v: Decimal| share(v, base);
+        let under = |name, target: u8, amount: Decimal| {
+            let ok = of(amount) <= Decimal::from(target);
+            Share { name, target, share: of(amount), amount, note: if ok { "within target" } else { "over target" }, ok }
+        };
+        let over = |name, target: u8, amount: Decimal, none: &'static str| {
+            let ok = of(amount) >= Decimal::from(target);
+            let note = if amount.is_zero() { none } else if of(amount) == Decimal::from(target) { "on target" } else if ok { "above target" } else { "below target" };
+            Share { name, target, share: of(amount), amount, note, ok }
+        };
+        let Some(s) = self.split() else { return Vec::new() };
+        match self {
+            Self::FiftyThirtyTwenty => vec![under("Needs", s.needs.unwrap_or(50), needs), under("Wants", s.wants.unwrap_or(30), wants), over("Saving", s.save, saved, "nothing saved yet")],
+            Self::SeventyTwentyTen => vec![under("Spending", s.spend, needs + wants), over("Saving", s.save, saved, "nothing saved yet"), over("Paying Off Debt", s.debt, debt, "no debt to pay down")],
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// What a zero-based budget hasn't given a job yet. Below zero: more assigned than comes in.
+pub fn to_assign(income: Decimal, budgets: Decimal, big: Decimal, loans: Decimal, debt: Decimal, saving: Decimal) -> Decimal {
+    income - budgets - big - loans - debt - saving
+}
+
+/// 80/20's weekly spending money: each variable budget's weekly share, added up the way the Budget
+/// Plan PDF does, so screen and paper agree.
+pub fn weekly_allowance(variable: &[Decimal]) -> Decimal {
+    variable.iter().map(|b| (*b * Decimal::from(12) / Decimal::from(52)).round_dp(0)).sum()
+}
+
 /// Categories that are needs unless you say otherwise: what you'd have to pay even in a lean month.
 pub const NEEDS: &[&str] = &[
     "Bank Fees & Interest",
@@ -263,6 +332,42 @@ mod tests {
         assert_eq!(a.savings, d("100"));
         assert!(a.notes.iter().any(|n| n.contains("short of the 20%")));
         assert!(a.notes.iter().any(|n| n.contains("Needs alone")));
+    }
+
+    #[test]
+    fn each_method_groups_its_categories_its_own_way() {
+        assert_eq!(Method::Own.group_of(true, false), Some(0));
+        assert_eq!(Method::ZeroBased.group_of(false, true), Some(1));
+        assert_eq!(Method::FiftyThirtyTwenty.group_of(true, false), Some(1));
+        assert_eq!(Method::SeventyTwentyTen.group_of(false, false), Some(0));
+        assert!(Method::EightyTwenty.groups().is_empty());
+        assert_eq!(Method::EightyTwenty.group_of(true, true), None);
+    }
+
+    #[test]
+    fn shares_measure_a_plan_against_its_method() {
+        let s = Method::FiftyThirtyTwenty.shares(d("6000"), d("2400"), d("2400"), d("0"));
+        assert_eq!(s.iter().map(|x| x.share).collect::<Vec<_>>(), vec![d("40"), d("40"), d("20")]);
+        assert!(s[0].ok);
+        assert_eq!((s[1].ok, s[1].note), (false, "over target"));
+        assert_eq!((s[2].ok, s[2].note), (true, "on target"));
+        let s = Method::SeventyTwentyTen.shares(d("6000"), d("3000"), d("600"), d("0"));
+        assert_eq!(s[0].amount, d("3600"));
+        assert_eq!((s[1].amount, s[1].note), (d("2400"), "above target"));
+        assert_eq!(s[2].note, "no debt to pay down");
+        assert!(Method::EightyTwenty.shares(d("6000"), d("1"), d("1"), d("0")).is_empty());
+    }
+
+    #[test]
+    fn zero_based_counts_what_has_no_job() {
+        assert_eq!(to_assign(d("5374"), d("1608"), d("155"), d("420"), d("0"), d("3000")), d("191"));
+        assert_eq!(to_assign(d("1000"), d("1200"), d("0"), d("0"), d("0"), d("0")), d("-200"));
+    }
+
+    #[test]
+    fn the_weekly_allowance_matches_the_printed_plan() {
+        // 460 → 106, 220 → 51, per category, as `CatPlan::weekly` does
+        assert_eq!(weekly_allowance(&[d("460"), d("220")]), d("157"));
     }
 
     #[test]

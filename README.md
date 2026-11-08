@@ -15,7 +15,7 @@ statement's own balances, and shows where the money goes. Nothing leaves your co
 ![Written in Rust](https://img.shields.io/badge/written%20in-Rust-B7410E?logo=rust&logoColor=white)
 ![KYD and USD](https://img.shields.io/badge/currencies-KYD%20%7C%20USD%20%2B%20any-2EA44F)
 
-<img src="docs/screenshots/overview.png" width="900" alt="Overview: headline numbers, charts, and the Review banner">
+<img src="docs/screenshots/budget.png" width="900" alt="Budget: this month against a 50/30/20 plan">
 
 </div>
 
@@ -36,11 +36,11 @@ exchange rates (only currency codes and dates are sent). Your ledger never leave
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/budget.png" alt="Budget: this month against the plan"></td>
+<td width="50%"><img src="docs/screenshots/summary.png" alt="Summary: net worth, headline figures and charts"></td>
 <td width="50%"><img src="docs/screenshots/transactions.png" alt="Transactions with search, filters and bulk actions"></td>
 </tr>
 <tr>
-<td align="center"><sub>A budget filled from what you actually spend</sub></td>
+<td align="center"><sub>Net worth and the bigger picture, in one place</sub></td>
 <td align="center"><sub>Every transaction, searchable, with inline categories</sub></td>
 </tr>
 <tr>
@@ -101,7 +101,7 @@ The first time it opens, **Getting Started** walks you through setup. After a we
 7. Learn the monthly routine.
 
 The guide stays in the main menu and remembers where you stopped. To explore without your own
-data, the empty Overview and the guide both offer **Load Demo Data**: a simulated year for a
+data, the empty Budget page and the guide both offer **Load Demo Data**: a simulated year for a
 personal and a property-business workspace, across all five banks, in KYD and USD.
 
 ![Getting Started guide, step 1 of 8](docs/screenshots/guide.png)
@@ -113,32 +113,45 @@ personal and a property-business workspace, across all five banks, in KYD and US
 2. Answer anything it asks (see [Importing statements](#importing-statements)), and anything waiting
    in **To Review**.
 3. Run **Monthly Close** on the Budget page.
-4. Between statements, **Outlook** shows where balances are heading and what's safe to spend.
+4. Between statements, **Outlook** (under Reports) shows where balances are heading and what's safe to spend.
 
 ## Finding your way around
 
-**Sidebar**, in order:
+FinGraph always opens on **Budget**. The **sidebar**, in order:
 
 | Page | Ctrl+ | What it shows |
 |---|---|---|
-| Overview | 1 | Ten headline cards in two rows (net cash flow for a year, a month and a fortnight, each measured as a 12-month average, the date range or the actual period; left to spend this month; savings rate; next big bill; cash runway; Age of Money; subscriptions; reconciliation), **Big Bills Coming Up** and **Big Bills Over the Next 12 Months**, and six charts; a **Review** banner while merchants wait for an answer |
-| Net Worth | 2 | What you own and owe over time, goals, and debt payoff |
-| Budget | 3 | This month against your plan, rollovers, non-monthly bills, watchlists, and where the money went |
-| Outlook | 4 | Balances until the next statement, safe to spend, the month's bills, and Age of Money |
-| Transactions | 5 | Every transaction: search, filter, edit, split, attach receipts |
-| Combined Statement | 6 | Chosen accounts month by month with one running balance |
-| Statements | 7 | Every statement read, its reconciliation, coverage by month, and anything waiting for approval |
-| What Changed | 8 | Price rises, bill spikes, possible double charges, fees, and category drift |
-| Subscriptions | 9 | Recurring charges and what they really cost a year |
+| Budget | 1 | This month, laid out for the budgeting method you chose: one headline number, your categories, non-monthly bills and watchlists; a **Review** banner while merchants wait for an answer |
+| Transactions | 2 | Every transaction: search, filter, edit, split, attach receipts |
+| Reports | 3 | A strip of tabs: Cash Flow, Trends, Where It Went, Plan, Outlook, Subscriptions, What Changed and Export |
+| Statements | 4 | Every statement read, its reconciliation, coverage by month, and anything waiting for approval |
+| Combined Statement | 5 | Under Statements: chosen accounts month by month with one running balance |
+| Summary | 6 | Net worth over time, the headline figures, **Big Bills Coming Up** and six charts; under them, your accounts, other assets and debts, goals, and debt payoff |
 
 Below the pages, **Accounts** lists each account with its last balance a statement confirmed (red
-when it's money owed). Click one to open that account's overview.
+when it's money owed). Click one to open that account's overview; click the **Accounts** heading to
+fold the list away. The arrow beside Statements folds Combined Statement the same way.
 
-The **main menu (☰)** has Import Statements…, Reports & Export, Rules & Categories, Business
-Directory, Bank Profiles, Preferences (Ctrl+,), Getting Started and About.
+**How Budget follows your method.** Choose a method in Set Up Budget, and change it from the button
+at the top of Budget:
 
-**ⓘ buttons.** Every card on Overview, Budget, Outlook and Net Worth has an ⓘ next to its title.
-Hover over it to see how to read the card, or click to keep the explanation open.
+| Method | What leads | How it's laid out |
+|---|---|---|
+| My Own Numbers | Left to spend | Bills and Everyday |
+| 50/30/20 | Left to spend | Needs, Wants and Saving against their targets; categories grouped as Needs and Wants |
+| 70/20/10 | Left to spend | Spending, Saving and Paying Off Debt against their targets, and when the debts clear |
+| 80/20 | Your weekly spending money | No category limits: each week of the month, the payday move, and bills kept apart |
+| Zero-Based | What still needs a job | Every category shows what's assigned; one button gives the rest to savings |
+
+The **main menu (☰)** has Import Statements…, Export, Rules & Categories, Business Directory, Bank
+Profiles, Preferences (Ctrl+,), Getting Started and About. Rules & Categories also sets each
+category's **icon and colour**.
+
+**ⓘ buttons.** Cards on Summary, Budget and Reports have an ⓘ next to their title. Hover over it to
+see how to read the card, or click to keep the explanation open.
+
+The sun or moon beside the main menu switches between light and dark; Preferences can also follow
+your system.
 
 The header shows only the controls the page uses: the date range, and **KYD | USD**. Ctrl+F
 searches transactions and Ctrl+O imports.
@@ -224,7 +237,7 @@ The steps are tried in this order:
     comes out of what you can save.
 - **During the month:**
   - **Alerts** when a category is over budget, or 85% used early in the month.
-  - **Fixed vs variable expenses**, and a **12-month savings projection**, both on budget and on
+  - **Fixed vs variable expenses**, and a **12-month savings projection** (Reports → Plan), both on budget and on
     trend.
 - **Changing it:**
   - **Rollovers:** leftovers carry over to the next month.
@@ -248,7 +261,7 @@ The steps are tried in this order:
     regular bill with a reminder three days before, and big bills two weeks before. Open it in any
     calendar app. Importing a newer one updates the events rather than doubling them.
 
-### Outlook and Net Worth
+### Outlook and net worth
 
 - **Outlook** covers the weeks before the next statement arrives:
   - each bank account's estimated balance until then
@@ -256,7 +269,7 @@ The steps are tried in this order:
   - safe to spend per day
   - the month's bills
   - **Age of Money:** how long money sits before it's spent
-- **Net Worth:**
+- **Net worth**, on Summary:
   - statement balances plus assets and debts you value by hand, over time
   - **goals** (save up, or pay a card down) with on-track status
   - **debt payoff:** highest rate first vs smallest balance first, with rates read from your
@@ -265,11 +278,11 @@ The steps are tried in this order:
 <table>
 <tr>
 <td width="50%"><img src="docs/screenshots/outlook.png" alt="Outlook: estimated balances until the next statement"></td>
-<td width="50%"><img src="docs/screenshots/networth.png" alt="Net Worth over time"></td>
+<td width="50%"><img src="docs/screenshots/trends.png" alt="Trends: spending by category over twelve months"></td>
 </tr>
 <tr>
 <td align="center"><sub>Outlook: balances until the next statement</sub></td>
-<td align="center"><sub>Net Worth: what you own and owe, over time</sub></td>
+<td align="center"><sub>Trends: twelve months of spending by category</sub></td>
 </tr>
 </table>
 
@@ -310,7 +323,7 @@ bring one up to accuracy:
 | Path | What |
 |---|---|
 | `crates/fingraph-core` | No GUI. Scanner (`parser/`: profiles, multipass, dates, reconcile, OCR), ledger and import rules (`db.rs`), rules and triage (`rules.rs`), learning (`learn.rs`), directory (`merchants.rs`, `data/merchants.tsv`), splits, reimbursements, attachments and coverage (`workflows.rs`), `insights.rs`, `budget.rs`, `outlook.rs`, `wealth.rs`, exports, preferences, demo statements |
-| `crates/fingraph` | The app, one file per page or dialog: `dashboard`, `wealth`, `budget`, `close`, `outlook`, `transactions`, `statement`, `statements`, `changes`, `rules`, `review`, `account`, `export`, `directory`, `profiles`, `preferences`, `guide`, `wizard`, `split`, `owed`, `txedit`. Cairo charts are in `charts.rs`; the shell, sidebar, menu and shared helpers are in `main.rs` |
+| `crates/fingraph` | The app, one file per page or dialog: `dashboard` (Summary), `wealth`, `budget`, `reports`, `close`, `outlook`, `transactions`, `statement`, `statements`, `changes`, `rules`, `review`, `account`, `export`, `directory`, `profiles`, `preferences`, `guide`, `wizard`, `split`, `owed`, `txedit`. Cairo charts are in `charts.rs`; the shell, sidebar, menu and shared helpers are in `main.rs` |
 | `packaging/` | Desktop entry (PDF/CSV/OFX "Open With"), icon, Arch PKGBUILD |
 
 ## Adding businesses

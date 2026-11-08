@@ -55,6 +55,16 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
     let cats = adw::PreferencesGroup::builder().title("Categories").description("Shown A–Z everywhere. Add your own; sub-categories roll up into their parent on the dashboard.").build();
     let add_cat = adw::ButtonRow::builder().title("Add a Category…").start_icon_name("list-add-symbolic").build();
     cats.add(&add_cat);
+    let paint = adw::ButtonRow::builder().title("Icons and Colours…").start_icon_name("applications-graphics-symbolic").build();
+    cats.add(&paint);
+    {
+        let w = Rc::downgrade(app);
+        paint.connect_activated(move |_| {
+            if let Some(a) = w.upgrade() {
+                looks_dialog(&a);
+            }
+        });
+    }
     if part == Part::Rules {
         page.add(&cats);
     }
@@ -425,6 +435,69 @@ pub fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
         a.refresh();
     }));
     d.present(Some(&app.win));
+}
+
+/// One row per top-level category; its tile opens a chooser. A change shows at once, everywhere.
+fn looks_dialog(app: &Rc<App>) {
+    use fingraph_core::looks::{self, COLORS, ICONS};
+    let page = adw::PreferencesPage::new();
+    let group = adw::PreferencesGroup::builder().title("Icons and Colours").description("Each category keeps its look on every screen and in every chart. Sub-categories wear their parent's.").build();
+    page.add(&group);
+    let all = app.categories();
+    for c in all.iter().filter(|c| c.parent_id.is_none()) {
+        let row = adw::ActionRow::builder().title(gtk::glib::markup_escape_text(&c.name)).build();
+        let tile_slot = gtk::Box::builder().valign(gtk::Align::Center).build();
+        let look = looks::look_of(c, &all);
+        tile_slot.append(&crate::tile_for(Some(&look)));
+        let current = Rc::new(std::cell::RefCell::new(look));
+        let button = gtk::MenuButton::builder().child(&tile_slot).valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text(format!("Change the look of {}", c.name)).build();
+        let pop = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).margin_top(8).margin_bottom(8).margin_start(8).margin_end(8).build();
+        let apply: Rc<dyn Fn(Option<&str>, Option<&str>)> = {
+            let (w, id, current, tile_slot) = (Rc::downgrade(app), c.id, current.clone(), tile_slot.clone());
+            Rc::new(move |icon, color| {
+                let Some(a) = w.upgrade() else { return };
+                let mut l = current.borrow_mut();
+                if let Some(i) = icon {
+                    l.icon = i.to_string();
+                }
+                if let Some(c) = color {
+                    l.color = c.to_string();
+                }
+                a.saved(a.db.set_category_look(id, Some(&l.icon), Some(&l.color)));
+                while let Some(ch) = tile_slot.first_child() {
+                    tile_slot.remove(&ch);
+                }
+                tile_slot.append(&crate::tile_for(Some(&l)));
+                drop(l);
+                a.refresh();
+            })
+        };
+        let icons = gtk::Grid::builder().row_spacing(4).column_spacing(4).build();
+        for (i, name) in ICONS.iter().enumerate() {
+            let b = gtk::Button::builder().icon_name(*name).css_classes(["flat", "cat-choice"]).build();
+            let apply = apply.clone();
+            b.connect_clicked(move |_| apply(Some(name), None));
+            icons.attach(&b, (i % 5) as i32, (i / 5) as i32, 1, 1);
+        }
+        pop.append(&icons);
+        let colors = gtk::Grid::builder().row_spacing(4).column_spacing(4).build();
+        for (i, (name, ..)) in COLORS.iter().enumerate() {
+            let b = gtk::Button::builder().css_classes(["cat-choice", &format!("cat-{name}")]).tooltip_text(*name).build();
+            let apply = apply.clone();
+            b.connect_clicked(move |_| apply(None, Some(name)));
+            colors.attach(&b, (i % 5) as i32, (i / 5) as i32, 1, 1);
+        }
+        pop.append(&colors);
+        button.set_popover(Some(&gtk::Popover::builder().child(&pop).build()));
+        row.add_suffix(&button);
+        group.add(&row);
+    }
+    let dlg = adw::Dialog::builder().title("Icons and Colours").content_width(460).content_height(620).build();
+    let tv = adw::ToolbarView::new();
+    tv.add_top_bar(&adw::HeaderBar::new());
+    tv.set_content(Some(&page));
+    dlg.set_child(Some(&tv));
+    dlg.present(Some(&app.win));
 }
 
 fn category_dialog(app: &Rc<App>) {

@@ -8,6 +8,7 @@ use chrono::{Datelike, NaiveDate};
 use fingraph_core::Decimal;
 use fingraph_core::budget::{self as core, Alert, Deduction, Envelope, Fund, PayCycle, Plan, scope, suggest};
 use fingraph_core::db::{Category, TxRow};
+use fingraph_core::method::Method;
 use fingraph_core::plan_doc::Roles;
 use fingraph_core::insights::{add_months, by_category, month_start};
 use fingraph_core::money::{Currency, Fx, fmt_money, parse_user};
@@ -355,67 +356,120 @@ fn usual_loans(s: &Snap, m: NaiveDate) -> Decimal {
     v[v.len() / 2].round_dp(0)
 }
 
+/// The first time a month is needed: the newest one statements speak for, since they arrive after it ends.
+fn settle_month(app: &Rc<App>) {
+    if MONTH.with(Cell::get).is_none() {
+        let newest = app.db.documents(&app.entity_ids()).unwrap_or_default().iter().filter_map(|d| d.period.map(|p| p.1)).max();
+        let shown = crate::dashboard::headline_month(newest, today(), |m| left_in(app, m).is_some());
+        MONTH.with(|c| c.set(Some(shown)));
+    }
+}
+
+/// How one share of a method stands: the bar, and a tick at its target.
+fn target_bar(share: f64, target: f64, color: charts::Rgb) -> gtk::DrawingArea {
+    let bar = gtk::DrawingArea::builder().content_height(16).hexpand(true).build();
+    bar.set_draw_func(move |w, cr, width, _| {
+        let width = f64::from(width);
+        let fg = w.color();
+        cr.set_source_rgba(fg.red() as f64, fg.green() as f64, fg.blue() as f64, 0.14);
+        cr.rectangle(0.0, 3.0, width, 10.0);
+        let _ = cr.fill();
+        cr.set_source_rgb(color.0, color.1, color.2);
+        cr.rectangle(0.0, 3.0, width * share.clamp(0.0, 1.0), 10.0);
+        let _ = cr.fill();
+        cr.set_source_rgba(fg.red() as f64, fg.green() as f64, fg.blue() as f64, 0.95);
+        cr.rectangle((width * target.clamp(0.0, 1.0) - 1.0).max(0.0), 0.0, 2.0, 16.0);
+        let _ = cr.fill();
+    });
+    bar
+}
+
 pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(18).margin_bottom(24).margin_start(18).margin_end(18).build();
 
     let nav = gtk::Box::builder().spacing(8).build();
-    let prev = gtk::Button::builder().icon_name("go-previous-symbolic").tooltip_text("Previous month").build();
-    let next = gtk::Button::builder().icon_name("go-next-symbolic").tooltip_text("Next month").build();
+    let prev = gtk::Button::builder().icon_name("go-previous-symbolic").tooltip_text("Previous month").valign(gtk::Align::Center).build();
+    let next = gtk::Button::builder().icon_name("go-next-symbolic").tooltip_text("Next month").valign(gtk::Align::Center).build();
     let title = heading("");
     title.add_css_class("title-2");
-    title.set_hexpand(true);
     title.set_xalign(0.0);
-    let setup = gtk::Button::builder().label("Set Up Budget…").tooltip_text("A guided setup: your pay and deductions, your spending, your savings goal").build();
-    let close = gtk::Button::builder().label("Monthly Close…").tooltip_text("Go through a month once its statements are in: check them, sort what's new, settle the budget, tick off the bills").build();
-    let fill = gtk::Button::builder().label("Fill From My Spending").tooltip_text(format!("Give every category without a budget what it usually costs (median of the last {MONTHS} months)")).build();
+    let proven_text = gtk::Label::builder().xalign(0.0).css_classes(["caption", "proven"]).build();
+    let proven = gtk::Box::builder().spacing(6).build();
+    proven.append(&gtk::Image::builder().icon_name("object-select-symbolic").css_classes(["proven"]).pixel_size(12).build());
+    proven.append(&proven_text);
+    let title_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).hexpand(true).valign(gtk::Align::Center).build();
+    title_box.append(&title);
+    title_box.append(&proven);
+    let setup = gtk::Button::builder().label("Set Up Budget…").valign(gtk::Align::Center).tooltip_text("Your budgeting method, your pay and deductions, your spending, your savings goal").build();
+    let close = gtk::Button::builder().label("Monthly Close").valign(gtk::Align::Center).css_classes(["suggested-action"]).tooltip_text("Go through a month once its statements are in: check them, sort what's new, settle the budget, tick off the bills").build();
+    let fill = gtk::Button::builder().label("Fill From My Spending").valign(gtk::Align::Center).build();
     nav.append(&prev);
     nav.append(&next);
-    nav.append(&title);
-    nav.append(&close);
-    nav.append(&crate::planpdf::menu_button(app));
-    nav.append(&setup);
+    nav.append(&title_box);
     nav.append(&fill);
+    let plan_menu = crate::planpdf::menu_button(app);
+    plan_menu.set_valign(gtk::Align::Center);
+    nav.append(&plan_menu);
+    nav.append(&setup);
+    nav.append(&close);
     body.append(&nav);
 
-    // the answer first: what's left, then what it's made of
-    let (summary, nums) = crate::summary_row(
-        ("Left", "What's left in your budgeted categories: the budget (with rollovers and moves) minus what's been spent in them. Red means you're over."),
-        &[("Budgeted", "This month's budgets added up across your categories. If money rolled over from last month or you moved money between categories, the line below shows what you actually have to spend."), ("Spent", "What you've spent this month as far as your statements go, split into categories with a budget and categories without one. Statements arrive after the month ends, so it fills in late."), ("Heading For", "Where this month's spending ends up if you keep the same pace: what's spent up to your newest statement, stretched to the whole month. A big bill early in the month makes it look higher than it will be.")],
-    );
-    let [(left, left_s), (budgeted, budgeted_s), (spent, spent_s), (pace, pace_s)] = <[(gtk::Label, gtk::Label); 4]>::try_from(nums).unwrap();
-    body.append(&summary);
+    // what needs an answer from you comes first, and only while something does
+    let review = adw::Banner::builder().button_label("Review").revealed(false).build();
+    review.set_action_name(Some("win.show-review"));
 
-    // the plan: pay in, budget out, what's left to save, and where that leads
-    let plan_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
-    body.append(&plan_box);
-    let split_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
-    body.append(&split_box);
+    // the answer first: one number, which depends on the method
+    let hero = gtk::Box::builder().spacing(18).css_classes(["card", "summary"]).build();
+    let hero_text = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).build();
+    let hero_title = gtk::Label::builder().xalign(0.0).css_classes(["caption-heading"]).build();
+    hero_text.append(&with_info(&hero_title, "The number that matters under the budgeting method you chose. Spending counts what your statements show, so it fills in once they arrive. Change the method with the button at the top."));
+    let hero_value = gtk::Label::builder().xalign(0.0).css_classes(["hero-value", "tnum"]).build();
+    let hero_sub = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label"]).build();
+    let hero_pace = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label", "caption"]).build();
+    hero_text.append(&hero_value);
+    hero_text.append(&hero_sub);
+    hero_text.append(&hero_pace);
+    hero.append(&hero_text);
+    let assign = gtk::Button::builder().valign(gtk::Align::Center).css_classes(["suggested-action"]).visible(false).build();
+    hero.append(&assign);
+    body.append(&hero);
+
+    let method_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).build();
+    body.append(&method_box);
+    let groups_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).build();
+    body.append(&groups_box);
+    let outside = adw::ActionRow::builder().activatable(true).build();
+    outside.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    {
+        let w = Rc::downgrade(app);
+        outside.connect_activated(move |_| {
+            if let Some(a) = w.upgrade() {
+                a.show_view("review");
+            }
+        });
+    }
+    let outside_list = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
+    outside_list.append(&outside);
+    body.append(&outside_list);
     let funds_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
     body.append(&funds_box);
-    let projection = Chart::new(230);
-
-    body.append(&info_heading(
-        "Categories",
-        &format!("One row per category. The pill says whether it's a fixed or variable expense (click it to switch). Below the name: what it usually costs, last month, and any trend, rollover or money moved. On the right: what you've spent of its budget. The bar turns amber near the limit and red when over. “Usually” is the median of the last {MONTHS} months, so a one-off doesn't count. Transfers and categories left out in Preferences aren't spending."),
-    ));
-    body.append(&dim("Type a monthly amount and press Enter. Empty or 0 removes it."));
-    let list = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
-    body.append(&list);
     let watch_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
     body.append(&watch_box);
-    let flow = Chart::new(300);
-    let flow_card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
-    let flow_title = heading("");
-    flow_card.append(&with_info(
-        &flow_title,
-        "Money coming in is on the left and where it went is on the right; the thicker a band, the more money. If more came in than went out, the difference shows as Saved on the right. If more went out, the gap shows as From savings on the left. Hover a band for its amount.",
-    ));
-    flow_card.append(&dim("Money in on the left, where it went on the right (top-level categories; transfers between your own accounts left out). The difference is what you saved — or took from savings."));
-    flow_card.append(&flow.widget);
-    body.append(&flow_card);
-    let page = gtk::ScrolledWindow::builder().child(&adw::Clamp::builder().maximum_size(1000).child(&body).build()).vexpand(true).build();
 
-    // the page redraws itself after an edit; the sidebar and Overview follow
+    let empty = adw::StatusPage::builder().icon_name("x-office-spreadsheet-symbolic").title("No statements yet").description("Import your bank statements, or load the demo data to explore.").build();
+    let empty_btns = gtk::Box::builder().spacing(8).halign(gtk::Align::Center).build();
+    empty_btns.append(&gtk::Button::builder().label("Import Statements…").css_classes(["pill", "suggested-action"]).action_name("win.import").build());
+    empty_btns.append(&gtk::Button::builder().label("Load Demo Data").css_classes(["pill"]).action_name("win.demo").build());
+    empty.set_child(Some(&empty_btns));
+    let scroller = gtk::ScrolledWindow::builder().child(&adw::Clamp::builder().maximum_size(1100).child(&body).build()).vexpand(true).build();
+    let full = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+    full.append(&review);
+    full.append(&scroller);
+    let page = gtk::Stack::new();
+    page.add_named(&empty, Some("empty"));
+    page.add_named(&full, Some("full"));
+
+    // the page redraws itself after an edit; the sidebar and Summary follow
     let me: Rc<RefCell<Option<crate::Refresh>>> = Rc::default();
     let redraw: crate::Refresh = {
         let (me, w) = (me.clone(), Rc::downgrade(app));
@@ -453,7 +507,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         });
     }
 
-    // what Fill does for the month on screen, set by each refresh
+    // what Fill and the zero-based button do for the month on screen, set by each refresh
     let on_fill: Rc<RefCell<Option<crate::Refresh>>> = Rc::default();
     {
         let on_fill = on_fill.clone();
@@ -464,13 +518,39 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             }
         });
     }
+    let on_assign: Rc<RefCell<Option<crate::Refresh>>> = Rc::default();
+    {
+        let on_assign = on_assign.clone();
+        assign.connect_clicked(move |_| {
+            let f = on_assign.borrow().clone();
+            if let Some(f) = f {
+                f();
+            }
+        });
+    }
     let refresh: crate::Refresh = {
         let w = Rc::downgrade(app);
         let redraw = redraw.clone();
+        let page = page.clone();
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
+            let ids = a.entity_ids();
+            let waiting = a.db.triage_count(&ids).unwrap_or(0);
+            review.set_title(&format!("{waiting} merchant{} to review", if waiting == 1 { "" } else { "s" }));
+            review.set_revealed(waiting > 0);
+            if a.all_rows().is_empty() {
+                return page.set_visible_child_name("empty");
+            }
+            page.set_visible_child_name("full");
+            let docs = a.db.documents(&ids).unwrap_or_default();
+            settle_month(&a);
+            let proved = docs.iter().filter(|d| !matches!(d.reconciliation, fingraph_core::Reconciliation::Discrepancy(_))).filter_map(|d| d.period.map(|p| p.1)).max();
+            proven.set_visible(proved.is_some());
+            proven_text.set_label(&proved.map(|d| format!("Proven to the cent through {}", d.format("%d %b %Y"))).unwrap_or_default());
+
             let s = snap(&a);
             let (ccy, m) = (s.ccy, month());
+            let method = s.plan.as_ref().map_or(Method::Own, |p| p.method);
             let end = add_months(m, 1).pred_opt().unwrap_or(m);
             let (usual, subs_m, one_off) = usual(&s, m);
             let now: BTreeMap<String, Decimal> = by_category(&s.rows, m, end, ccy, &s.fx, &s.parents).into_iter().collect();
@@ -486,21 +566,14 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
             title.set_label(&m.format("%B %Y").to_string());
             next.set_sensitive(m < month_start(today()));
-            setup.set_label(if s.plan.is_some() { "Edit Plan…" } else { "Set Up Budget…" });
-            // the colour points at the next step: only while there's no budget at all
+            setup.set_label(&if s.plan.is_some() { format!("{}…", method.label()) } else { "Set Up Budget…".to_string() });
             setup.set_css_classes(if s.plan.is_none() && s.budgets.is_empty() { &["suggested-action"] } else { &[] });
             {
                 // fill: categories without a budget get their usual amount
                 let (w, sc, redraw, usual, cats) = (Rc::downgrade(&a), s.scope.clone(), redraw.clone(), usual.clone(), s.cats.clone());
                 let has: Vec<i64> = s.budgets.keys().copied().collect();
-                let can_fill = cats.iter().any(|c| !has.contains(&c.id) && usual.contains_key(&c.name));
-                fill.set_sensitive(can_fill);
-                // greyed out says why, not just that
-                fill.set_tooltip_text(Some(&if can_fill {
-                    format!("Give every category without a budget what it usually costs (median of the last {MONTHS} months)")
-                } else {
-                    "Nothing to fill: every category you spend in already has a budget".to_string()
-                }));
+                fill.set_visible(cats.iter().any(|c| !has.contains(&c.id) && usual.contains_key(&c.name)));
+                fill.set_tooltip_text(Some(&format!("Give every category without a budget what it usually costs (median of the last {MONTHS} months)")));
                 *on_fill.borrow_mut() = Some(Rc::new(move || {
                     let Some(a) = w.upgrade() else { return };
                     let mut n = 0;
@@ -520,35 +593,657 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let total_s: Decimal = now.values().copied().sum();
             let in_b: Decimal = s.cats.iter().filter(|c| in_budget(c.id)).filter_map(|c| now.get(&c.name)).copied().sum();
             let funded: Decimal = s.cats.iter().filter(|c| in_budget(c.id)).filter_map(|c| env.get(&c.id)).map(Envelope::funded).sum();
-            let days = Decimal::from(end.day());
             let share = elapsed(m, through);
-            budgeted.set_label(&money(total_b));
-            budgeted_s.set_label(&if funded != total_b { format!("{} categories · {} with rollovers and moves", bm.len(), money(funded)) } else { format!("{} categories", bm.len()) });
-            spent.set_label(&money(total_s));
-            spent_s.set_label(&format!("{} in budgeted categories · {} outside", money(in_b), money(total_s - in_b)));
-            left.set_label(&money(funded - in_b));
-            // the line under the headline says what it's out of, not the title again
-            left_s.set_label(&if funded.is_zero() {
-                "Set a budget below, or fill it from your spending".to_string()
-            } else if in_b > funded {
-                format!("Over budget: {} spent of {}", money(in_b), money(funded))
-            } else {
-                format!("{} spent of {} in budgeted categories", money(in_b), money(funded))
-            });
-            left.set_css_classes(&["value", "tnum", if in_b > funded { "amount-out" } else { "amount-in" }]);
             let proj = if share.is_zero() { total_s } else { (total_s / share).round_dp(2) };
-            pace.set_label(&money(proj));
-            pace_s.set_label(&if share.is_zero() {
-                "No statement for this month yet — they arrive after the month ends".to_string()
-            } else if share < Decimal::ONE {
-                format!("At this pace: your statements run to {} (day {} of {}); a big bill early in the month overstates it", through.format("%d %b"), through.day(), days)
-            } else {
-                "The whole month".into()
-            });
+            let loans = s.plan.as_ref().map(|p| p.loan_payments).unwrap_or_default();
+            let debt_extra = s.plan.as_ref().map(|p| p.debt_extra).unwrap_or_default();
+            let variable_budgets: Vec<Decimal> = s.cats.iter().filter(|c| !s.is_fixed(&c.name)).filter_map(|c| bm.get(&c.id).copied()).collect();
+            let variable_names: Vec<&str> = s.cats.iter().filter(|c| !s.is_fixed(&c.name)).map(|c| c.name.as_str()).collect();
+            let weekly = fingraph_core::method::weekly_allowance(&variable_budgets);
 
-            // each category's last six months, for its trend line
+            assign.set_visible(false);
+            hero_pace.set_visible(false);
+            let good = |over: bool| -> [&str; 2] { ["hero-value", if over { "amount-out" } else { "amount-in" }] };
+            match (method, &s.plan) {
+                (Method::EightyTwenty, Some(_)) => {
+                    let month_money: Decimal = variable_budgets.iter().copied().sum();
+                    let spent: Decimal = variable_names.iter().filter_map(|n| now.get(*n)).copied().sum();
+                    hero_title.set_label("Your Weekly Spending Money");
+                    hero_value.set_label(&format!("{} a week", money(weekly)));
+                    hero_value.set_css_classes(&good(false));
+                    hero_sub.set_label(&format!("{} of {}'s spending money left", money(month_money - spent), m.format("%B")));
+                }
+                (Method::ZeroBased, Some(p)) => {
+                    let left = fingraph_core::method::to_assign(p.monthly_income(), total_b, set_aside, loans, debt_extra, p.savings_goal);
+                    let over = left.is_sign_negative() && !left.is_zero();
+                    hero_title.set_label(if left.is_zero() { "Every Dollar Has a Job" } else if over { "Assigned Too Much" } else { "Still Needs a Job" });
+                    hero_value.set_label(&money(left.abs()));
+                    hero_value.set_css_classes(if left.is_zero() { &["hero-value", "amount-in"] } else { &["hero-value", "amount-variable"] });
+                    hero_sub.set_label(&format!("{} take-home a month", money(p.monthly_income())));
+                    if left > Decimal::ZERO {
+                        assign.set_label(&format!("Give {} to Savings", money(left)));
+                        assign.set_visible(true);
+                        let (w, sc, redraw) = (Rc::downgrade(&a), s.scope.clone(), redraw.clone());
+                        *on_assign.borrow_mut() = Some(Rc::new(move || {
+                            let Some(a) = w.upgrade() else { return };
+                            let Some(mut raw) = a.db.plan(&sc) else { return };
+                            let to = raw.currency.unwrap_or(ccy);
+                            raw.savings_goal += a.db.fx().unwrap_or_default().convert(left, ccy, to).round_dp(2);
+                            a.saved(a.db.save_plan(&sc, &raw));
+                            redraw();
+                        }));
+                    }
+                }
+                _ => {
+                    let spending = s.plan.is_some() && method != Method::Own;
+                    let (plan_all, spent_all) = if spending { (funded + set_aside + loans, in_b + set_aside + loans) } else { (funded, in_b) };
+                    hero_title.set_label(&format!("Left to Spend in {}", m.format("%B")));
+                    hero_value.set_label(&money(plan_all - spent_all));
+                    hero_value.set_css_classes(&good(spent_all > plan_all));
+                    hero_sub.set_label(&if plan_all.is_zero() {
+                        "Set a budget below, or fill it from your spending".to_string()
+                    } else if spent_all > plan_all {
+                        format!("Over budget: {} spent of {}", money(spent_all), money(plan_all))
+                    } else {
+                        format!("{} spent of {} planned", money(spent_all), money(plan_all))
+                    });
+                    hero_pace.set_visible(!share.is_zero() && share < Decimal::ONE);
+                    hero_pace.set_label(&format!("Heading for {} at this pace, from statements to {}", money(proj), through.format("%d %b")));
+                }
+            }
+
+            // ── what the method puts between the headline and the categories
+            clear(&method_box);
+            if let (Some(p), true) = (&s.plan, matches!(method, Method::FiftyThirtyTwenty | Method::SeventyTwentyTen)) {
+                let need_total: Decimal = s.cats.iter().filter(|c| s.needs.contains(&c.name)).filter_map(|c| bm.get(&c.id)).copied().sum::<Decimal>() + set_aside + loans;
+                let want_total: Decimal = s.cats.iter().filter(|c| !s.needs.contains(&c.name)).filter_map(|c| bm.get(&c.id)).copied().sum();
+                let cards = gtk::Box::builder().spacing(12).homogeneous(true).build();
+                let colors = [charts::BLUE, charts::ORANGE, charts::GREEN];
+                let shares = method.shares(p.method_base(), need_total, want_total, debt_extra);
+                for (i, sh) in shares.iter().enumerate() {
+                    let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "kpi"]).build();
+                    let top = gtk::Box::builder().build();
+                    top.append(&gtk::Label::builder().label(sh.name).xalign(0.0).hexpand(true).css_classes(["heading"]).build());
+                    top.append(&gtk::Label::builder().label(format!("Target {}%", sh.target)).css_classes(["dim-label", "caption"]).build());
+                    card.append(&top);
+                    card.append(&gtk::Label::builder().label(format!("{}%", sh.share)).xalign(0.0).css_classes(["value", "tnum"]).build());
+                    card.append(&target_bar(f(sh.share) / 100.0, f64::from(sh.target) / 100.0, colors[i % 3]));
+                    card.append(&gtk::Label::builder().label(format!("{} a month · {}", money(sh.amount), sh.note)).xalign(0.0).wrap(true).css_classes([if sh.ok { "dim-label" } else { "warning" }, "caption"]).build());
+                    cards.append(&card);
+                }
+                method_box.append(&cards);
+                if method == Method::SeventyTwentyTen && !debt_extra.is_zero() {
+                    if let Some(c) = crate::wealth::payoff_outlook(&a, loans, debt_extra) {
+                        let card = gtk::Box::builder().spacing(12).css_classes(["card", "kpi"]).build();
+                        let t = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).build();
+                        t.append(&gtk::Label::builder().label("Paying 10% Extra").xalign(0.0).css_classes(["caption-heading"]).build());
+                        t.append(&gtk::Label::builder().label(format!("Debt-free by {}", add_months(month_start(today()), c.months as i32).format("%B %Y"))).xalign(0.0).css_classes(["value"]).build());
+                        if let Some(saved) = c.months_saved {
+                            t.append(&dim(&format!("{saved} months sooner than the regular payments alone")));
+                        }
+                        card.append(&t);
+                        let r = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).valign(gtk::Align::Center).build();
+                        r.append(&gtk::Label::builder().label("Still owed").xalign(1.0).css_classes(["dim-label", "caption"]).build());
+                        r.append(&gtk::Label::builder().label(money(c.owed)).xalign(1.0).css_classes(["heading", "tnum", "amount-out"]).build());
+                        card.append(&r);
+                        method_box.append(&card);
+                    }
+                }
+            }
+            if let (Method::EightyTwenty, Some(p)) = (method, &s.plan) {
+                let row = gtk::Box::builder().spacing(12).homogeneous(true).build();
+                let weeks = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).css_classes(["card", "kpi"]).build();
+                weeks.append(&heading(&format!("Each Week in {}", m.format("%B"))));
+                let mut start = m;
+                while start <= end {
+                    let stop = (start + chrono::Duration::days(6)).min(end);
+                    let spent: Decimal = by_category(&s.rows, start, stop, ccy, &s.fx, &s.parents).into_iter().filter(|(n, _)| variable_names.contains(&n.as_str())).map(|x| x.1).sum();
+                    let line = gtk::Box::builder().build();
+                    line.append(&gtk::Label::builder().label(format!("{}–{}", start.format("%-d"), stop.format("%-d %b"))).xalign(0.0).hexpand(true).build());
+                    let over = spent > weekly;
+                    line.append(&gtk::Label::builder().label(format!("{} of {}", money(spent), money(weekly))).css_classes(if over { ["tnum", "amount-out"] } else { ["tnum", "dim-label"] }).build());
+                    weeks.append(&line);
+                    let bar = gtk::LevelBar::builder().min_value(0.0).max_value(1.0).value(if weekly.is_zero() { 0.0 } else { f(spent / weekly).min(1.0) }).build();
+                    if over {
+                        bar.add_css_class("over");
+                    }
+                    weeks.append(&bar);
+                    start = stop + chrono::Duration::days(1);
+                }
+                row.append(&weeks);
+                let side = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).build();
+                // saved first, spent after: the one thing to do when pay lands
+                let payday = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).css_classes(["card", "kpi"]).build();
+                payday.append(&heading("On Payday"));
+                let per_pay = ((p.monthly_income() - total_b - set_aside - loans - debt_extra) * Decimal::from(12) / p.cycle.per_year()).round_dp(0).max(Decimal::ZERO);
+                let into = p.accounts.savings.and_then(|id| a.db.accounts().unwrap_or_default().into_iter().find(|x| x.id == id)).map_or("your savings".to_string(), |x| x.name);
+                let key = format!("payday_moved:{}:{}", s.scope, m.format("%Y-%m"));
+                let tick = gtk::CheckButton::builder().active(a.db.setting(&key).as_deref() == Some("1")).label(format!("Move {} to {into}", money(per_pay))).build();
+                {
+                    let w = Rc::downgrade(&a);
+                    tick.connect_toggled(move |c| {
+                        if let Some(a) = w.upgrade() {
+                            a.saved(a.db.set_setting(&key, if c.is_active() { "1" } else { "" }));
+                        }
+                    });
+                }
+                payday.append(&tick);
+                payday.append(&dim("Pay yourself first, then spend the rest."));
+                side.append(&payday);
+                let bills = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "kpi"]).build();
+                let bills_total: Decimal = s.cats.iter().filter(|c| s.is_fixed(&c.name)).filter_map(|c| bm.get(&c.id)).copied().sum::<Decimal>() + set_aside + loans;
+                let top = gtk::Box::builder().build();
+                top.append(&gtk::Label::builder().label("Bills That Take Care of Themselves").xalign(0.0).hexpand(true).wrap(true).css_classes(["heading"]).build());
+                top.append(&gtk::Label::builder().label(money(bills_total)).css_classes(["heading", "tnum"]).build());
+                bills.append(&top);
+                bills.append(&dim("Regular bills, big bills and loan payments come out before your weekly number."));
+                side.append(&bills);
+                row.append(&side);
+                method_box.append(&row);
+            }
+            method_box.set_visible(method_box.first_child().is_some());
+
             let hist: BTreeMap<String, Vec<Decimal>> = s.cats.iter().map(|c| (c.name.clone(), core::history(&s.rows, &c.name, month_start(today()), MONTHS, ccy, &s.fx, &s.parents))).collect();
+            let names: Rc<Vec<(i64, String, Decimal)>> = Rc::new(s.cats.iter().map(|c| (c.id, c.name.clone(), env.get(&c.id).map(Envelope::available).unwrap_or_default())).collect());
+            let (plan_col, spent_col, left_col) = (gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal), gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal), gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal));
+            let line_box = || gtk::Box::builder().spacing(12).margin_top(6).margin_bottom(6).margin_start(12).margin_end(6).build();
+            let cell = |text: &str, group: &gtk::SizeGroup, classes: &[&str]| {
+                let l = gtk::Label::builder().label(text).xalign(1.0).valign(gtk::Align::Center).build();
+                l.set_css_classes(classes);
+                group.add_widget(&l);
+                l
+            };
+            // one category: tile, name and bar, the amount you can type, what's gone and what's left
+            let cat_row = |c: &Category| -> gtk::ListBoxRow {
+                let sp = now.get(&c.name).copied().unwrap_or_default();
+                let b = bm.get(&c.id).copied();
+                let e = env.get(&c.id).copied().unwrap_or_default();
+                let rolls = rollovers.contains_key(&c.id);
+                let fb = (b.is_some() || rolls).then(|| e.funded());
+                let u = usual.get(&c.name).copied();
+                let mut sub = vec![match u {
+                    Some(u) => {
+                        let t = usual_text(&c.name, u, subs_m, one_off, ccy);
+                        format!("U{}", &t[1..])
+                    }
+                    None => "Nothing in the last six months".into(),
+                }];
+                if let Some(l) = last.get(&c.name) {
+                    sub.push(format!("last month {}", money(*l)));
+                }
+                if let (Some(h), Some(u)) = (hist.get(&c.name), u) {
+                    let slope = core::trend(h).1.round_dp(0);
+                    if slope.abs() >= (u / Decimal::from(20)).max(Decimal::from(5)) {
+                        sub.push(format!("trending {} {} a month", if slope.is_sign_positive() { "up" } else { "down" }, money(slope.abs())));
+                    }
+                }
+                if !e.carried.is_zero() {
+                    sub.push(if e.carried.is_sign_positive() { format!("{} rolled over", money(e.carried)) } else { format!("{} overspent last month", money(-e.carried)) });
+                }
+                if !e.moved.is_zero() {
+                    sub.push(format!("{} {}", if e.moved.is_sign_positive() { "moved in" } else { "moved out" }, money(e.moved.abs())));
+                }
+                let line = line_box();
+                line.append(&a.category_tile(&c.name));
+                let name = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).valign(gtk::Align::Center).build();
+                name.append(&gtk::Label::builder().label(&c.name).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).build());
+                let bar = gtk::LevelBar::builder().min_value(0.0).max_value(1.0).build();
+                bar.remove_offset_value(Some("low"));
+                bar.remove_offset_value(Some("high"));
+                bar.remove_offset_value(Some("full"));
+                bar.add_offset_value("ok", 0.85);
+                bar.add_offset_value("near", 1.0);
+                if let Some(b) = fb.filter(|b| *b > Decimal::ZERO) {
+                    let r = f(sp / b);
+                    bar.set_value(r.min(1.0));
+                    if r > 1.0 {
+                        bar.add_css_class("over");
+                    }
+                } else {
+                    bar.set_visible(false);
+                }
+                name.append(&bar);
+                line.append(&name);
 
+                let entry = gtk::Entry::builder().placeholder_text(ccy.symbol()).width_chars(9).max_width_chars(9).xalign(1.0).valign(gtk::Align::Center).input_purpose(gtk::InputPurpose::Number).tooltip_text("Monthly amount: press Enter to save, empty or 0 removes it").build();
+                if let Some(b) = b {
+                    entry.set_text(&b.round_dp(2).normalize().to_string());
+                }
+                {
+                    let (w, sc, id, redraw) = (Rc::downgrade(&a), s.scope.clone(), c.id, redraw.clone());
+                    entry.connect_activate(move |e| {
+                        let Some(a) = w.upgrade() else { return };
+                        let t = e.text();
+                        let v = if t.trim().is_empty() { None } else { parse_user(&t) };
+                        if v.is_none() && !t.trim().is_empty() {
+                            return a.toast("Type an amount, like 600 or 1,250.00");
+                        }
+                        a.saved(a.db.set_budget(&sc, id, v.map(|v| (v, ccy))));
+                        redraw();
+                    });
+                }
+                plan_col.add_widget(&entry);
+                line.append(&entry);
+                line.append(&cell(&money(sp), &spent_col, &["tnum"]));
+                let (left_text, left_class) = match fb {
+                    Some(b) => (
+                        money(b - sp),
+                        match core::alert(sp, b, elapsed(m, through)) {
+                            Some(Alert::Over) => "amount-out",
+                            Some(Alert::Near) => "warning",
+                            None => "heading",
+                        },
+                    ),
+                    None => ("No budget".to_string(), "dim-label"),
+                };
+                line.append(&cell(&left_text, &left_col, &["tnum", left_class]));
+
+                // ⋯: everything else you can do to a category
+                let menu = gtk::MenuButton::builder().icon_name("view-more-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("More for this category").build();
+                let pop = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(6).margin_bottom(6).margin_start(6).margin_end(6).build();
+                let popover = gtk::Popover::builder().child(&pop).build();
+                if let Some(u) = u.filter(|u| Some(*u) != b) {
+                    let use_ = gtk::Button::builder().label(format!("Use What It Usually Costs ({})", money(u))).css_classes(["flat"]).build();
+                    let (w, sc, id, redraw, popover) = (Rc::downgrade(&a), s.scope.clone(), c.id, redraw.clone(), popover.clone());
+                    use_.connect_clicked(move |_| {
+                        popover.popdown();
+                        if let Some(a) = w.upgrade() {
+                            a.saved(a.db.set_budget(&sc, id, Some((u, ccy))));
+                            redraw();
+                        }
+                    });
+                    pop.append(&use_);
+                }
+                let is_fixed = s.is_fixed(&c.name);
+                let kind = gtk::Button::builder().label(if is_fixed { "Count as Variable Spending" } else { "Count as a Fixed Bill" }).css_classes(["flat"]).build();
+                {
+                    let (w, name, redraw, popover) = (Rc::downgrade(&a), c.name.clone(), redraw.clone(), popover.clone());
+                    kind.connect_clicked(move |_| {
+                        popover.popdown();
+                        if let Some(a) = w.upgrade() {
+                            a.saved(a.db.set_fixed(&name, !is_fixed));
+                            redraw();
+                        }
+                    });
+                }
+                pop.append(&kind);
+                let roll = gtk::CheckButton::builder().label("Roll leftovers into next month").active(rolls).tooltip_text("What's left (or overspent) carries into the next month's budget").build();
+                pop.append(&roll);
+                let move_in = gtk::Button::builder().label(if e.available().is_sign_negative() { "Cover Overspending…" } else { "Move Money In…" }).css_classes(["flat"]).build();
+                let move_out = gtk::Button::builder().label("Move Money Out…").css_classes(["flat"]).build();
+                pop.append(&move_in);
+                pop.append(&move_out);
+                let mine: Vec<core::Move> = a.db.moves(&s.scope, m).unwrap_or_default().into_iter().filter(|mv| mv.from == c.id || mv.to == c.id).collect();
+                if !mine.is_empty() {
+                    let undo = gtk::Button::builder().label(format!("Undo {} Move{} This Month", mine.len(), if mine.len() == 1 { "" } else { "s" })).css_classes(["flat"]).build();
+                    let (w, redraw) = (Rc::downgrade(&a), redraw.clone());
+                    undo.connect_clicked(move |_| {
+                        if let Some(a) = w.upgrade() {
+                            for mv in &mine {
+                                a.saved(a.db.delete_move(mv.id));
+                            }
+                            redraw();
+                        }
+                    });
+                    pop.append(&undo);
+                }
+                menu.set_popover(Some(&popover));
+                {
+                    let (w, sc, id, redraw, popover) = (Rc::downgrade(&a), s.scope.clone(), c.id, redraw.clone(), popover.clone());
+                    roll.connect_toggled(move |cb| {
+                        if let Some(a) = w.upgrade() {
+                            a.saved(a.db.set_rollover(&sc, id, cb.is_active().then_some(m)));
+                            popover.popdown();
+                            redraw();
+                        }
+                    });
+                }
+                for (btn, into) in [(&move_in, true), (&move_out, false)] {
+                    let (w, sc, id, redraw, names, popover) = (Rc::downgrade(&a), s.scope.clone(), c.id, redraw.clone(), names.clone(), popover.clone());
+                    btn.connect_clicked(move |_| {
+                        popover.popdown();
+                        if let Some(a) = w.upgrade() {
+                            move_dialog(&a, &sc, m, id, into, &names, ccy, redraw.clone());
+                        }
+                    });
+                }
+                line.append(&menu);
+                gtk::ListBoxRow::builder().child(&line).activatable(false).tooltip_text(sub.join(" · ")).build()
+            };
+            let plain_row = |look: (&str, &str), name: &str, amount: Decimal| -> gtk::ListBoxRow {
+                let line = line_box();
+                line.append(&crate::tile_for(Some(&fingraph_core::looks::Look { icon: look.0.into(), color: look.1.into() })));
+                line.append(&gtk::Label::builder().label(name).xalign(0.0).hexpand(true).build());
+                line.append(&cell(&money(amount), &plan_col, &["tnum"]));
+                line.append(&cell("", &spent_col, &[]));
+                line.append(&cell("", &left_col, &[]));
+                line.append(&gtk::Box::builder().width_request(34).build());
+                gtk::ListBoxRow::builder().child(&line).activatable(false).build()
+            };
+            let section = |title: &str| -> gtk::ListBox {
+                let head = gtk::Box::builder().spacing(12).margin_start(12).margin_end(6).build();
+                head.append(&gtk::Label::builder().label(title).xalign(0.0).hexpand(true).css_classes(["heading"]).build());
+                head.append(&cell(if method == Method::ZeroBased { "Assigned" } else { "Planned" }, &plan_col, &["column-head"]));
+                head.append(&cell("Spent", &spent_col, &["column-head"]));
+                head.append(&cell("Left", &left_col, &["column-head"]));
+                head.append(&gtk::Box::builder().width_request(34).build());
+                groups_box.append(&head);
+                let lb = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
+                groups_box.append(&lb);
+                lb
+            };
+
+            // ── the categories, grouped the way the method thinks about them
+            clear(&groups_box);
+            let mut shown: Vec<_> = s.cats.iter().filter(|c| in_budget(c.id) || now.contains_key(&c.name) || usual.contains_key(&c.name)).collect();
+            shown.sort_by_key(|c| std::cmp::Reverse(now.get(&c.name).copied().unwrap_or_default().max(bm.get(&c.id).copied().unwrap_or_default())));
+            for (i, g) in method.groups().iter().enumerate() {
+                let mine: Vec<_> = shown.iter().filter(|c| method.group_of(s.is_fixed(&c.name), s.needs.contains(&c.name)) == Some(i)).collect();
+                if mine.is_empty() {
+                    continue;
+                }
+                let lb = section(g);
+                for c in mine {
+                    lb.append(&cat_row(c));
+                }
+            }
+            if let (Some(p), false) = (&s.plan, method == Method::EightyTwenty) {
+                let saving = if method == Method::ZeroBased { p.savings_goal } else { p.monthly_savings(total_b) - set_aside };
+                let lb = section("Also Planned");
+                let bank = "x-office-spreadsheet-symbolic";
+                for (look, name, v) in [(("security-high-symbolic", "purple"), "Big bills, set aside", set_aside), ((bank, "orange"), "Loan payments", loans), ((bank, "orange"), "Extra on debts", debt_extra), (("starred-symbolic", "green"), "Saving", saving)] {
+                    if !v.is_zero() {
+                        lb.append(&plain_row(look, name, v));
+                    }
+                }
+            }
+            groups_box.set_visible(groups_box.first_child().is_some());
+
+            let out = total_s - in_b;
+            outside_list.set_visible(!out.is_zero());
+            outside.set_title(&glib::markup_escape_text(&format!("{} spent outside this budget", money(out))));
+            outside.set_subtitle(if now.contains_key("Uncategorized") { "Some of it hasn't been given a category yet. Open To Review to sort it." } else { "In categories with no budget." });
+
+            // ── yearly and quarterly bills, a share set aside each month
+            clear(&funds_box);
+            {
+                funds_box.append(&info_heading(
+                    "Non-Monthly Bills",
+                    "Each bar shows how much has been set aside so far towards that bill. A full bar means it's covered by its due date. Suggestions under the list are yearly or quarterly charges FinGraph spotted in your statements; add one to start setting money aside for it. Each month sets a share aside so the bill is covered when it comes; that comes out of what you save in Your Plan.",
+                ));
+                funds_box.append(&dim(
+                    "Insurance, licences, registrations, annual plans: bills that come once a quarter or once a year.",
+                ));
+                let lb = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
+                let ideas: Vec<core::FundIdea> = core::fund_ideas(&s.rows, ccy, &s.fx, today()).into_iter().filter(|i| !s.funds.iter().any(|f| f.stem == i.stem)).collect();
+                for fd in &s.funds {
+                    let due = fd.due(today());
+                    let aside = s.fx.convert(fd.set_aside(today()), fd.currency, ccy);
+                    let whole = s.fx.convert(fd.amount, fd.currency, ccy);
+                    let r = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&fd.name))
+                        .subtitle(format!(
+                            "{} {} · due {} · {} a month",
+                            fmt_money(fd.amount, fd.currency),
+                            match fd.every_months {
+                                12 => "once a year".to_string(),
+                                n => format!("every {n} months"),
+                            },
+                            due.format("%d %b %Y"),
+                            fmt_money(fd.monthly(), fd.currency)
+                        ))
+                        .build();
+                    let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).valign(gtk::Align::Center).width_request(220).build();
+                    col.append(&gtk::Label::builder().label(format!("{} of {} set aside", money(aside), money(whole))).xalign(1.0).css_classes(["tnum", "caption"]).build());
+                    let bar = gtk::LevelBar::builder().min_value(0.0).max_value(1.0).value(if whole.is_zero() { 0.0 } else { f(aside / whole).min(1.0) }).build();
+                    col.append(&bar);
+                    r.add_suffix(&col);
+                    let edit = gtk::Button::builder().icon_name("document-edit-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Change").build();
+                    let rm = gtk::Button::builder().icon_name("user-trash-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Remove").build();
+                    {
+                        let (w, sc, fd, redraw) = (Rc::downgrade(&a), s.scope.clone(), fd.clone(), redraw.clone());
+                        edit.connect_clicked(move |_| {
+                            if let Some(a) = w.upgrade() {
+                                fund_dialog(&a, &sc, Some(fd.clone()), ccy, redraw.clone());
+                            }
+                        });
+                    }
+                    {
+                        let (w, id, redraw) = (Rc::downgrade(&a), fd.id, redraw.clone());
+                        rm.connect_clicked(move |_| {
+                            if let Some(a) = w.upgrade() {
+                                a.saved(a.db.delete_fund(id));
+                                redraw();
+                            }
+                        });
+                    }
+                    r.add_suffix(&edit);
+                    r.add_suffix(&rm);
+                    lb.append(&r);
+                }
+                for i in &ideas {
+                    let r = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&i.payee))
+                        .subtitle(format!("Seen in your statements: {} {} · next around {}", money(i.amount), if i.every_months == 12 { "once a year" } else { "every 3 months" }, i.next_due.format("%d %b %Y")))
+                        .build();
+                    r.add_prefix(&gtk::Image::from_icon_name("starred-symbolic"));
+                    let add = gtk::Button::builder().label("Set Aside For It").valign(gtk::Align::Center).css_classes(["flat"]).build();
+                    let (w, sc, i, redraw) = (Rc::downgrade(&a), s.scope.clone(), i.clone(), redraw.clone());
+                    add.connect_clicked(move |_| {
+                        if let Some(a) = w.upgrade() {
+                            let fd = Fund { id: 0, name: i.payee.clone(), amount: i.amount.round_dp(0), currency: ccy, every_months: i.every_months, next_due: i.next_due, stem: i.stem.clone() };
+                            a.saved(a.db.save_fund(&sc, &fd));
+                            redraw();
+                        }
+                    });
+                    r.add_suffix(&add);
+                    lb.append(&r);
+                }
+                let add = adw::ButtonRow::builder().title("Add a Bill…").start_icon_name("list-add-symbolic").build();
+                {
+                    let (w, sc, redraw) = (Rc::downgrade(&a), s.scope.clone(), redraw.clone());
+                    add.connect_activated(move |_| {
+                        if let Some(a) = w.upgrade() {
+                            fund_dialog(&a, &sc, None, ccy, redraw.clone());
+                        }
+                    });
+                }
+                lb.append(&add);
+                funds_box.append(&lb);
+                if !s.funds.is_empty() {
+                    let total: Decimal = s.funds.iter().map(|fd| s.fx.convert(fd.set_aside(today()), fd.currency, ccy)).sum();
+                    funds_box.append(&dim(&format!("{} a month in all; {} should be set aside by now.", money(set_aside), money(total))));
+                }
+            }
+
+            // ── watchlists
+            clear(&watch_box);
+            {
+                watch_box.append(&info_heading(
+                    "Watchlists",
+                    "Each row shows this month's spending at a merchant (or anything matching the wording you chose) against the limit you set, whatever category it's in. The bar turns amber near the limit and red when over.",
+                ));
+                watch_box.append(&dim("A monthly limit on a merchant or any wording on your statements (Amazon, Foster's, DoorDash) — it counts across categories, and going over shows up with the budget alerts."));
+                let lb = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
+                let watches = a.db.watchlists(&s.scope);
+                for (i, wl) in watches.iter().enumerate() {
+                    let limit = s.fx.convert(wl.limit, wl.currency, ccy);
+                    let (sp, ids) = core::watched(&s.rows, wl, m, end, ccy, &s.fx);
+                    let r = adw::ActionRow::builder().title(glib::markup_escape_text(&wl.name)).subtitle(glib::markup_escape_text(&format!("Matches “{}” · {} charge{} in {}", wl.pattern, ids.len(), if ids.len() == 1 { "" } else { "s" }, m.format("%B")))).build();
+                    let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).valign(gtk::Align::Center).width_request(220).build();
+                    let st = gtk::Label::builder().label(format!("{} of {}", money(sp), money(limit))).xalign(1.0).css_classes(["tnum", "caption"]).build();
+                    match core::alert(sp, limit, elapsed(m, through)) {
+                        Some(Alert::Over) => st.add_css_class("amount-out"),
+                        Some(Alert::Near) => st.add_css_class("warning"),
+                        None => {}
+                    }
+                    col.append(&st);
+                    let bar = gtk::LevelBar::builder().min_value(0.0).max_value(1.0).value(if limit.is_zero() { 0.0 } else { f(sp / limit).min(1.0) }).build();
+                    if sp > limit {
+                        bar.add_css_class("over");
+                    }
+                    col.append(&bar);
+                    r.add_suffix(&col);
+                    if !ids.is_empty() {
+                        let show = gtk::Button::builder().icon_name("view-list-bullet-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Show these transactions").build();
+                        let w = Rc::downgrade(&a);
+                        show.connect_clicked(move |_| {
+                            if let Some(a) = w.upgrade() {
+                                a.show_transactions(ids.clone());
+                            }
+                        });
+                        r.add_suffix(&show);
+                    }
+                    let rm = gtk::Button::builder().icon_name("user-trash-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Stop watching").build();
+                    let (w, sc, watches, redraw) = (Rc::downgrade(&a), s.scope.clone(), watches.clone(), redraw.clone());
+                    rm.connect_clicked(move |_| {
+                        if let Some(a) = w.upgrade() {
+                            let mut v = watches.clone();
+                            v.remove(i);
+                            a.saved(a.db.save_watchlists(&sc, &v));
+                            redraw();
+                        }
+                    });
+                    r.add_suffix(&rm);
+                    lb.append(&r);
+                }
+                // add one: what to match, and the limit
+                let add = gtk::Box::builder().spacing(6).margin_top(6).margin_bottom(6).margin_start(12).margin_end(12).build();
+                let pat = gtk::Entry::builder().placeholder_text("Merchant or wording, e.g. Amazon").hexpand(true).build();
+                let lim = gtk::Entry::builder().placeholder_text(format!("{} a month", ccy.symbol())).width_chars(10).input_purpose(gtk::InputPurpose::Number).build();
+                let go = gtk::Button::builder().label("Watch").build();
+                add.append(&pat);
+                add.append(&lim);
+                add.append(&go);
+                let add_row = gtk::ListBoxRow::builder().child(&add).activatable(false).build();
+                lb.append(&add_row);
+                {
+                    let (w, sc, watches, redraw, pat, lim2) = (Rc::downgrade(&a), s.scope.clone(), watches.clone(), redraw.clone(), pat.clone(), lim.clone());
+                    let save = move || {
+                        let lim = &lim2;
+                        let Some(a) = w.upgrade() else { return };
+                        let p = pat.text().trim().to_string();
+                        let Some(l) = parse_user(&lim.text()).map(|v| v.abs()).filter(|v| !v.is_zero()) else { return a.toast("Type a monthly limit, like 150") };
+                        if p.is_empty() {
+                            return a.toast("Type the merchant or wording to watch");
+                        }
+                        let mut v = watches.clone();
+                        v.push(core::Watch { name: fingraph_core::rules::title_case(&p), pattern: p, limit: l, currency: ccy });
+                        a.saved(a.db.save_watchlists(&sc, &v));
+                        redraw();
+                    };
+                    let save = Rc::new(save);
+                    let s2 = save.clone();
+                    go.connect_clicked(move |_| s2());
+                    lim.connect_activate(move |_| save());
+                }
+                watch_box.append(&lb);
+            }
+        })
+    };
+    *me.borrow_mut() = Some(refresh.clone());
+    (page.upcast(), refresh)
+}
+
+/// A Reports tab that reads the month picked on Budget: where the money went, or how the plan stands.
+pub fn build_report(app: &Rc<App>, flow_tab: bool) -> (gtk::Widget, crate::Refresh) {
+    let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(18).margin_bottom(24).margin_start(18).margin_end(18).build();
+    let nav = gtk::Box::builder().spacing(8).build();
+    let prev = gtk::Button::builder().icon_name("go-previous-symbolic").tooltip_text("Previous month").build();
+    let next = gtk::Button::builder().icon_name("go-next-symbolic").tooltip_text("Next month").build();
+    let title = heading("");
+    title.add_css_class("title-2");
+    nav.append(&prev);
+    nav.append(&next);
+    nav.append(&title);
+    body.append(&nav);
+    let plan_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
+    let split_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).build();
+    let projection = Chart::new(230);
+    let flow = Chart::new(420);
+    let flow_card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["card", "chart-card"]).build();
+    let flow_title = heading("");
+    flow_card.append(&with_info(
+        &flow_title,
+        "Money coming in is on the left and where it went is on the right; the thicker a band, the more money. If more came in than went out, the difference shows as Saved on the right. If more went out, the gap shows as From savings on the left. Hover a band for its amount.",
+    ));
+    flow_card.append(&flow.widget);
+    if flow_tab {
+        body.append(&flow_card);
+    } else {
+        body.append(&plan_box);
+        body.append(&split_box);
+    }
+    let page = gtk::ScrolledWindow::builder().child(&adw::Clamp::builder().maximum_size(1100).child(&body).build()).vexpand(true).build();
+    let me: Rc<RefCell<Option<crate::Refresh>>> = Rc::default();
+    for (b, step) in [(&prev, -1), (&next, 1)] {
+        let me = me.clone();
+        b.connect_clicked(move |_| {
+            MONTH.with(|m| m.set(Some(add_months(month(), step))));
+            let f = me.borrow().clone();
+            if let Some(f) = f {
+                f();
+            }
+        });
+    }
+    let refresh: crate::Refresh = {
+        let w = Rc::downgrade(app);
+        Rc::new(move || {
+            let Some(a) = w.upgrade() else { return };
+            settle_month(&a);
+            let s = snap(&a);
+            let (ccy, m) = (s.ccy, month());
+            let end = add_months(m, 1).pred_opt().unwrap_or(m);
+            let (usual, _, _) = usual(&s, m);
+            let now: BTreeMap<String, Decimal> = by_category(&s.rows, m, end, ccy, &s.fx, &s.parents).into_iter().collect();
+            let env = envs(&a, &s, m);
+            let bm: BTreeMap<i64, Decimal> = env.iter().filter(|(_, e)| !e.budget.is_zero()).map(|(k, e)| (*k, e.budget)).collect();
+            let set_aside = funds_monthly(&s);
+            let money = |d: Decimal| fmt_money(d, ccy);
+            title.set_label(&m.format("%B %Y").to_string());
+            next.set_sensitive(m < month_start(today()));
+            let total_b: Decimal = bm.values().copied().sum();
+            let hist: BTreeMap<String, Vec<Decimal>> = s.cats.iter().map(|c| (c.name.clone(), core::history(&s.rows, &c.name, month_start(today()), MONTHS, ccy, &s.fx, &s.parents))).collect();
+            if flow_tab {
+            // ── where the money went
+            {
+                flow_title.set_label(&format!("Where the Money Went · {}", m.format("%B %Y")));
+                let mut income: BTreeMap<String, Decimal> = BTreeMap::new();
+                for t in s.rows.iter().filter(|t| t.posted >= m && t.posted <= end && !t.is_transfer()) {
+                    let v = fingraph_core::insights::value(t, ccy, &s.fx);
+                    if v.is_sign_positive() {
+                        let who = if t.clean_payee.is_empty() { fingraph_core::rules::title_case(&fingraph_core::rules::merchant_stem(&t.raw_description, &t.memo)) } else { t.clean_payee.clone() };
+                        *income.entry(who).or_default() += v;
+                    }
+                }
+                // the biggest few, the rest together
+                let top = |mut v: Vec<(String, Decimal)>, n: usize| -> Vec<(String, Decimal)> {
+                    v.sort_by_key(|x| std::cmp::Reverse(x.1));
+                    if v.len() > n {
+                        let rest: Decimal = v[n - 1..].iter().map(|x| x.1).sum();
+                        v.truncate(n - 1);
+                        v.push(("Everything else".into(), rest));
+                    }
+                    v
+                };
+                let ins = top(income.into_iter().collect(), 5);
+                let outs = top(now.iter().map(|(k, v)| (k.clone(), *v)).collect(), 9);
+                let (ti, to): (Decimal, Decimal) = (ins.iter().map(|x| x.1).sum(), outs.iter().map(|x| x.1).sum());
+                let mut left: Vec<(String, f64, charts::Rgb)> = ins.iter().map(|(n, v)| (format!("{n}  {}", money(*v)), f(*v), charts::GREEN)).collect();
+                let mut right: Vec<(String, f64, charts::Rgb)> = outs.iter().enumerate().map(|(i, (n, v))| (format!("{n}  {}", money(*v)), f(*v), charts::category_color(n).unwrap_or(charts::PALETTE[(i + 1) % charts::PALETTE.len()]))).collect();
+                let mut tips: Vec<String> = ins.iter().map(|(n, v)| format!("{n}: {} in", money(*v))).collect();
+                if to > ti {
+                    left.push((format!("From savings  {}", money(to - ti)), f(to - ti), charts::SLATE));
+                    tips.push(format!("Spent {} more than came in", money(to - ti)));
+                }
+                tips.extend(outs.iter().map(|(n, v)| format!("{n}: {} ({}% of spending)", money(*v), if to.is_zero() { Decimal::ZERO } else { (*v / to * Decimal::ONE_HUNDRED).round_dp(0) })));
+                if ti > to {
+                    right.push((format!("Saved  {}", money(ti - to)), f(ti - to), charts::GREEN));
+                    tips.push(format!("Kept {} ({}% of what came in)", money(ti - to), ((ti - to) / ti * Decimal::ONE_HUNDRED).round_dp(0)));
+                }
+                flow.set(Data::Flow { left, right, tips });
+            }
+            } else {
             // ── the plan
             clear(&plan_box);
             if let Some(p) = &s.plan {
@@ -650,7 +1345,6 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 card.append(&projection.widget);
                 plan_box.append(&card);
             }
-
             // ── fixed vs variable
             clear(&split_box);
             {
@@ -671,11 +1365,11 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
 
                 split_box.append(&info_heading(
                     "Fixed vs Variable",
-                    "The bar splits a month's money by colour: fixed expenses (bills that don't change much, like rent, insurance or phone), variable spending (things you choose, like groceries or eating out), non-monthly bills, loans, and what's saved. The variable part is where you have room to cut back. Switch a category with its Fixed/Variable pill under Categories.",
+                    "The bar splits a month's money by colour: fixed expenses (bills that don't change much, like rent, insurance or phone), variable spending (things you choose, like groceries or eating out), non-monthly bills, loans, and what's saved. The variable part is where you have room to cut back. Switch a category from its ⋯ menu on Budget.",
                 ));
                 split_box.append(&dim(match income {
                     Some(_) => "How your take-home divides each month. Amounts are budgets, or the usual cost where a category has none.",
-                    None => "Amounts are budgets, or the usual cost where a category has none. Set Up Budget… adds your pay, to see them against your take-home.",
+                    None => "Amounts are budgets, or the usual cost where a category has none. Set Up Budget, on the Budget page, adds your pay to see them against your take-home.",
                 }));
                 // one bar, split in proportion
                 let mut parts: Vec<(&str, Decimal, charts::Rgb)> = vec![("Fixed", fixed_t, charts::BLUE), ("Variable", var_t, charts::ORANGE)];
@@ -757,7 +1451,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                         grid.attach(&l, 1, i as i32, 1, 1);
                     }
                     if cats.is_empty() {
-                        card.append(&dim("None yet — mark categories below"));
+                        card.append(&dim("None yet: mark categories from their ⋯ menu on Budget"));
                     }
                     card.append(&grid);
                     cards.append(&card);
@@ -765,409 +1459,6 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 split_box.append(&cards);
                 rules_of_thumb(&split_box, fixed_t + set_aside + loans, var_t, income, ccy);
             }
-
-            // ── yearly and quarterly bills, a share set aside each month
-            clear(&funds_box);
-            {
-                funds_box.append(&info_heading(
-                    "Non-Monthly Bills",
-                    "Each bar shows how much has been set aside so far towards that bill. A full bar means it's covered by its due date. Suggestions under the list are yearly or quarterly charges FinGraph spotted in your statements; add one to start setting money aside for it. Each month sets a share aside so the bill is covered when it comes; that comes out of what you save in Your Plan.",
-                ));
-                funds_box.append(&dim(
-                    "Insurance, licences, registrations, annual plans: bills that come once a quarter or once a year.",
-                ));
-                let lb = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
-                let ideas: Vec<core::FundIdea> = core::fund_ideas(&s.rows, ccy, &s.fx, today()).into_iter().filter(|i| !s.funds.iter().any(|f| f.stem == i.stem)).collect();
-                for fd in &s.funds {
-                    let due = fd.due(today());
-                    let aside = s.fx.convert(fd.set_aside(today()), fd.currency, ccy);
-                    let whole = s.fx.convert(fd.amount, fd.currency, ccy);
-                    let r = adw::ActionRow::builder()
-                        .title(glib::markup_escape_text(&fd.name))
-                        .subtitle(format!(
-                            "{} {} · due {} · {} a month",
-                            fmt_money(fd.amount, fd.currency),
-                            match fd.every_months {
-                                12 => "once a year".to_string(),
-                                n => format!("every {n} months"),
-                            },
-                            due.format("%d %b %Y"),
-                            fmt_money(fd.monthly(), fd.currency)
-                        ))
-                        .build();
-                    let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).valign(gtk::Align::Center).width_request(220).build();
-                    col.append(&gtk::Label::builder().label(format!("{} of {} set aside", money(aside), money(whole))).xalign(1.0).css_classes(["tnum", "caption"]).build());
-                    let bar = gtk::LevelBar::builder().min_value(0.0).max_value(1.0).value(if whole.is_zero() { 0.0 } else { f(aside / whole).min(1.0) }).build();
-                    col.append(&bar);
-                    r.add_suffix(&col);
-                    let edit = gtk::Button::builder().icon_name("document-edit-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Change").build();
-                    let rm = gtk::Button::builder().icon_name("user-trash-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Remove").build();
-                    {
-                        let (w, sc, fd, redraw) = (Rc::downgrade(&a), s.scope.clone(), fd.clone(), redraw.clone());
-                        edit.connect_clicked(move |_| {
-                            if let Some(a) = w.upgrade() {
-                                fund_dialog(&a, &sc, Some(fd.clone()), ccy, redraw.clone());
-                            }
-                        });
-                    }
-                    {
-                        let (w, id, redraw) = (Rc::downgrade(&a), fd.id, redraw.clone());
-                        rm.connect_clicked(move |_| {
-                            if let Some(a) = w.upgrade() {
-                                a.saved(a.db.delete_fund(id));
-                                redraw();
-                            }
-                        });
-                    }
-                    r.add_suffix(&edit);
-                    r.add_suffix(&rm);
-                    lb.append(&r);
-                }
-                for i in &ideas {
-                    let r = adw::ActionRow::builder()
-                        .title(glib::markup_escape_text(&i.payee))
-                        .subtitle(format!("Seen in your statements: {} {} · next around {}", money(i.amount), if i.every_months == 12 { "once a year" } else { "every 3 months" }, i.next_due.format("%d %b %Y")))
-                        .build();
-                    r.add_prefix(&gtk::Image::from_icon_name("starred-symbolic"));
-                    let add = gtk::Button::builder().label("Set Aside For It").valign(gtk::Align::Center).css_classes(["flat"]).build();
-                    let (w, sc, i, redraw) = (Rc::downgrade(&a), s.scope.clone(), i.clone(), redraw.clone());
-                    add.connect_clicked(move |_| {
-                        if let Some(a) = w.upgrade() {
-                            let fd = Fund { id: 0, name: i.payee.clone(), amount: i.amount.round_dp(0), currency: ccy, every_months: i.every_months, next_due: i.next_due, stem: i.stem.clone() };
-                            a.saved(a.db.save_fund(&sc, &fd));
-                            redraw();
-                        }
-                    });
-                    r.add_suffix(&add);
-                    lb.append(&r);
-                }
-                let add = adw::ButtonRow::builder().title("Add a Bill…").start_icon_name("list-add-symbolic").build();
-                {
-                    let (w, sc, redraw) = (Rc::downgrade(&a), s.scope.clone(), redraw.clone());
-                    add.connect_activated(move |_| {
-                        if let Some(a) = w.upgrade() {
-                            fund_dialog(&a, &sc, None, ccy, redraw.clone());
-                        }
-                    });
-                }
-                lb.append(&add);
-                funds_box.append(&lb);
-                if !s.funds.is_empty() {
-                    let total: Decimal = s.funds.iter().map(|fd| s.fx.convert(fd.set_aside(today()), fd.currency, ccy)).sum();
-                    funds_box.append(&dim(&format!("{} a month in all; {} should be set aside by now.", money(set_aside), money(total))));
-                }
-            }
-
-            // ── one row per category that has a budget, spending or a usual amount
-            list.remove_all();
-            let mut shown: Vec<_> = s.cats.iter().filter(|c| in_budget(c.id) || now.contains_key(&c.name) || usual.contains_key(&c.name)).collect();
-            shown.sort_by_key(|c| std::cmp::Reverse(now.get(&c.name).copied().unwrap_or_default().max(bm.get(&c.id).copied().unwrap_or_default())));
-            let names: Rc<Vec<(i64, String, Decimal)>> = Rc::new(s.cats.iter().map(|c| (c.id, c.name.clone(), env.get(&c.id).map(Envelope::available).unwrap_or_default())).collect());
-            let use_col = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
-            let kind_col = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
-            for c in shown {
-                let sp = now.get(&c.name).copied().unwrap_or_default();
-                let b = bm.get(&c.id).copied();
-                let e = env.get(&c.id).copied().unwrap_or_default();
-                let rolls = rollovers.contains_key(&c.id);
-                // what it had to spend: the budget, plus what rolled in and money moved
-                let fb = (b.is_some() || rolls).then(|| e.funded());
-                let u = usual.get(&c.name).copied();
-                let mut sub = vec![match u {
-                    Some(u) => {
-                        let t = usual_text(&c.name, u, subs_m, one_off, ccy);
-                        format!("U{}", &t[1..])
-                    }
-                    None => "Nothing in the last six months".into(),
-                }];
-                if let Some(l) = last.get(&c.name) {
-                    sub.push(format!("last month {}", money(*l)));
-                }
-                if let (Some(h), Some(u)) = (hist.get(&c.name), u) {
-                    let slope = core::trend(h).1.round_dp(0);
-                    if slope.abs() >= (u / Decimal::from(20)).max(Decimal::from(5)) {
-                        sub.push(format!("trending {} {} a month", if slope.is_sign_positive() { "up" } else { "down" }, money(slope.abs())));
-                    }
-                }
-                if !e.carried.is_zero() {
-                    sub.push(if e.carried.is_sign_positive() { format!("{} rolled over", money(e.carried)) } else { format!("{} overspent last month", money(-e.carried)) });
-                }
-                if !e.moved.is_zero() {
-                    sub.push(format!("{} {}", if e.moved.is_sign_positive() { "moved in" } else { "moved out" }, money(e.moved.abs())));
-                }
-                let row = adw::ActionRow::builder().title(glib::markup_escape_text(&c.name)).subtitle(sub.join(" · ")).build();
-                let is_fixed = s.is_fixed(&c.name);
-                let kind = gtk::Button::builder()
-                    .label(if is_fixed { "Fixed" } else { "Variable" })
-                    .valign(gtk::Align::Center)
-                    .css_classes(["kind-pill", if is_fixed { "kind-fixed" } else { "kind-variable" }])
-                    .tooltip_text(if is_fixed { "A fixed expense — click to count it as variable" } else { "Variable spending — click to count it as a fixed expense" })
-                    .build();
-                kind_col.add_widget(&kind);
-                {
-                    let (w, name, redraw) = (Rc::downgrade(&a), c.name.clone(), redraw.clone());
-                    kind.connect_clicked(move |_| {
-                        if let Some(a) = w.upgrade() {
-                            a.saved(a.db.set_fixed(&name, !is_fixed));
-                            redraw();
-                        }
-                    });
-                }
-                row.add_prefix(&kind);
-
-                let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).valign(gtk::Align::Center).width_request(260).build();
-                let status = gtk::Label::builder().xalign(1.0).css_classes(["tnum", "caption"]).build();
-                match fb {
-                    Some(b) => match core::alert(sp, b, elapsed(m, through)) {
-                        Some(Alert::Over) => {
-                            status.set_label(&format!("{} of {} · over by {}", money(sp), money(b), money(sp - b)));
-                            status.add_css_class("amount-out");
-                        }
-                        Some(Alert::Near) => {
-                            status.set_label(&format!("{} of {} · {}% used, {} left", money(sp), money(b), (sp / b * Decimal::ONE_HUNDRED).round_dp(0), money(b - sp)));
-                            status.add_css_class("warning");
-                        }
-                        None => status.set_label(&format!("{} of {} · {} left", money(sp), money(b), money(b - sp))),
-                    },
-                    None => {
-                        status.set_label(&format!("{} spent · no budget", money(sp)));
-                        status.add_css_class("dim-label");
-                    }
-                }
-                let bar = gtk::LevelBar::builder().min_value(0.0).max_value(1.0).build();
-                bar.remove_offset_value(Some("low"));
-                bar.remove_offset_value(Some("high"));
-                bar.remove_offset_value(Some("full"));
-                bar.add_offset_value("ok", 0.85);
-                bar.add_offset_value("near", 1.0);
-                if let Some(b) = fb.filter(|b| *b > Decimal::ZERO) {
-                    let r = f(sp / b);
-                    bar.set_value(r.min(1.0));
-                    if r > 1.0 {
-                        bar.add_css_class("over");
-                    }
-                } else {
-                    bar.set_visible(false);
-                }
-                col.append(&status);
-                col.append(&bar);
-                row.add_suffix(&col);
-
-                let entry = gtk::Entry::builder().placeholder_text(ccy.symbol()).width_chars(8).max_width_chars(8).valign(gtk::Align::Center).input_purpose(gtk::InputPurpose::Number).tooltip_text("Monthly budget — Enter to save").build();
-                if let Some(b) = b {
-                    entry.set_text(&b.round_dp(2).normalize().to_string());
-                }
-                {
-                    let (w, sc, id, redraw) = (Rc::downgrade(&a), s.scope.clone(), c.id, redraw.clone());
-                    entry.connect_activate(move |e| {
-                        let Some(a) = w.upgrade() else { return };
-                        let t = e.text();
-                        let v = if t.trim().is_empty() { None } else { parse_user(&t) };
-                        if v.is_none() && !t.trim().is_empty() {
-                            return a.toast("Type an amount, like 600 or 1,250.00");
-                        }
-                        a.saved(a.db.set_budget(&sc, id, v.map(|v| (v, ccy))));
-                        redraw();
-                    });
-                }
-                row.add_suffix(&entry);
-                if let Some(u) = u.filter(|u| Some(*u) != b) {
-                    let use_ = gtk::Button::builder().label(format!("Use {}", money(u))).valign(gtk::Align::Center).css_classes(["flat"]).build();
-                    let (w, sc, id, redraw) = (Rc::downgrade(&a), s.scope.clone(), c.id, redraw.clone());
-                    use_.connect_clicked(move |_| {
-                        if let Some(a) = w.upgrade() {
-                            a.saved(a.db.set_budget(&sc, id, Some((u, ccy))));
-                            redraw();
-                        }
-                    });
-                    use_col.add_widget(&use_);
-                    row.add_suffix(&use_);
-                } else {
-                    // keep the entries lined up
-                    let pad = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-                    use_col.add_widget(&pad);
-                    row.add_suffix(&pad);
-                }
-                // ⋯: roll over, move money
-                let menu = gtk::MenuButton::builder().icon_name("view-more-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Rollover and moving money").build();
-                let pop = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(6).margin_bottom(6).margin_start(6).margin_end(6).build();
-                let roll = gtk::CheckButton::builder().label("Roll leftovers into next month").active(rolls).tooltip_text("What's left (or overspent) carries into the next month's budget").build();
-                pop.append(&roll);
-                let move_in = gtk::Button::builder().label(if e.available().is_sign_negative() { "Cover Overspending…" } else { "Move Money In…" }).css_classes(["flat"]).build();
-                let move_out = gtk::Button::builder().label("Move Money Out…").css_classes(["flat"]).build();
-                pop.append(&move_in);
-                pop.append(&move_out);
-                let mine: Vec<core::Move> = a.db.moves(&s.scope, m).unwrap_or_default().into_iter().filter(|mv| mv.from == c.id || mv.to == c.id).collect();
-                if !mine.is_empty() {
-                    let undo = gtk::Button::builder().label(format!("Undo {} Move{} This Month", mine.len(), if mine.len() == 1 { "" } else { "s" })).css_classes(["flat"]).build();
-                    let (w, redraw) = (Rc::downgrade(&a), redraw.clone());
-                    undo.connect_clicked(move |_| {
-                        if let Some(a) = w.upgrade() {
-                            for mv in &mine {
-                                a.saved(a.db.delete_move(mv.id));
-                            }
-                            redraw();
-                        }
-                    });
-                    pop.append(&undo);
-                }
-                let popover = gtk::Popover::builder().child(&pop).build();
-                menu.set_popover(Some(&popover));
-                {
-                    let (w, sc, id, redraw, popover) = (Rc::downgrade(&a), s.scope.clone(), c.id, redraw.clone(), popover.clone());
-                    roll.connect_toggled(move |cb| {
-                        if let Some(a) = w.upgrade() {
-                            a.saved(a.db.set_rollover(&sc, id, cb.is_active().then_some(m)));
-                            popover.popdown();
-                            redraw();
-                        }
-                    });
-                }
-                for (btn, into) in [(&move_in, true), (&move_out, false)] {
-                    let (w, sc, id, redraw, names, popover) = (Rc::downgrade(&a), s.scope.clone(), c.id, redraw.clone(), names.clone(), popover.clone());
-                    btn.connect_clicked(move |_| {
-                        popover.popdown();
-                        if let Some(a) = w.upgrade() {
-                            move_dialog(&a, &sc, m, id, into, &names, ccy, redraw.clone());
-                        }
-                    });
-                }
-                row.add_suffix(&menu);
-                list.append(&row);
-            }
-            // ── watchlists
-            clear(&watch_box);
-            {
-                watch_box.append(&info_heading(
-                    "Watchlists",
-                    "Each row shows this month's spending at a merchant (or anything matching the wording you chose) against the limit you set, whatever category it's in. The bar turns amber near the limit and red when over.",
-                ));
-                watch_box.append(&dim("A monthly limit on a merchant or any wording on your statements (Amazon, Foster's, DoorDash) — it counts across categories, and going over shows up with the budget alerts."));
-                let lb = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
-                let watches = a.db.watchlists(&s.scope);
-                for (i, wl) in watches.iter().enumerate() {
-                    let limit = s.fx.convert(wl.limit, wl.currency, ccy);
-                    let (sp, ids) = core::watched(&s.rows, wl, m, end, ccy, &s.fx);
-                    let r = adw::ActionRow::builder().title(glib::markup_escape_text(&wl.name)).subtitle(glib::markup_escape_text(&format!("Matches “{}” · {} charge{} in {}", wl.pattern, ids.len(), if ids.len() == 1 { "" } else { "s" }, m.format("%B")))).build();
-                    let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).valign(gtk::Align::Center).width_request(220).build();
-                    let st = gtk::Label::builder().label(format!("{} of {}", money(sp), money(limit))).xalign(1.0).css_classes(["tnum", "caption"]).build();
-                    match core::alert(sp, limit, elapsed(m, through)) {
-                        Some(Alert::Over) => st.add_css_class("amount-out"),
-                        Some(Alert::Near) => st.add_css_class("warning"),
-                        None => {}
-                    }
-                    col.append(&st);
-                    let bar = gtk::LevelBar::builder().min_value(0.0).max_value(1.0).value(if limit.is_zero() { 0.0 } else { f(sp / limit).min(1.0) }).build();
-                    if sp > limit {
-                        bar.add_css_class("over");
-                    }
-                    col.append(&bar);
-                    r.add_suffix(&col);
-                    if !ids.is_empty() {
-                        let show = gtk::Button::builder().icon_name("view-list-bullet-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Show these transactions").build();
-                        let w = Rc::downgrade(&a);
-                        show.connect_clicked(move |_| {
-                            if let Some(a) = w.upgrade() {
-                                a.show_transactions(ids.clone());
-                            }
-                        });
-                        r.add_suffix(&show);
-                    }
-                    let rm = gtk::Button::builder().icon_name("user-trash-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Stop watching").build();
-                    let (w, sc, watches, redraw) = (Rc::downgrade(&a), s.scope.clone(), watches.clone(), redraw.clone());
-                    rm.connect_clicked(move |_| {
-                        if let Some(a) = w.upgrade() {
-                            let mut v = watches.clone();
-                            v.remove(i);
-                            a.saved(a.db.save_watchlists(&sc, &v));
-                            redraw();
-                        }
-                    });
-                    r.add_suffix(&rm);
-                    lb.append(&r);
-                }
-                // add one: what to match, and the limit
-                let add = gtk::Box::builder().spacing(6).margin_top(6).margin_bottom(6).margin_start(12).margin_end(12).build();
-                let pat = gtk::Entry::builder().placeholder_text("Merchant or wording, e.g. Amazon").hexpand(true).build();
-                let lim = gtk::Entry::builder().placeholder_text(format!("{} a month", ccy.symbol())).width_chars(10).input_purpose(gtk::InputPurpose::Number).build();
-                let go = gtk::Button::builder().label("Watch").build();
-                add.append(&pat);
-                add.append(&lim);
-                add.append(&go);
-                let add_row = gtk::ListBoxRow::builder().child(&add).activatable(false).build();
-                lb.append(&add_row);
-                {
-                    let (w, sc, watches, redraw, pat, lim2) = (Rc::downgrade(&a), s.scope.clone(), watches.clone(), redraw.clone(), pat.clone(), lim.clone());
-                    let save = move || {
-                        let lim = &lim2;
-                        let Some(a) = w.upgrade() else { return };
-                        let p = pat.text().trim().to_string();
-                        let Some(l) = parse_user(&lim.text()).map(|v| v.abs()).filter(|v| !v.is_zero()) else { return a.toast("Type a monthly limit, like 150") };
-                        if p.is_empty() {
-                            return a.toast("Type the merchant or wording to watch");
-                        }
-                        let mut v = watches.clone();
-                        v.push(core::Watch { name: fingraph_core::rules::title_case(&p), pattern: p, limit: l, currency: ccy });
-                        a.saved(a.db.save_watchlists(&sc, &v));
-                        redraw();
-                    };
-                    let save = Rc::new(save);
-                    let s2 = save.clone();
-                    go.connect_clicked(move |_| s2());
-                    lim.connect_activate(move |_| save());
-                }
-                watch_box.append(&lb);
-            }
-
-            // ── where the money went
-            {
-                flow_title.set_label(&format!("Where the Money Went · {}", m.format("%B %Y")));
-                let mut income: BTreeMap<String, Decimal> = BTreeMap::new();
-                for t in s.rows.iter().filter(|t| t.posted >= m && t.posted <= end && !t.is_transfer()) {
-                    let v = fingraph_core::insights::value(t, ccy, &s.fx);
-                    if v.is_sign_positive() {
-                        let who = if t.clean_payee.is_empty() { fingraph_core::rules::title_case(&fingraph_core::rules::merchant_stem(&t.raw_description, &t.memo)) } else { t.clean_payee.clone() };
-                        *income.entry(who).or_default() += v;
-                    }
-                }
-                // the biggest few, the rest together
-                let top = |mut v: Vec<(String, Decimal)>, n: usize| -> Vec<(String, Decimal)> {
-                    v.sort_by_key(|x| std::cmp::Reverse(x.1));
-                    if v.len() > n {
-                        let rest: Decimal = v[n - 1..].iter().map(|x| x.1).sum();
-                        v.truncate(n - 1);
-                        v.push(("Everything else".into(), rest));
-                    }
-                    v
-                };
-                let ins = top(income.into_iter().collect(), 5);
-                let outs = top(now.iter().map(|(k, v)| (k.clone(), *v)).collect(), 9);
-                let (ti, to): (Decimal, Decimal) = (ins.iter().map(|x| x.1).sum(), outs.iter().map(|x| x.1).sum());
-                let mut left: Vec<(String, f64, charts::Rgb)> = ins.iter().map(|(n, v)| (format!("{n}  {}", money(*v)), f(*v), charts::GREEN)).collect();
-                let mut right: Vec<(String, f64, charts::Rgb)> = outs.iter().enumerate().map(|(i, (n, v))| (format!("{n}  {}", money(*v)), f(*v), charts::PALETTE[(i + 1) % charts::PALETTE.len()])).collect();
-                let mut tips: Vec<String> = ins.iter().map(|(n, v)| format!("{n}: {} in", money(*v))).collect();
-                if to > ti {
-                    left.push((format!("From savings  {}", money(to - ti)), f(to - ti), charts::SLATE));
-                    tips.push(format!("Spent {} more than came in", money(to - ti)));
-                }
-                tips.extend(outs.iter().map(|(n, v)| format!("{n}: {} ({}% of spending)", money(*v), if to.is_zero() { Decimal::ZERO } else { (*v / to * Decimal::ONE_HUNDRED).round_dp(0) })));
-                if ti > to {
-                    right.push((format!("Saved  {}", money(ti - to)), f(ti - to), charts::GREEN));
-                    tips.push(format!("Kept {} ({}% of what came in)", money(ti - to), ((ti - to) / ti * Decimal::ONE_HUNDRED).round_dp(0)));
-                }
-                flow.set(Data::Flow { left, right, tips });
-            }
-
-            if let Some(u) = now.get("Uncategorized") {
-                let row = adw::ActionRow::builder().title("Uncategorized").subtitle(format!("{} this month can't count against a budget until it has a category — To Review sorts it", money(*u))).activatable(true).build();
-                row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-                let w = Rc::downgrade(&a);
-                row.connect_activated(move |_| {
-                    if let Some(a) = w.upgrade() {
-                        a.show_view("review");
-                    }
-                });
-                list.append(&row);
             }
         })
     };

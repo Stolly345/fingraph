@@ -48,6 +48,37 @@ fn snap(app: &App) -> Snap {
     Snap { ccy: app.display(), fx: app.db.fx().unwrap_or_default(), accounts, items: app.db.manual_items(&ids).unwrap_or_default(), scope: scope(&ids), rows }
 }
 
+/// What 70/20/10's extra payment buys.
+pub(crate) struct Outlook {
+    pub owed: Decimal,
+    pub months: u32,
+    /// How much sooner than `regular` alone; `None` when that alone wouldn't clear it.
+    pub months_saved: Option<u32>,
+}
+
+/// When the debts are clear paying `regular + extra` a month, rates estimated as on Summary.
+pub(crate) fn payoff_outlook(app: &App, regular: Decimal, extra: Decimal) -> Option<Outlook> {
+    let s = snap(app);
+    let mut debts = Vec::new();
+    for (id, x) in s.accounts.iter().filter(|(_, x)| x.liability) {
+        let Some((_, v)) = x.points.last().filter(|(_, v)| v.is_sign_negative() && !v.is_zero()) else { continue };
+        let (apr, _) = apr_for(app, &s, *id, -*v);
+        debts.push(Debt { name: x.name.clone(), balance: s.fx.convert(-*v, x.currency, s.ccy), apr: apr.unwrap_or_default() });
+    }
+    for i in s.items.iter().filter(|i| i.liability) {
+        if let Some((_, v)) = i.values.last().filter(|v| v.1 > Decimal::ZERO) {
+            debts.push(Debt { name: i.name.clone(), balance: s.fx.convert(*v, i.currency, s.ccy), apr: i.apr.unwrap_or_default() });
+        }
+    }
+    if debts.is_empty() {
+        return None;
+    }
+    let owed = debts.iter().map(|d| d.balance).sum();
+    let with = core::payoff(&debts, regular + extra, Strategy::Avalanche)?;
+    let months_saved = core::payoff(&debts, regular, Strategy::Avalanche).map(|p| p.months.saturating_sub(with.months));
+    Some(Outlook { owed, months: with.months, months_saved })
+}
+
 /// Net worth on a date, for Monthly Close's summary.
 pub fn net_worth_at(app: &App, d: NaiveDate) -> Option<Decimal> {
     let s = snap(app);
@@ -107,8 +138,10 @@ fn goal_row(app: &App, s: &Snap, g: &Goal) -> adw::ActionRow {
     r
 }
 
-pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
-    let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(18).margin_bottom(24).margin_start(18).margin_end(18).build();
+/// Summary's net-worth pieces: the headline and chart that lead the page, what it's made of (which
+/// folds under the charts), and the refresh for both.
+pub fn parts(app: &Rc<App>) -> (gtk::Widget, gtk::Widget, crate::Refresh) {
+    let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).build();
     // the answer first: what you're worth, then how it moved and what it's made of
     let (summary, nums) = crate::summary_row(
         ("Net Worth", "Everything you own minus everything you owe. Bank balances come from your latest statements, and the things you've added by hand (a house, car, pension) are included too. Cards, loans and other debts are taken off."),
@@ -126,8 +159,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     card.append(&chart.widget);
     body.append(&card);
     let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).build();
-    body.append(&content);
-    let page = gtk::ScrolledWindow::builder().child(&adw::Clamp::builder().maximum_size(1000).child(&body).build()).vexpand(true).build();
+    content.set_margin_top(12);
+    let content_out = content.clone();
 
     let me: Rc<std::cell::RefCell<Option<crate::Refresh>>> = Rc::default();
     let redraw: crate::Refresh = {
@@ -309,7 +342,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         })
     };
     *me.borrow_mut() = Some(refresh.clone());
-    (page.upcast(), refresh)
+    (body.upcast(), content_out.upcast(), refresh)
 }
 
 /// Cards, loans and debts added by hand, with a rate each, and the two ways to pay them off.
@@ -576,7 +609,7 @@ pub fn fill_close_goals(app: &Rc<App>, m: NaiveDate, b: &gtk::Box, redo: crate::
     let s = snap(app);
     let goals = app.db.goals(&s.scope).unwrap_or_default();
     if goals.is_empty() {
-        b.append(&dim("No goals yet — add one on the Net Worth page."));
+        b.append(&dim("No goals yet — add one on Summary, under the charts."));
         return;
     }
     b.append(&dim(&format!("Goals that follow an account update from its statements. For the others, type what you put towards them in {} and press Enter.", m.format("%B"))));

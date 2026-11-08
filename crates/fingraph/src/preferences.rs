@@ -436,7 +436,7 @@ fn triage(app: &Rc<App>) -> adw::PreferencesPage {
 
 fn dashboard(app: &Rc<App>) -> adw::PreferencesPage {
     let p = app.db.prefs();
-    let page = adw::PreferencesPage::builder().name("dashboard").title("Dashboard").icon_name("view-grid-symbolic").build();
+    let page = adw::PreferencesPage::builder().name("dashboard").title("Summary").icon_name("view-grid-symbolic").build();
 
     let cards = adw::PreferencesGroup::builder().title("What Changed? Cards").build();
     let hidden: Vec<String> = app.db.setting("hidden_insights").unwrap_or_default().split(',').map(str::to_string).collect();

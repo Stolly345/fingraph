@@ -5,6 +5,7 @@
 use gtk::{cairo, gdk, glib};
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::f64::consts::PI;
 use std::rc::Rc;
 
@@ -45,6 +46,8 @@ pub enum Data {
     Empty(String),
     /// Grouped bars per label, plus an optional line on the same axis; one tooltip per group.
     Bars { labels: Vec<String>, series: Vec<Series>, line: Option<Series>, tips: Vec<String> },
+    /// One stacked bar per label; `series` bottom to top. The Trends tab's breakdown is its legend.
+    Stacked { labels: Vec<String>, series: Vec<Series>, tips: Vec<String> },
     Donut { items: Vec<(String, f64)>, tips: Vec<String>, center: String },
     HBars { items: Vec<(String, f64)>, values: Vec<String>, tips: Vec<String> },
     /// x is numeric; `band` = (low, high) polygon; `stops` = hover points (x, tooltip).
@@ -236,7 +239,7 @@ impl Chart {
 fn summary(d: &Data) -> String {
     let tips: Vec<String> = match d {
         Data::Empty(msg) => return msg.clone(),
-        Data::Bars { tips, .. } | Data::Donut { tips, .. } | Data::HBars { tips, .. } | Data::Pareto { tips, .. } | Data::Flow { tips, .. } => tips.clone(),
+        Data::Bars { tips, .. } | Data::Stacked { tips, .. } | Data::Donut { tips, .. } | Data::HBars { tips, .. } | Data::Pareto { tips, .. } | Data::Flow { tips, .. } => tips.clone(),
         Data::Lines { stops, .. } => stops.iter().map(|s| s.1.clone()).collect(),
     };
     let lines: Vec<String> = tips.iter().take(12).map(|t| t.lines().filter(|l| !l.starts_with("Click")).collect::<Vec<_>>().join(", ")).collect();
@@ -247,7 +250,24 @@ fn summary(d: &Data) -> String {
 /// A category's colour: its place in the palette, except Uncategorized, which is missing data rather
 /// than a kind of spending, so it's a faint wash of the text colour and never the loudest slice.
 fn swatch(name: &str, i: usize, fg: Rgb) -> (Rgb, f64) {
-    if name == "Uncategorized" { (fg, 0.3) } else { (PALETTE[i % PALETTE.len()], 1.0) }
+    if name == "Uncategorized" {
+        return (fg, 0.3);
+    }
+    (category_color(name).unwrap_or(PALETTE[i % PALETTE.len()]), 1.0)
+}
+
+thread_local! {
+    static CATEGORY_COLORS: RefCell<HashMap<String, Rgb>> = RefCell::default();
+}
+
+/// The colour each category wears, so it's the same slice, bar and tile on every screen.
+pub fn set_category_colors(m: HashMap<String, Rgb>) {
+    CATEGORY_COLORS.with(|c| *c.borrow_mut() = m);
+}
+
+/// A category's own colour, if `name` is one.
+pub fn category_color(name: &str) -> Option<Rgb> {
+    CATEGORY_COLORS.with(|c| c.borrow().get(name).copied())
 }
 
 fn rgb(cr: &cairo::Context, c: Rgb, a: f64) {
@@ -379,6 +399,37 @@ fn draw(cr: &cairo::Context, w: f64, h: f64, fg: Rgb, data: &Data, hover: Option
                 leg.push((l.name.as_str(), l.color));
             }
             legend(cr, fg, &leg, right, 10.0);
+        }
+        Data::Stacked { labels, series, tips } => {
+            let n = labels.len().max(1) as f64;
+            let totals: Vec<f64> = (0..labels.len()).map(|i| series.iter().map(|s| s.values.get(i).copied().unwrap_or(0.0)).sum()).collect();
+            let hi = totals.iter().copied().fold(0.0, f64::max);
+            let y = y_axis(cr, fg, 0.0, if hi > 0.0 { hi } else { 1.0 }, (top, bottom, left, right), fmt);
+            let gw = (right - left) / n;
+            let bw = (gw * 0.68).min(46.0);
+            for (gi, label) in labels.iter().enumerate() {
+                let gx = left + gi as f64 * gw;
+                if hover == Some(gi) {
+                    rgb(cr, fg, 0.06);
+                    cr.rectangle(gx, top, gw, bottom - top);
+                    let _ = cr.fill();
+                }
+                let mut base = 0.0;
+                for s in series {
+                    let v = s.values.get(gi).copied().unwrap_or(0.0);
+                    if v <= 0.0 {
+                        continue;
+                    }
+                    let (y0, y1) = (y(base), y(base + v));
+                    rgb(cr, s.color, if hover.is_none() || hover == Some(gi) { 0.95 } else { 0.6 });
+                    cr.rectangle(gx + (gw - bw) / 2.0, y1, bw, (y0 - y1 - 1.0).max(0.5));
+                    let _ = cr.fill();
+                    base += v;
+                }
+                rgb(cr, fg, 0.6);
+                text(cr, label, gx + gw / 2.0, bottom + 16.0, 0.5);
+                hits.push(Hit { shape: Shape::XBand(gx, gx + gw), index: gi, tip: tips.get(gi).cloned().unwrap_or_default() });
+            }
         }
         Data::Donut { items, tips, center } => {
             let total: f64 = items.iter().map(|i| i.1).sum();

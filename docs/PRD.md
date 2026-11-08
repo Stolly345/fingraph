@@ -1,6 +1,6 @@
 # FinGraph: Product Requirements
 
-Last updated: 6 November 2026 (version 0.2.22)
+Last updated: 8 November 2026 (version 0.2.22, with the interface redesign unreleased)
 
 ## 1. What FinGraph is
 
@@ -171,7 +171,58 @@ offers **Put the Rest in Savings**. The budget can't be saved until the unassign
 - **Report Card:** grades the month's needs, wants and saving (pension included) as shares of what
   came in.
 
-## 7. Known issues and next steps
+## 7. Feature: the interface redesign (finished on the `interface-redesign` branch, not yet released)
+
+### Problem
+
+FinGraph had the functions but read as a long page of analysis: fourteen destinations, a Budget page
+whose categories started below the fold, and an Overview with eight figures before its first chart.
+People need one job per screen, and categories they recognise at a glance.
+
+### Decisions
+
+- **FinGraph opens on Budget, always.** There is no Home page and the last-used page isn't remembered.
+- **The sidebar is Budget, Transactions, Reports, Statements (with Combined Statement under it), Summary,
+  then a collapsible Accounts list.**
+- **Budget follows the method chosen at setup.** It is zero-based only for those who choose zero-based.
+- **Summary is Overview and Net Worth together.**
+
+- **A light/dark button sits beside the main menu.** It sets the same Appearance preference as
+  Preferences, so the two always agree.
+
+### Status
+
+- [x] **Step 1. Category identity and polish.** Every category has a symbolic icon and a named colour,
+  with defaults for the built-in ones (sub-categories wear their parent's) and a chooser under Rules &
+  Categories → Icons and Colours. Charts colour a category the same everywhere. ⓘ buttons are quiet
+  until a card is hovered, and stay visible enough for touchscreens. The demo household now pays a home
+  loan and has its routine bank charges already sorted.
+- [x] **Step 2. New sidebar, opening on Budget.** Page shortcuts are Ctrl+1 to Ctrl+6. Both folds are
+  remembered. Reports is one row with a strip of tabs.
+- [x] **Step 3. Budget rebuild.** Budget opens on the newest month with statements and leads with one
+  number, chosen by the method: *Left to Spend* (My Own Numbers, 50/30/20, 70/20/10), *a weekly spending
+  figure* (80/20) or *Still Needs a Job* (Zero-Based, with a button that gives the rest to savings).
+  Categories sit in one table per group (Bills and Everyday; Needs and Wants; Spending), with tile, bar,
+  planned, spent and left; everything else about a category is on its ⋯ menu. 50/30/20 and 70/20/10 show
+  each part of the split against its target, and 70/20/10 adds when the debts clear. 80/20 has no category
+  table: a week-by-week look back at the month, the payday move as a checklist item, and bills
+  apart. Its weekly figure is the Budget Plan PDF's definition (variable budgets, per week), so screen and
+  paper agree. Review and the "proven to the cent" line moved here. Your Plan, Fixed vs Variable, Rules of
+  Thumb and the money-flow chart moved to Reports. The method's rules live in `fingraph-core` and are tested.
+- [x] **Step 4. Summary.** Net worth leads, then the Overview figures and charts for the chosen date range.
+  Accounts, other assets and debts, goals and debt payoff are kept, folded under the charts (the fold is
+  remembered). Left to Spend and the Review banner are no longer repeated here; they live on Budget.
+- [x] **Step 5. Reports.** One sidebar row and a tab strip: Cash Flow, Trends, Where It Went, Plan, Outlook,
+  Subscriptions, What Changed and Export. Cash Flow and Trends are new: one large chart and a ranked
+  breakdown over the twelve months ending with the newest statement, with stacked bars by category for Trends.
+- [x] **Step 6. Finish.** Getting Started, card help, the README and its screenshots all describe the new
+  layout. Old `last_page` values in saved preferences are ignored.
+
+## 8. Known issues and next steps
+
+Left out of the interface redesign, in the order they'd help most: **manual transaction entry** (which
+would let 80/20's weekly view cover the current week, since statements only arrive after a month ends),
+multi-step undo, more themes, and customisable Summary widgets.
 
 1. **Twice-a-month pay ignores the payday you type.** It assumes the 15th and the last day, so a
    payday on the 12th gives 12th, 15th, 30th. Fix: step from the typed day.

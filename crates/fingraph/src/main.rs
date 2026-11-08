@@ -16,6 +16,7 @@ mod picker;
 mod planpdf;
 mod preferences;
 mod profiles;
+mod reports;
 mod review;
 mod rules;
 mod share;
@@ -41,10 +42,12 @@ use std::rc::Rc;
 
 const APP_ID: &str = "dev.fingraph.FinGraph";
 
-/// Ctrl+1 to Ctrl+9 for the first nine; all of them can be the page FinGraph reopens on.
-/// Pages reached from Overview (To Review) or the main menu, not listed in the sidebar.
-const OFF_SIDEBAR: [&str; 5] = ["review", "export", "rules", "directory", "profiles"];
-const MAIN_PAGES: [&str; 11] = ["overview", "networth", "budget", "outlook", "transactions", "statement", "statements", "changes", "subscriptions", "review", "export"];
+/// Pages reached from Budget (To Review) or the main menu, not listed in the sidebar.
+const OFF_SIDEBAR: [&str; 4] = ["review", "rules", "directory", "profiles"];
+/// The sidebar's pages, Ctrl+1 onward. FinGraph always opens on the first.
+const MAIN_PAGES: [&str; 6] = ["budget", "transactions", "reports", "statements", "statement", "summary"];
+/// The tabs of Reports, each a page of its own under the one sidebar row.
+const REPORT_TABS: [(&str, &str); 8] = [("cashflow", "Cash Flow"), ("trends", "Trends"), ("flow", "Where It Went"), ("plan", "Plan"), ("outlook", "Outlook"), ("subscriptions", "Subscriptions"), ("changes", "What Changed"), ("export", "Export")];
 
 /// Which workspaces the window shows.
 #[derive(Clone, PartialEq)]
@@ -103,6 +106,20 @@ pub struct App {
     views: RefCell<Vec<(&'static str, Refresh)>>,
     /// Transactions view: show only these ids (from an insight card), until cleared.
     pub focus_ids: RefCell<Option<Vec<i64>>>,
+    /// Every category's look, read once per refresh (each table row wants one).
+    looks_now: RefCell<HashMap<String, fingraph_core::looks::Look>>,
+    /// The strip of Reports tabs, and the tab last open.
+    report_bar: gtk::ScrolledWindow,
+    report_tabs: RefCell<Vec<(&'static str, gtk::ToggleButton)>>,
+    last_report: Cell<&'static str>,
+    /// What's folded in the sidebar.
+    statements_open: Cell<bool>,
+    accounts_open: Cell<bool>,
+    statements_arrow: gtk::Button,
+    accounts_arrow: gtk::Image,
+    accounts_row: gtk::ListBoxRow,
+    /// Beside the main menu: flips between light and dark.
+    theme_btn: gtk::Button,
 }
 
 /// Sets a "this change isn't the user's" flag until dropped, so a panic halfway can't leave it stuck on.
@@ -138,7 +155,7 @@ impl App {
         let win = adw::ApplicationWindow::builder().application(gapp).title("FinGraph").default_width(1360).default_height(900).build();
         let toasts = adw::ToastOverlay::new();
         let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).vhomogeneous(false).build();
-        let content_title = adw::WindowTitle::new("Dashboard & Insights", "");
+        let content_title = adw::WindowTitle::new("Budget", "");
 
         // ── header: workspace, currency, range, triage
         // the workspace decides everything below it, so it heads the sidebar
@@ -154,7 +171,7 @@ impl App {
         let menu = gio::Menu::new();
         let s1 = gio::Menu::new();
         s1.append(Some("Import Statements…"), Some("win.import"));
-        s1.append(Some("Reports & Export"), Some("win.show-export"));
+        s1.append(Some("Export"), Some("win.show-export"));
         menu.append_section(None, &s1);
         let s2 = gio::Menu::new();
         s2.append(Some("Rules & Categories"), Some("win.show-rules"));
@@ -173,23 +190,18 @@ impl App {
         content_header.pack_start(&ccy_box);
         content_header.pack_start(&range_box);
         content_header.pack_end(&menu_btn);
+        let theme_btn = gtk::Button::new();
+        content_header.pack_end(&theme_btn);
         let content_tv = adw::ToolbarView::new();
         content_tv.add_top_bar(&content_header);
+        let report_box = gtk::Box::builder().css_classes(["linked"]).halign(gtk::Align::Center).margin_top(6).margin_bottom(6).margin_start(12).margin_end(12).build();
+        let report_bar = gtk::ScrolledWindow::builder().child(&report_box).vscrollbar_policy(gtk::PolicyType::Never).propagate_natural_height(true).visible(false).build();
+        content_tv.add_top_bar(&report_bar);
         content_tv.set_content(Some(&stack));
         let content = adw::NavigationPage::builder().title("FinGraph").child(&content_tv).build();
 
         // ── sidebar
         let side_list = gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build();
-        side_list.set_header_func(|row, before| {
-            let name = row.widget_name();
-            let prev = before.map(|b| b.widget_name().to_string()).unwrap_or_default();
-            let title = if name.starts_with("account:") && !prev.starts_with("account:") {
-                Some("Accounts")
-            } else {
-                None
-            };
-            row.set_header(title.map(|t| gtk::Label::builder().label(t).xalign(0.0).margin_start(12).margin_top(14).margin_bottom(4).css_classes(["caption-heading", "dim-label"]).build()).as_ref());
-        });
         let side_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
         side_box.append(&workspace_btn);
         side_box.append(&gtk::ScrolledWindow::builder().child(&side_list).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build());
@@ -204,6 +216,8 @@ impl App {
         bp.add_setter(&split, "collapsed", Some(&true.to_value()));
         win.add_breakpoint(bp);
 
+        let open_setting = |k: &str| db.setting(k).as_deref() != Some("0");
+        let (statements_open, accounts_open) = (open_setting("sidebar_statements"), open_setting("sidebar_accounts"));
         let app = Rc::new(App {
             win,
             toasts,
@@ -236,6 +250,16 @@ impl App {
             display: Cell::new(Currency::KYD),
             views: RefCell::new(Vec::new()),
             focus_ids: RefCell::new(None),
+            theme_btn,
+            report_bar,
+            report_tabs: RefCell::default(),
+            last_report: Cell::new(REPORT_TABS[0].0),
+            statements_open: Cell::new(statements_open),
+            accounts_open: Cell::new(accounts_open),
+            statements_arrow: gtk::Button::builder().valign(gtk::Align::Center).css_classes(["flat", "circular"]).tooltip_text("Show or hide Combined Statement").build(),
+            accounts_arrow: gtk::Image::new(),
+            accounts_row: gtk::ListBoxRow::builder().name("accounts-header").selectable(false).activatable(true).tooltip_text("Show or hide your accounts").build(),
+            looks_now: RefCell::default(),
         });
         APP.with(|w| *w.borrow_mut() = Rc::downgrade(&app));
         app.display.set(app.db.setting("display_currency").and_then(|c| Currency::parse(&c)).unwrap_or(Currency::KYD));
@@ -248,8 +272,11 @@ impl App {
         let (t, tr) = transactions::build(&app);
         let (cs, csr) = statement::build(&app);
         let (bu, bur) = budget::build(&app);
+        let (fl, flr) = budget::build_report(&app, true);
+        let (pl, plr) = budget::build_report(&app, false);
         let (ol, olr) = outlook::build(&app);
-        let (nw, nwr) = wealth::build(&app);
+        let (cf, cfr) = reports::build_cash_flow(&app);
+        let (tn, tnr) = reports::build_trends(&app);
         let (sb, sbr) = rules::build(&app, rules::Part::Subscriptions);
         let (st, str_) = statements::build(&app);
         let (e, er) = export::build(&app);
@@ -260,30 +287,41 @@ impl App {
         // an account's overview is reached from its row under Accounts, not listed itself
         app.stack.add_titled(&ac, Some("account"), "Account");
         app.views.borrow_mut().push(("account", acr));
-        let pages: Vec<(&'static str, &str, &str, gtk::Widget, Refresh)> = vec![
-            ("overview", "Overview", "view-grid-symbolic", o, or),
-            ("networth", "Net Worth", "starred-symbolic", nw, nwr),
-            ("budget", "Budget", "accessories-calculator-symbolic", bu, bur),
-            ("outlook", "Outlook", "x-office-calendar-symbolic", ol, olr),
-            ("transactions", "Transactions", "view-list-bullet-symbolic", t, tr),
-            ("statement", "Combined Statement", "view-paged-symbolic", cs, csr),
-            ("statements", "Statements", "x-office-document-symbolic", st, str_),
-            ("changes", "What Changed", "preferences-system-notifications-symbolic", c, cr),
-            ("subscriptions", "Subscriptions", "media-playlist-repeat-symbolic", sb, sbr),
-            ("review", "To Review", "mail-unread-symbolic", rv, rvr),
-            ("export", "Reports & Export", "document-save-symbolic", e, er),
-            ("rules", "Rules & Categories", "edit-find-replace-symbolic", r, rr),
-            ("directory", "Business Directory", "folder-saved-search-symbolic", dir, dirr),
-            ("profiles", "Bank Profiles", "document-page-setup-symbolic", p, pr),
+        let pages: Vec<(&'static str, &str, gtk::Widget, Refresh)> = vec![
+            ("summary", "Summary", o, or),
+            ("cashflow", "Cash Flow", cf, cfr),
+            ("trends", "Trends", tn, tnr),
+            ("budget", "Budget", bu, bur),
+            ("flow", "Where It Went", fl, flr),
+            ("plan", "Plan", pl, plr),
+            ("outlook", "Outlook", ol, olr),
+            ("transactions", "Transactions", t, tr),
+            ("statement", "Combined Statement", cs, csr),
+            ("statements", "Statements", st, str_),
+            ("changes", "What Changed", c, cr),
+            ("subscriptions", "Subscriptions", sb, sbr),
+            ("review", "To Review", rv, rvr),
+            ("export", "Export", e, er),
+            ("rules", "Rules & Categories", r, rr),
+            ("directory", "Business Directory", dir, dirr),
+            ("profiles", "Bank Profiles", p, pr),
         ];
-        for (name, title, icon, w, refresh) in pages {
+        for (name, title, w, refresh) in pages {
             app.stack.add_titled(&w, Some(name), title);
-            // To Review shows on Overview while there's something to answer; the rest are in the main menu
-            if !OFF_SIDEBAR.contains(&name) {
-                side_list.append(&app.side_row(name, title, icon));
-            }
             app.views.borrow_mut().push((name, refresh));
         }
+        for (name, title, icon) in [
+            ("budget", "Budget", "accessories-calculator-symbolic"),
+            ("transactions", "Transactions", "view-list-bullet-symbolic"),
+            ("reports", "Reports", "x-office-spreadsheet-symbolic"),
+            ("statements", "Statements", "x-office-document-symbolic"),
+            ("statement", "Combined Statement", "view-paged-symbolic"),
+            ("summary", "Summary", "view-grid-symbolic"),
+        ] {
+            side_list.append(&app.side_row(name, title, icon));
+        }
+        app.build_sidebar_folds();
+        app.build_report_tabs(&report_box);
         {
             let w = Rc::downgrade(&app);
             side_list.connect_row_selected(move |_, row| {
@@ -337,6 +375,7 @@ impl App {
             });
         }
         app.actions();
+        app.build_theme_toggle();
         // where to start: Preferences → General
         let prefs = app.db.prefs();
         preferences::apply_appearance(&prefs.appearance);
@@ -345,8 +384,7 @@ impl App {
             *app.scope.borrow_mut() = Scope::One(id);
         }
         app.reload_entities();
-        let last = app.db.prefs().last_page;
-        app.show_view(if app.stack.child_by_name(&last).is_some() { &last } else { "overview" });
+        app.show_view("budget");
         app.win.present();
         // today's rates (and any a statement still lacks), quietly, when downloads are on
         app.update_rates(false);
@@ -400,7 +438,7 @@ impl App {
         for (i, page) in MAIN_PAGES.iter().enumerate() {
             add(&format!("page-{}", i + 1), Rc::new(move |a: &Rc<App>| a.show_view(page)));
         }
-        for page in OFF_SIDEBAR {
+        for page in OFF_SIDEBAR.into_iter().chain(["export"]) {
             add(&format!("show-{page}"), Rc::new(move |a: &Rc<App>| a.show_view(page)));
         }
         add("retriage", Rc::new(wizard::reset_and_retriage));
@@ -723,6 +761,16 @@ impl App {
     }
 
     /// Sub-category id → its parent's name, for rolling spending up to top-level categories.
+    pub fn looks(&self) -> HashMap<String, fingraph_core::looks::Look> {
+        let cats = self.categories();
+        cats.iter().map(|c| (c.name.clone(), fingraph_core::looks::look_of(c, &cats))).collect()
+    }
+
+    /// A small coloured tile with the category's icon: its identity on every screen.
+    pub fn category_tile(&self, name: &str) -> gtk::Box {
+        tile_for(self.looks_now.borrow().get(name))
+    }
+
     pub fn parents(&self) -> BTreeMap<i64, String> {
         let cats = self.categories();
         cats.iter().filter_map(|c| Some((c.id, cats.iter().find(|p| Some(p.id) == c.parent_id)?.name.clone()))).collect()
@@ -731,6 +779,22 @@ impl App {
     // ── navigation & refresh
 
     pub fn show_view(self: &Rc<Self>, name: &str) {
+        // Reports is its tabs: the row opens the one last used
+        let name = if name == "reports" { self.last_report.get() } else { name };
+        let tab = REPORT_TABS.iter().find(|t| t.0 == name).map(|t| t.0);
+        if let Some(t) = tab {
+            self.last_report.set(t);
+        }
+        self.report_bar.set_visible(tab.is_some());
+        {
+            let _q = Quiet::on(&self.quiet);
+            for (n, b) in self.report_tabs.borrow().iter() {
+                b.set_active(Some(*n) == tab);
+            }
+        }
+        if name == "statement" && !self.statements_open.get() {
+            self.set_statements_open(true);
+        }
         self.stack.set_visible_child_name(name);
         if let Some(c) = self.stack.child_by_name(name) {
             self.content_title.set_title(&self.stack.page(&c).title().unwrap_or_default());
@@ -738,7 +802,7 @@ impl App {
         // highlight it in the sidebar (an account row stays highlighted over its transactions)
         let on_account = self.side_list.selected_row().is_some_and(|r| r.widget_name().starts_with("account:"));
         if !(on_account && matches!(name, "transactions" | "account"))
-            && let Some(r) = self.row_named(name)
+            && let Some(r) = self.row_named(if tab.is_some() { "reports" } else { name })
             && self.side_list.selected_row().as_ref() != Some(&r)
         {
             self.side_list.select_row(Some(&r));
@@ -746,15 +810,8 @@ impl App {
             self.side_list.unselect_all();
         }
         // the header shows only what this page uses
-        self.range_box.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "export" | "account"));
-        self.ccy_box.set_visible(matches!(name, "overview" | "changes" | "transactions" | "statement" | "budget" | "subscriptions" | "export" | "outlook" | "networth"));
-        if MAIN_PAGES.contains(&name) {
-            let mut p = self.db.prefs();
-            if p.last_page != name {
-                p.last_page = name.into();
-                let _ = self.db.save_prefs(&p);
-            }
-        }
+        self.range_box.set_visible(matches!(name, "summary" | "changes" | "transactions" | "statement" | "export" | "account"));
+        self.ccy_box.set_visible(matches!(name, "summary" | "changes" | "transactions" | "statement" | "budget" | "subscriptions" | "export" | "outlook" | "cashflow" | "trends" | "flow" | "plan"));
         self.split.set_show_content(true);
         self.refresh();
     }
@@ -772,7 +829,113 @@ impl App {
         if let Some(&key) = ["changes", "subscriptions", "statements", "budget"].iter().find(|k| **k == name) {
             self.badges.borrow_mut().insert(key, badge);
         }
-        gtk::ListBoxRow::builder().child(&row).name(name).build()
+        let out = gtk::ListBoxRow::builder().child(&row).name(name).build();
+        if name == "statement" {
+            row.set_margin_start(36);
+            out.set_visible(self.statements_open.get());
+        }
+        if name == "statements" {
+            row.append(&self.statements_arrow);
+        }
+        out
+    }
+
+    /// The sun or moon beside the menu: it picks Light or Dark in Preferences → Appearance, so the two
+    /// always agree. It shows what a press switches to, and follows the system while that's in charge.
+    fn build_theme_toggle(self: &Rc<Self>) {
+        let show = {
+            let b = self.theme_btn.clone();
+            move |dark: bool| {
+                b.set_icon_name(if dark { "weather-clear-symbolic" } else { "weather-clear-night-symbolic" });
+                let tip = if dark { "Switch to Light Style" } else { "Switch to Dark Style" };
+                b.set_tooltip_text(Some(tip));
+                b.update_property(&[gtk::accessible::Property::Label(tip)]);
+            }
+        };
+        let sm = adw::StyleManager::default();
+        show(sm.is_dark());
+        sm.connect_dark_notify(move |sm| show(sm.is_dark()));
+        let w = Rc::downgrade(self);
+        self.theme_btn.connect_clicked(move |_| {
+            let Some(a) = w.upgrade() else { return };
+            let style = if adw::StyleManager::default().is_dark() { "light" } else { "dark" };
+            let mut p = a.db.prefs();
+            p.appearance = style.into();
+            a.saved(a.db.save_prefs(&p));
+            preferences::apply_appearance(style);
+        });
+    }
+
+    /// The two folds: Combined Statement under Statements, and the Accounts list.
+    fn build_sidebar_folds(self: &Rc<Self>) {
+        let w = Rc::downgrade(self);
+        self.statements_arrow.connect_clicked(move |_| {
+            if let Some(a) = w.upgrade() {
+                a.set_statements_open(!a.statements_open.get());
+            }
+        });
+        let head = gtk::Box::builder().spacing(6).margin_top(8).margin_bottom(2).margin_start(6).margin_end(6).build();
+        head.append(&gtk::Label::builder().label("Accounts").xalign(0.0).hexpand(true).css_classes(["caption-heading", "dim-label"]).build());
+        head.append(&self.accounts_arrow);
+        self.accounts_row.set_child(Some(&head));
+        self.side_list.append(&self.accounts_row);
+        let w = Rc::downgrade(self);
+        self.side_list.connect_row_activated(move |_, row| {
+            if let (Some(a), "accounts-header") = (w.upgrade(), row.widget_name().as_str()) {
+                a.set_accounts_open(!a.accounts_open.get());
+            }
+        });
+        self.show_fold_state();
+    }
+
+    fn show_fold_state(&self) {
+        let (s, a) = (self.statements_open.get(), self.accounts_open.get());
+        self.statements_arrow.set_icon_name(if s { "pan-down-symbolic" } else { "pan-end-symbolic" });
+        self.statements_arrow.update_state(&[gtk::accessible::State::Expanded(Some(s))]);
+        self.accounts_arrow.set_icon_name(Some(if a { "pan-down-symbolic" } else { "pan-end-symbolic" }));
+        self.accounts_row.update_state(&[gtk::accessible::State::Expanded(Some(a))]);
+    }
+
+    fn set_statements_open(&self, open: bool) {
+        self.statements_open.set(open);
+        let _ = self.db.set_setting("sidebar_statements", if open { "1" } else { "0" });
+        if let Some(r) = self.row_named("statement") {
+            r.set_visible(open);
+        }
+        self.show_fold_state();
+    }
+
+    fn set_accounts_open(&self, open: bool) {
+        self.accounts_open.set(open);
+        let _ = self.db.set_setting("sidebar_accounts", if open { "1" } else { "0" });
+        let mut i = 0;
+        while let Some(r) = self.side_list.row_at_index(i) {
+            if r.widget_name().starts_with("account:") {
+                r.set_visible(open);
+            }
+            i += 1;
+        }
+        self.show_fold_state();
+    }
+
+    fn build_report_tabs(self: &Rc<Self>, into: &gtk::Box) {
+        let mut tabs: Vec<(&'static str, gtk::ToggleButton)> = Vec::new();
+        for (name, title) in REPORT_TABS {
+            let b = gtk::ToggleButton::builder().label(title).build();
+            if let Some((_, first)) = tabs.first() {
+                b.set_group(Some(first));
+            }
+            let w = Rc::downgrade(self);
+            b.connect_toggled(move |b| {
+                let Some(a) = w.upgrade() else { return };
+                if b.is_active() && !a.quiet.get() {
+                    a.show_view(name);
+                }
+            });
+            into.append(&b);
+            tabs.push((name, b));
+        }
+        *self.report_tabs.borrow_mut() = tabs;
     }
 
     fn row_named(&self, name: &str) -> Option<gtk::ListBoxRow> {
@@ -842,13 +1005,13 @@ impl App {
             };
             let owed = balances.get(&acct.id).is_some_and(|(_, v)| v.is_sign_negative() && !v.is_zero());
             b.append(&gtk::Label::builder().label(&bal).xalign(1.0).css_classes(["caption", "tnum", if owed { "amount-out" } else { "dim-label" }]).build());
-            let row = gtk::ListBoxRow::builder().child(&b).name(format!("account:{}", acct.id)).tooltip_text(tip).build();
+            let row = gtk::ListBoxRow::builder().child(&b).name(format!("account:{}", acct.id)).tooltip_text(tip).visible(self.accounts_open.get()).build();
             self.side_list.append(&row);
             if selected.as_deref() == Some(row.widget_name().as_str()) {
                 self.side_list.select_row(Some(&row));
             }
         }
-        self.side_list.invalidate_headers();
+        self.accounts_row.set_visible(!accounts.is_empty());
     }
 
     /// Re-read the ledger into the visible view and the header, once, just before the next frame:
@@ -885,6 +1048,9 @@ impl App {
     pub fn refresh_now(self: &Rc<Self>) {
         self.refreshing.set(true);
         *self.rows_cache.borrow_mut() = None;
+        let looks = self.looks();
+        charts::set_category_colors(looks.iter().map(|(n, l)| (n.clone(), fingraph_core::looks::rgb_of(&l.color))).collect());
+        *self.looks_now.borrow_mut() = looks;
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.update_sidebar()));
         self.content_title.set_subtitle(&if self.range_box.is_visible() { self.range_label() } else { String::new() });
         let visible = self.stack.visible_child_name().unwrap_or_default();
@@ -1125,6 +1291,14 @@ pub fn clear(b: &gtk::Box) {
     }
 }
 
+/// The tile for a look; none (Uncategorized) is a plain grey one.
+pub fn tile_for(look: Option<&fingraph_core::looks::Look>) -> gtk::Box {
+    let (icon, color) = look.map_or(("dialog-question-symbolic", "slate"), |l| (l.icon.as_str(), l.color.as_str()));
+    let b = gtk::Box::builder().css_classes(["cat-tile", &format!("cat-{color}")]).halign(gtk::Align::Center).valign(gtk::Align::Center).hexpand(false).build();
+    b.append(&gtk::Image::builder().icon_name(icon).pixel_size(16).hexpand(true).halign(gtk::Align::Center).valign(gtk::Align::Center).build());
+    b
+}
+
 pub fn pill(text: &str, class: &str) -> gtk::Label {
     gtk::Label::builder().label(text).css_classes(["pill-badge", class]).valign(gtk::Align::Center).build()
 }
@@ -1153,8 +1327,15 @@ fn css() {
          .row-badge.needs { background: alpha(@warning_bg_color, 0.18); color: @warning_color; }
          button.row-badge.business { background: alpha(@accent_bg_color, 0.18); color: @accent_color; }
          .chart-card { padding: 12px; }
-         .info-button { min-width: 22px; min-height: 22px; padding: 0; opacity: 0.6; }
+         .card { border-radius: 14px; }
+         .info-button { min-width: 22px; min-height: 22px; padding: 0; opacity: 0.28; }
+         .card:hover .info-button, .info-button:focus-visible { opacity: 0.7; }
          .info-button:hover, .info-button:checked { opacity: 1; }
+         .cat-tile { min-width: 28px; min-height: 28px; border-radius: 8px; }
+         .cat-choice { min-width: 34px; min-height: 34px; padding: 0; border-radius: 9px; }
+         .proven { color: @success_color; font-weight: 600; }
+         .hero-value { font-size: 2.9em; font-weight: 800; }
+         .column-head { font-size: 0.85em; opacity: 0.65; }
          .amount-out { color: @error_color; font-feature-settings: 'tnum'; }
          .amount-in { color: @success_color; font-feature-settings: 'tnum'; }
          levelbar.over block.filled { background-color: @error_color; }
@@ -1175,11 +1356,16 @@ fn css() {
         let kinds = gtk::CssProvider::new();
         let load = |p: &gtk::CssProvider, dark: bool| {
             let (blue, orange) = if dark { ("#62a0ea", "#ffa348") } else { ("#1c71d8", "#c64600") };
+            let tiles: String = fingraph_core::looks::COLORS.iter().map(|(n, on_dark, on_light, _)| {
+                let c = if dark { on_dark } else { on_light };
+                format!(".cat-{n} {{ background: alpha({c}, 0.18); color: {c}; }}\n")
+            }).collect();
             p.load_from_string(&format!(
                 ".kind-fixed {{ background: alpha({blue}, 0.16); color: {blue}; }}
                  .kind-variable {{ background: alpha({orange}, 0.16); color: {orange}; }}
                  .amount-fixed {{ color: {blue}; }}
-                 .amount-variable {{ color: {orange}; }}"
+                 .amount-variable {{ color: {orange}; }}
+                 {tiles}"
             ));
         };
         let sm = adw::StyleManager::default();
@@ -1216,6 +1402,15 @@ fn debug_shot(app: &Rc<App>) {
     // FINGRAPH_EXPORT=plan:/tmp/p.pdf (or card:…, ics:…): write it without asking where
     if let Some((what, path)) = std::env::var("FINGRAPH_EXPORT").ok().as_deref().and_then(|s| s.split_once(':')) {
         planpdf::export_debug(app, what, path.into());
+    }
+    // FINGRAPH_FOLD=1: press both sidebar folds, as a click would
+    if std::env::var_os("FINGRAPH_FOLD").is_some() {
+        app.accounts_row.emit_activate();
+        app.statements_arrow.emit_clicked();
+    }
+    // FINGRAPH_THEME=1: press the light/dark button
+    if std::env::var_os("FINGRAPH_THEME").is_some() {
+        app.theme_btn.emit_clicked();
     }
     match std::env::var("FINGRAPH_DIALOG").as_deref() {
         Ok("triage") => wizard::triage(app),

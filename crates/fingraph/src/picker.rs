@@ -245,7 +245,7 @@ mod tests {
     use fingraph_core::db::CategoryKind;
 
     fn cat(id: i64, name: &str, parent: Option<i64>) -> Category {
-        Category { id, name: name.into(), parent_id: parent, kind: CategoryKind::Expense }
+        Category { id, name: name.into(), parent_id: parent, kind: CategoryKind::Expense, icon: None, color: None }
     }
 
     #[test]

@@ -1,4 +1,5 @@
-//! Dashboard & Insights: KPI ribbon, six interactive charts, and the "What changed?" cards.
+//! Summary: net worth, the headline figures and six interactive charts, with what net worth is
+//! made of (accounts, goals, debts) folded underneath.
 
 use adw::prelude::*;
 use chrono::{Datelike, Duration, NaiveDate};
@@ -49,16 +50,9 @@ fn stat(title: &str, help: &str) -> (gtk::Box, Kpi) {
 
 /// The month Overview's headline speaks for: this month, unless its statements aren't in yet (the newest
 /// statement ends before it) and the newest statement's month has a budget, which then speaks instead.
-fn headline_month(newest: Option<NaiveDate>, today: NaiveDate, budgeted: impl Fn(NaiveDate) -> bool) -> NaiveDate {
+pub(crate) fn headline_month(newest: Option<NaiveDate>, today: NaiveDate, budgeted: impl Fn(NaiveDate) -> bool) -> NaiveDate {
     let this_month = insights::month_start(today);
     newest.map(insights::month_start).filter(|m| *m < this_month && budgeted(*m)).unwrap_or(this_month)
-}
-
-/// Change a card's title (the label in its title row).
-fn set_caption(card: &gtk::Box, text: &str) {
-    if let Some(l) = card.first_child().and_then(|row| row.first_child()).and_downcast::<gtk::Label>() {
-        l.set_label(text);
-    }
 }
 
 /// The value classes for an amount: red below zero, green otherwise.
@@ -78,6 +72,8 @@ fn chart_card(title: &str, help: &str, chart: &gtk::Widget) -> (gtk::Box, gtk::L
 
 pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(18).margin_top(18).margin_bottom(24).margin_start(18).margin_end(18).build();
+    let (worth_top, worth_more, worth_refresh) = crate::wealth::parts(app);
+    body.append(&worth_top);
     let empty = adw::StatusPage::builder()
         .icon_name("x-office-spreadsheet-symbolic")
         .title("No transactions yet")
@@ -86,25 +82,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let demo_btn = gtk::Button::builder().label("Load Demo Data").halign(gtk::Align::Center).css_classes(["pill", "suggested-action"]).action_name("win.demo").build();
     empty.set_child(Some(&demo_btn));
 
-    // what needs an answer from you, shown only while something does
-    let review = adw::Banner::builder().button_label("Review").revealed(false).build();
-    review.set_action_name(Some("win.show-review"));
-
-    // the headline: one answer to "am I OK this month?", and how fresh the statements behind it are
     let hero = gtk::Grid::builder().column_spacing(12).column_homogeneous(true).build();
-    let (c_left, k_left) = kpi_card(
-        "Left to Spend This Month",
-        "What's left this month in the categories you've budgeted: their budgets (with rollovers and money moved) minus what your statements show spent in them so far. Statements arrive after the month ends, so early in the month this looks high. Red means you're over.",
-    );
-    c_left.add_css_class("headline");
-    let fresh = gtk::Label::builder().xalign(0.0).css_classes(["caption"]).build();
-    let fresh_row = gtk::Box::builder().spacing(6).css_classes(["verified"]).margin_top(4).build();
-    fresh_row.append(&gtk::Image::from_icon_name("object-select-symbolic"));
-    fresh_row.append(&fresh);
-    c_left.append(&fresh_row);
-    // with no budget yet, the headline is the way to make one
-    let setup = gtk::Button::builder().label("Set Up Budget…").action_name("win.setup-budget").halign(gtk::Align::Start).css_classes(["pill", "suggested-action"]).margin_top(6).visible(false).build();
-    c_left.insert_child_after(&setup, c_left.first_child().as_ref());
 
     // net cash flow over a year, a month or a fortnight; each period keeps its own way of measuring
     let (c_flow, k_flow) = kpi_card(
@@ -165,8 +143,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         });
     }
     c_flow.append(&measure);
-    hero.attach(&c_left, 0, 0, 1, 1);
-    hero.attach(&c_flow, 1, 0, 1, 1);
+
+    hero.attach(&c_flow, 0, 0, 1, 1);
     body.append(&hero);
 
     // everything else, quieter: one strip, no card per number
@@ -193,7 +171,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     );
     let (c_bill, k_bill) = stat(
         "Next Big Bill",
-        "The soonest of your big yearly bills (insurance, HOA fees, licences), when it's due, and how much of it has been set aside so far. Add or change them in Budget → Edit Plan.",
+        "The soonest of your big yearly bills (insurance, HOA fees, licences), when it's due, and how much of it has been set aside so far. Add or change them on the Budget page.",
     );
     let add_bills = gtk::Button::builder().label("Add Big Bills…").halign(gtk::Align::Start).css_classes(["flat", "small-toggle"]).visible(false).build();
     {
@@ -273,6 +251,16 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     grid.attach(&bal_card, 0, 2, 1, 1);
     grid.attach(&pnl_card, 1, 2, 1, 1);
     body.append(&grid);
+    let more = gtk::Expander::builder().label_widget(&heading("Accounts, Goals and Debt")).child(&worth_more).expanded(app.db.setting("summary_more").as_deref() == Some("1")).build();
+    {
+        let w = Rc::downgrade(app);
+        more.connect_expanded_notify(move |e| {
+            if let Some(a) = w.upgrade() {
+                let _ = a.db.set_setting("summary_more", if e.is_expanded() { "1" } else { "0" });
+            }
+        });
+    }
+    body.append(&more);
 
 
     let stack = gtk::Stack::new();
@@ -296,19 +284,17 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let refresh: crate::Refresh = {
         let w = Rc::downgrade(app);
         let (monthly, donut, breakdown, burn, pareto, balances, pnl) = (monthly.clone(), donut.clone(), breakdown.clone(), burn.clone(), pareto.clone(), balances.clone(), pnl.clone());
-        let (stack, drill, cat_title, back, review, breakdown_now) = (stack.clone(), drill.clone(), cat_title.clone(), back.clone(), review.clone(), breakdown_now.clone());
+        let (stack, drill, cat_title, back, breakdown_now) = (stack.clone(), drill.clone(), cat_title.clone(), back.clone(), breakdown_now.clone());
         Rc::new(move || {
             let Some(a) = w.upgrade() else { return };
             let ids = a.entity_ids();
-            let waiting = a.db.triage_count(&ids).unwrap_or(0);
-            review.set_title(&format!("{waiting} merchant{} to review", if waiting == 1 { "" } else { "s" }));
-            review.set_revealed(waiting > 0);
             let rows = a.all_rows();
             if rows.is_empty() {
                 stack.set_visible_child_name("empty");
                 return;
             }
             stack.set_visible_child_name("full");
+            worth_refresh();
             let docs: Vec<DocumentRow> = a.db.documents(&ids).unwrap_or_default();
             let prefs = a.db.prefs();
             let parents_early = a.parents();
@@ -375,31 +361,6 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 k.value.set_css_classes(&sign_classes(net, "tnum"));
                 k.sub.set_label(&format!("In {} · Out {}\n{what}{unrated}", money(inc), money(exp)));
             }
-            // the month the headline speaks for: this one, or before its first statement is in, the last
-            // month that has statements (on 2 Nov, October), so nothing reads "CI$ 0.00 spent" for want of data
-            let newest = docs.iter().filter_map(|d| d.period.map(|p| p.1)).max();
-            let this_month = insights::month_start(today());
-            let shown = headline_month(newest, today(), |m| crate::budget::left_in(&a, m).is_some());
-            set_caption(&c_left, &if shown == this_month { "Left to Spend This Month".to_string() } else { format!("Left to Spend in {}", shown.format("%B")) });
-            match crate::budget::left_in(&a, shown) {
-                Some((funded, spent)) => {
-                    let left = funded - spent;
-                    k_left.value.set_label(&money(left));
-                    k_left.value.set_css_classes(&sign_classes(left, "tnum"));
-                    k_left.value.set_visible(true);
-                    setup.set_visible(false);
-                    let waiting = if shown == this_month { String::new() } else { format!("\n{}'s statements aren't in yet", this_month.format("%B")) };
-                    k_left.sub.set_label(&format!("{} spent of {} budgeted{waiting}", money(spent), money(funded)));
-                }
-                None => {
-                    k_left.value.set_visible(false);
-                    setup.set_visible(true);
-                    k_left.sub.set_label("Your pay, your usual spending and a savings goal, starting from what your statements already show.");
-                }
-            }
-            // what the numbers are measured to: the newest statement
-            fresh_row.set_visible(newest.is_some());
-            fresh.set_label(&newest.map(|d| format!("Verified statements to {}", d.format("%d %b %Y"))).unwrap_or_default());
             // the strip's last slot: the next big bill, or while none are planned, the way to add them
             match crate::budget::next_big_bill(&a) {
                 Some((name, due, amount, aside)) => {
@@ -658,7 +619,6 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
         })
     };
     let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
-    page.append(&review);
     page.append(&stack);
     (page.upcast(), refresh)
 }

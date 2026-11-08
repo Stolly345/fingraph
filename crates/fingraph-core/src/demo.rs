@@ -495,6 +495,7 @@ pub fn demo_documents() -> Vec<DemoDoc> {
         }
         t.push(DemoTx::new(scot.0 + Duration::days(12), "ABM WITHDRAWAL", -dec("100.00")).memo("*BNS CAMANA BAY"));
         t.push(DemoTx::new(scot.0 + Duration::days(14), "ELECTRONIC CREDIT", dec("2480.15")).memo("HARBOUR FREIGHT DIR PAY CR SALARY"));
+        t.push(DemoTx::new(scot.0 + Duration::days(15), "HOME LOAN PAYMENT", -dec("1850.00")));
         t.push(DemoTx::new(d(y, m, 1), "PC TRANSFER DEBIT", -pay_kyd).memo("TRANSFER TO BUTTERFIELD VISA 7710"));
         t.push(DemoTx::new(scot.0 + Duration::days(16), "PC TRANSFER DEBIT", -dec("500.00")).memo("TRANSFER TO RBC SAVINGS 3390"));
         t.push(DemoTx::new(scot.0 + Duration::days(17), "MOBILE OB TRF DR", -dec("450.00")).memo("TRF TO: CICSA CREDIT UNION LOAN 1003"));

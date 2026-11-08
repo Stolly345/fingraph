@@ -283,12 +283,20 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     );
     {
         let w = Rc::downgrade(app);
+        let tile_app = Rc::downgrade(app);
         col(
             "Category",
             false,
             Box::new(move |item| {
                 let b = cell_button();
                 b.set_width_request(150);
+                // the category's tile, then its name
+                let text = b.child().and_downcast::<gtk::Label>().unwrap();
+                b.set_child(None::<&gtk::Widget>);
+                let row = gtk::Box::builder().spacing(8).build();
+                row.append(&gtk::Box::new(gtk::Orientation::Horizontal, 0));
+                row.append(&text);
+                b.set_child(Some(&row));
                 let w = w.clone();
                 b.connect_clicked(move |b| {
                     let (Some(a), Ok(id)) = (w.upgrade(), b.widget_name().parse::<i64>()) else { return };
@@ -309,10 +317,17 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 });
                 item.set_child(Some(&b));
             }),
-            Box::new(|item, t| {
+            Box::new(move |item, t| {
                 let b = item.child().and_downcast::<gtk::Button>().unwrap();
                 b.set_widget_name(&t.id.to_string());
-                set_cell_text(&b, t.category_name.as_deref().unwrap_or("Uncategorized"));
+                let name = t.category_name.as_deref().unwrap_or("Uncategorized");
+                let row = b.child().and_downcast::<gtk::Box>().unwrap();
+                let (old, text) = (row.first_child().unwrap(), row.last_child().and_downcast::<gtk::Label>().unwrap());
+                text.set_label(name);
+                row.remove(&old);
+                if let Some(a) = tile_app.upgrade() {
+                    row.prepend(&a.category_tile(name));
+                }
             }),
         );
     }

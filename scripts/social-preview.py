@@ -87,5 +87,5 @@ def card(name, icon, tagline, points, shot, top, bottom, accent, text, sub, file
 card("FinGraph", f"{ROOT}/packaging/dev.fingraph.FinGraph.svg",
      ["Your bank statements,", "turned into a budget"],
      ["Local-first: your data stays on your PC", "Reads PDF statements to the cent", "GTK4 · libadwaita · Rust"],
-     f"{ROOT}/docs/screenshots/overview.png",
+     f"{ROOT}/docs/screenshots/summary.png",
      (36, 40, 48), (20, 22, 28), (51, 209, 122), (245, 246, 248), (170, 176, 186), f"{ROOT}/docs/social-preview.png")
