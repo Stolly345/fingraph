@@ -1,6 +1,8 @@
 //! Summary: net worth, the headline figures and six interactive charts, with what net worth is
 //! made of (accounts, goals, debts) folded underneath.
 
+mod actions;
+
 use adw::prelude::*;
 use chrono::{Datelike, Duration, NaiveDate};
 use fingraph_core::Decimal;
@@ -73,6 +75,8 @@ fn chart_card(title: &str, help: &str, chart: &gtk::Widget) -> (gtk::Box, gtk::L
 pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(18).margin_top(18).margin_bottom(24).margin_start(18).margin_end(18).build();
     let (worth_top, worth_more, worth_refresh) = crate::wealth::parts(app);
+    let next_steps = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
+    body.append(&next_steps);
     body.append(&worth_top);
     let empty = adw::StatusPage::builder()
         .icon_name("x-office-spreadsheet-symbolic")
@@ -171,7 +175,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     );
     let (c_bill, k_bill) = stat(
         "Next Big Bill",
-        "The soonest of your big yearly bills (insurance, HOA fees, licences), when it's due, and how much of it has been set aside so far. Add or change them on the Budget page.",
+        "The soonest of your big yearly bills (insurance, HOA fees, licences), when it's due, and its savings target by now (not confirmed deposits). Add or change them on the Budget page.",
     );
     let add_bills = gtk::Button::builder().label("Add Big Bills…").halign(gtk::Align::Start).css_classes(["flat", "small-toggle"]).visible(false).build();
     {
@@ -187,7 +191,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     for c in [&c2, &c_run, &c5, &c3, &c4, &c_bill] {
         strip.append(c);
     }
-    body.append(&strip);
+    let analysis = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(16).build();
+    analysis.append(&strip);
     // what each business owes you for spending you paid personally
     let owed_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
     body.append(&owed_box);
@@ -250,7 +255,14 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     grid.attach(&p_card, 1, 1, 1, 1);
     grid.attach(&bal_card, 0, 2, 1, 1);
     grid.attach(&pnl_card, 1, 2, 1, 1);
-    body.append(&grid);
+    analysis.append(&grid);
+    let detail = gtk::Expander::builder().label_widget(&heading("Detailed Analysis")).child(&analysis)
+        .expanded(app.db.setting("summary_analysis").as_deref() == Some("1")).build();
+    {
+        let weak = Rc::downgrade(app);
+        detail.connect_expanded_notify(move |e| if let Some(a) = weak.upgrade() { let _ = a.db.set_setting("summary_analysis", if e.is_expanded() { "1" } else { "0" }); });
+    }
+    body.append(&detail);
     let more = gtk::Expander::builder().label_widget(&heading("Accounts, Goals and Debt")).child(&worth_more).expanded(app.db.setting("summary_more").as_deref() == Some("1")).build();
     {
         let w = Rc::downgrade(app);
@@ -294,6 +306,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 return;
             }
             stack.set_visible_child_name("full");
+            actions::fill(&a, &next_steps);
             worth_refresh();
             let docs: Vec<DocumentRow> = a.db.documents(&ids).unwrap_or_default();
             let prefs = a.db.prefs();
@@ -328,6 +341,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             // net cash flow: (income, expenses) over a window, scaled to the card's period
             let data_end = insights::data_span(&rows).map_or(end_of(today()), |s| s.1.min(today()));
             let data_start = insights::data_span(&rows).map_or(data_end, |s| s.0);
+            let average = crate::reports::average(&a, &rows);
             {
                 let (k, per) = (&k_flow, period.get());
                 let days_in = [Decimal::from(365), Decimal::from(365) / Decimal::from(12), Decimal::from(14)][per];
@@ -355,11 +369,19 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 let (inc, exp) = insights::flows(&rows, wf, wt, ccy, &fx);
                 let span = Decimal::from((wt - wf).num_days().max(0) + 1);
                 let r = if scale { days_in / span } else { Decimal::ONE };
-                let (inc, exp) = ((inc * r).round_dp(2), (exp * r).round_dp(2));
-                let net = inc - exp;
-                k.value.set_label(&money(net));
-                k.value.set_css_classes(&sign_classes(net, "tnum"));
-                k.sub.set_label(&format!("In {} · Out {}\n{what}{unrated}", money(inc), money(exp)));
+                let amounts = if measure.selected() == 0 {
+                    let factor = [Decimal::from(12), Decimal::ONE, Decimal::from(12 * 14) / Decimal::from(365)][per];
+                    average.monthly().map(|(i, e)| ((i * factor).round_dp(2), (e * factor).round_dp(2)))
+                } else { Some(((inc * r).round_dp(2), (exp * r).round_dp(2))) };
+                if let Some((inc, exp)) = amounts {
+                    let net = inc - exp;
+                    k.value.set_label(&money(net));
+                    k.value.set_css_classes(&sign_classes(net, "tnum"));
+                    let explanation = if measure.selected() == 0 { average.label() } else { what };
+                    k.sub.set_label(&format!("In {} · Out {}\n{explanation}{unrated}", money(inc), money(exp)));
+                } else {
+                    k.value.set_label("—"); k.sub.set_label(&average.label());
+                }
             }
             // the strip's last slot: the next big bill, or while none are planned, the way to add them
             match crate::budget::next_big_bill(&a) {
@@ -367,7 +389,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     k_bill.value.set_visible(true);
                     add_bills.set_visible(false);
                     k_bill.value.set_label(&money(amount));
-                    k_bill.sub.set_label(&format!("{name} · due {}\n{} set aside so far", due.format("%d %b %Y"), money(aside)));
+                    k_bill.sub.set_label(&format!("{name} · due {}\nTarget by now: {}", due.format("%d %b %Y"), money(aside)));
                 }
                 None => {
                     k_bill.value.set_visible(false);
@@ -381,17 +403,16 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 let cash: Decimal = accts
                     .iter()
                     .filter(|(id, b)| !b.liability && !hidden_accounts.contains(id))
-                    .filter_map(|(_, b)| b.points.last().map(|p| fx.convert(p.1, b.currency, ccy)))
+                    .filter_map(|(_, b)| b.points.last().map(|p| fx.convert(p.1, b.currency, ccy).unwrap_or_default()))
                     .sum();
-                let wf = (data_end - Duration::days(364)).max(data_start);
-                let (_, spent) = insights::flows(&rows, wf, data_end, ccy, &fx);
-                let monthly = spent * Decimal::from(365) / Decimal::from(12) / Decimal::from(((data_end - wf).num_days() + 1).max(1));
+                let monthly = average.monthly().map(|v| v.1).unwrap_or_default();
                 if monthly.is_zero() || cash.is_sign_negative() {
                     k_run.value.set_label("—");
-                    k_run.sub.set_label("Needs account balances and spending");
+                    k_run.sub.set_label("Needs account balances and complete-month spending");
                 } else {
                     k_run.value.set_label(&format!("{:.1} months", f(cash / monthly)));
                     k_run.sub.set_label(&format!("{} cash ÷ {} a month usual spending", money(cash.round_dp(2)), money(monthly.round_dp(2))));
+                    k_run.sub.set_tooltip_text(Some(&average.label()));
                 }
             }
             k_rate.value.set_label(&k.savings_rate_pct.map_or("—".into(), |p| format!("{p:.1}%")));
@@ -419,13 +440,13 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let end = to.min(today());
             let mb = insights::monthly(&rows, end, prefs.history_months.max(1), ccy, &fx);
             monthly.set(Data::Bars {
-                labels: mb.iter().map(|m| m.month.format("%b").to_string()).collect(),
+                labels: mb.iter().map(|m| format!("{}{}", m.month.format("%b"), if average.months.contains(&m.month) { "" } else { "*" })).collect(),
                 series: vec![
                     Series { name: "Income".into(), values: mb.iter().map(|m| f(m.income)).collect(), color: charts::GREEN },
                     Series { name: "Expenses".into(), values: mb.iter().map(|m| f(m.expenses)).collect(), color: charts::RED },
                 ],
                 line: Some(Series { name: "Net".into(), values: mb.iter().map(|m| f(m.net)).collect(), color: charts::BLUE }),
-                tips: mb.iter().map(|m| format!("{}\nIncome {}\nExpenses {}\nNet {}\nClick to show this month", m.month.format("%B %Y"), money(m.income), money(m.expenses), money(m.net))).collect(),
+                tips: mb.iter().map(|m| format!("{}\nIncome {}\nExpenses {}\nNet {}\n{}\nClick to show this month", m.month.format("%B %Y"), money(m.income), money(m.expenses), money(m.net), if average.months.contains(&m.month) { "Full calendar month verified" } else { "Partial or missing statements; recorded amounts only" })).collect(),
             });
             {
                 let (w, months) = (Rc::downgrade(&a), mb.iter().map(|m| m.month).collect::<Vec<_>>());

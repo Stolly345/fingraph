@@ -15,323 +15,8 @@ use crate::parser::{Diagnostics, ScanResult, Section, SectionReport};
 use crate::rules::{self, Rule, RuleKind};
 use crate::{AccountType, Currency, EntityKind, Error, Reconciliation, Result, ReviewStatus};
 
-const MIGRATIONS: &[&str] = &[r#"
-CREATE TABLE entities (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    kind TEXT NOT NULL,
-    base_currency TEXT NOT NULL DEFAULT 'KYD',
-    icon_name TEXT NOT NULL DEFAULT 'avatar-default-symbolic',
-    created_at TEXT NOT NULL
-);
-CREATE TABLE bank_profiles (
-    id INTEGER PRIMARY KEY,
-    slug TEXT NOT NULL UNIQUE,
-    display_name TEXT NOT NULL,
-    short_name TEXT NOT NULL,
-    routing_identifiers TEXT NOT NULL,
-    default_date_format TEXT NOT NULL,
-    column_layout_kind TEXT NOT NULL,
-    header_anchors TEXT NOT NULL,
-    noise_patterns TEXT NOT NULL,
-    fx_note_regex TEXT NOT NULL,
-    is_builtin INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE accounts (
-    id INTEGER PRIMARY KEY,
-    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    bank_profile_id INTEGER REFERENCES bank_profiles(id) ON DELETE SET NULL,
-    name TEXT NOT NULL,
-    account_number_masked TEXT NOT NULL DEFAULT '',
-    account_type TEXT NOT NULL,
-    currency TEXT NOT NULL,
-    ofx_bank_id TEXT NOT NULL DEFAULT '',
-    ofx_intu_bid TEXT NOT NULL DEFAULT '',
-    opening_balance TEXT NOT NULL DEFAULT '0',
-    opening_balance_minor INTEGER NOT NULL DEFAULT 0,
-    opening_date TEXT
-);
-CREATE TABLE fx_rates (
-    from_currency TEXT NOT NULL,
-    to_currency TEXT NOT NULL,
-    rate TEXT NOT NULL,
-    PRIMARY KEY (from_currency, to_currency)
-);
-CREATE TABLE documents (
-    id INTEGER PRIMARY KEY,
-    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-    bank_profile_id INTEGER REFERENCES bank_profiles(id) ON DELETE SET NULL,
-    filename TEXT NOT NULL,
-    sha256_hash TEXT NOT NULL,
-    section_index INTEGER NOT NULL DEFAULT 0,
-    period_start TEXT,
-    period_end TEXT,
-    statement_opening_balance TEXT,
-    statement_closing_balance TEXT,
-    statement_total_debits TEXT,
-    statement_total_credits TEXT,
-    extracted_tx_sum TEXT NOT NULL,
-    extracted_tx_sum_minor INTEGER NOT NULL,
-    currency TEXT NOT NULL,
-    reconciliation_status TEXT NOT NULL,
-    scan_confidence_score REAL NOT NULL,
-    scan_diagnostics_json TEXT NOT NULL,
-    imported_at TEXT NOT NULL,
-    UNIQUE (sha256_hash, section_index)
-);
-CREATE TABLE categories (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    parent_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL,
-    UNIQUE (name, parent_id)
-);
-CREATE TABLE transactions (
-    id INTEGER PRIMARY KEY,
-    document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
-    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-    posted_date TEXT NOT NULL,
-    effective_date TEXT,
-    raw_description TEXT NOT NULL,
-    clean_payee TEXT NOT NULL,
-    amount TEXT NOT NULL,
-    amount_minor INTEGER NOT NULL,
-    currency TEXT NOT NULL,
-    amount_in_entity_currency TEXT NOT NULL,
-    amount_in_entity_minor INTEGER NOT NULL,
-    running_balance_reported TEXT,
-    category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
-    sub_entity_tag TEXT NOT NULL DEFAULT '',
-    memo TEXT NOT NULL DEFAULT '',
-    fitid TEXT NOT NULL,
-    is_recurring INTEGER NOT NULL DEFAULT 0,
-    is_subscription INTEGER NOT NULL DEFAULT 0,
-    transfer_peer_tx_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
-    review_status TEXT NOT NULL DEFAULT 'NeedsReview',
-    UNIQUE (account_id, fitid)
-);
-CREATE INDEX tx_posted ON transactions(posted_date);
-CREATE INDEX tx_account ON transactions(account_id);
-CREATE TABLE learned_rules (
-    id INTEGER PRIMARY KEY,
-    kind TEXT NOT NULL,
-    pattern TEXT NOT NULL,
-    clean_payee TEXT,
-    category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
-    is_subscription INTEGER NOT NULL DEFAULT 0,
-    is_transfer INTEGER NOT NULL DEFAULT 0,
-    expected_cadence INTEGER,
-    entity_id INTEGER REFERENCES entities(id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-"#, r#"
--- a payment from a personal account that was really a business expense is booked to that workspace
-ALTER TABLE transactions ADD COLUMN business_entity_id INTEGER REFERENCES entities(id) ON DELETE SET NULL;
-ALTER TABLE learned_rules ADD COLUMN business_entity_id INTEGER REFERENCES entities(id) ON DELETE SET NULL;
-"#, r#"
--- closed accounts can be hidden from lists and charts; their history still counts
-ALTER TABLE accounts ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
-"#, r#"
--- rules that only apply to some amounts ("Adriana, CI$ 125.00 only")
-ALTER TABLE learned_rules ADD COLUMN amount_min TEXT;
-ALTER TABLE learned_rules ADD COLUMN amount_max TEXT;
--- one charge split over categories / workspaces (the A.L. Thompson's receipt): the statement row
--- stays as printed for reconciliation, reports read the lines
-CREATE TABLE splits (
-    id INTEGER PRIMARY KEY,
-    transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
-    seq INTEGER NOT NULL,
-    amount TEXT NOT NULL,
-    amount_minor INTEGER NOT NULL,
-    category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
-    business_entity_id INTEGER REFERENCES entities(id) ON DELETE SET NULL,
-    tag TEXT NOT NULL DEFAULT '',
-    memo TEXT NOT NULL DEFAULT '',
-    UNIQUE (transaction_id, seq)
-);
--- business spending you paid personally, settled by a later transfer; keyed by fingerprint so a
--- rescan keeps it (split_seq -1 = the whole transaction)
-CREATE TABLE reimbursements (
-    id INTEGER PRIMARY KEY,
-    account_id INTEGER NOT NULL,
-    fitid TEXT NOT NULL,
-    split_seq INTEGER NOT NULL DEFAULT -1,
-    paid_account_id INTEGER NOT NULL,
-    paid_fitid TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE (account_id, fitid, split_seq)
-);
--- receipts and invoices; files live in attachments/ beside the ledger
-CREATE TABLE attachments (
-    id INTEGER PRIMARY KEY,
-    account_id INTEGER NOT NULL,
-    fitid TEXT NOT NULL,
-    filename TEXT NOT NULL,
-    stored TEXT NOT NULL,
-    added_at TEXT NOT NULL
-);
-CREATE INDEX attachments_tx ON attachments(account_id, fitid);
-"#, r#"
-CREATE TABLE budgets (
-    scope TEXT NOT NULL,
-    category_id INTEGER NOT NULL,
-    amount TEXT NOT NULL,
-    currency TEXT NOT NULL,
-    PRIMARY KEY (scope, category_id)
-);
-"#, r#"
--- what each budget was from a month on, so changing it doesn't rewrite past months' rollovers
-CREATE TABLE budget_history (
-    scope TEXT NOT NULL,
-    category_id INTEGER NOT NULL,
-    month TEXT NOT NULL,
-    amount TEXT NOT NULL,
-    currency TEXT NOT NULL,
-    PRIMARY KEY (scope, category_id, month)
-);
-INSERT INTO budget_history SELECT scope, category_id, '2000-01-01', amount, currency FROM budgets;
--- money moved between categories in one month (cover an overspend)
-CREATE TABLE budget_moves (
-    id INTEGER PRIMARY KEY,
-    scope TEXT NOT NULL,
-    month TEXT NOT NULL,
-    from_category INTEGER NOT NULL,
-    to_category INTEGER NOT NULL,
-    amount TEXT NOT NULL,
-    currency TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
--- yearly or quarterly bills set aside for monthly
-CREATE TABLE sinking_funds (
-    id INTEGER PRIMARY KEY,
-    scope TEXT NOT NULL,
-    name TEXT NOT NULL,
-    amount TEXT NOT NULL,
-    currency TEXT NOT NULL,
-    every_months INTEGER NOT NULL,
-    next_due TEXT NOT NULL,
-    stem TEXT NOT NULL DEFAULT ''
-);
--- a month you've been through in Monthly Close
-CREATE TABLE month_closes (
-    scope TEXT NOT NULL,
-    month TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    closed_at TEXT NOT NULL,
-    PRIMARY KEY (scope, month)
-);
--- assets and debts that aren't on a statement: the house, the car, a pension
-CREATE TABLE manual_items (
-    id INTEGER PRIMARY KEY,
-    entity_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    liability INTEGER NOT NULL,
-    currency TEXT NOT NULL,
-    apr TEXT
-);
-CREATE TABLE manual_values (
-    item_id INTEGER NOT NULL,
-    as_of TEXT NOT NULL,
-    value TEXT NOT NULL,
-    PRIMARY KEY (item_id, as_of)
-);
-CREATE TABLE goals (
-    id INTEGER PRIMARY KEY,
-    scope TEXT NOT NULL,
-    name TEXT NOT NULL,
-    paydown INTEGER NOT NULL,
-    target TEXT NOT NULL,
-    currency TEXT NOT NULL,
-    target_date TEXT,
-    monthly TEXT NOT NULL,
-    account_id INTEGER,
-    start_value TEXT NOT NULL,
-    created TEXT NOT NULL
-);
-CREATE TABLE goal_entries (
-    goal_id INTEGER NOT NULL,
-    month TEXT NOT NULL,
-    amount TEXT NOT NULL,
-    PRIMARY KEY (goal_id, month)
-);
-"#, r#"
--- the statements list counts each statement's transactions; without this it scans them all per statement
-CREATE INDEX IF NOT EXISTS tx_document ON transactions(document_id);
-"#, r#"
--- a statement that doesn't reconcile, was read by OCR, or comes from a layout not yet checked on a real
--- statement waits for review: its transactions stay out of every view until it's approved
-ALTER TABLE documents ADD COLUMN review_hold INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE documents ADD COLUMN review_note TEXT NOT NULL DEFAULT '';
--- a bank's declared layout (row shape, summary labels, verified account types), JSON
-ALTER TABLE bank_profiles ADD COLUMN layout TEXT NOT NULL DEFAULT '{}';
-"#, r#"
--- other currencies' daily rates (units per US dollar), downloaded once and kept: past rates never change
-CREATE TABLE fx_daily (
-    day TEXT NOT NULL,
-    currency TEXT NOT NULL,
-    per_usd TEXT NOT NULL,
-    source TEXT NOT NULL,
-    PRIMARY KEY (day, currency)
-);
-"#, r#"
--- every statement that lists a transaction, not only the one that brought it in: deleting one of two
--- overlapping statements keeps the rows the other also lists, and a held copy can't hide a clean one's rows
-CREATE TABLE shared_rows (
-    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
-    PRIMARY KEY (document_id, transaction_id)
-);
--- rows you deleted stay deleted when their statement is rescanned or imported again
-CREATE TABLE deleted_rows (account_id INTEGER NOT NULL, fitid TEXT NOT NULL, PRIMARY KEY (account_id, fitid));
--- transfer pairs you unlinked stay unlinked
-CREATE TABLE unpaired (account_a INTEGER NOT NULL, fitid_a TEXT NOT NULL, account_b INTEGER NOT NULL, fitid_b TEXT NOT NULL, PRIMARY KEY (account_a, fitid_a, account_b, fitid_b));
--- a memo you wrote survives a rescan
-ALTER TABLE transactions ADD COLUMN memo_edited INTEGER NOT NULL DEFAULT 0;
--- left behind by workspaces and accounts deleted before ids stopped being reused
-DELETE FROM manual_values WHERE item_id IN (SELECT id FROM manual_items WHERE entity_id NOT IN (SELECT id FROM entities));
-DELETE FROM manual_items WHERE entity_id NOT IN (SELECT id FROM entities);
-DELETE FROM attachments WHERE account_id NOT IN (SELECT id FROM accounts);
-DELETE FROM reimbursements WHERE account_id NOT IN (SELECT id FROM accounts);
-DELETE FROM settings WHERE key LIKE 'apr:%' AND CAST(substr(key, 5) AS INTEGER) NOT IN (SELECT id FROM accounts);
-"#, r#"
--- your own icon and colour for a category; empty means its default
-ALTER TABLE categories ADD COLUMN icon TEXT;
-ALTER TABLE categories ADD COLUMN color TEXT;
-"#];
-
-/// (name, kind, children). Missing ones are added to existing ledgers on open; lists are shown A–Z.
-const CATEGORIES: &[(&str, &str, &[&str])] = &[
-    ("Bank Fees & Interest", "Expense", &["Account Fees", "Credit Card Interest", "FX & Wire Fees", "Loan Interest"]),
-    ("Business Expense", "Expense", &["Advertising & Marketing", "Contractors & Payroll", "Licences & Permits", "Office Supplies", "Software & Tools"]),
-    ("Cash Withdrawal", "Expense", &[]),
-    ("Clothing & Shoes", "Expense", &[]),
-    ("Dining & Takeaway", "Expense", &["Coffee & Snacks", "Restaurants", "Takeaway & Delivery"]),
-    ("Education", "Expense", &["Books & Courses", "School Fees & Tuition"]),
-    ("Entertainment", "Expense", &["Events & Tickets", "Hobbies", "Movies & Streaming"]),
-    ("Family Expense", "Expense", &["Allowances", "Baby & Kids' Supplies", "Childcare & Nanny", "Family Support & Remittances", "Kids' Activities", "School Supplies & Uniforms"]),
-    ("Gifts & Donations", "Expense", &["Charity", "Church & Tithes", "Gifts"]),
-    ("Government & Fees", "Expense", &["Import Duty", "Stamp Duty", "Taxes", "Vehicle Licensing", "Work Permits & Immigration"]),
-    ("Groceries", "Expense", &["Liquor"]),
-    ("Health & Fitness", "Expense", &["Doctor & Dental", "Gym & Sports", "Optical", "Pharmacy"]),
-    ("Home & Garden", "Expense", &["Appliances", "Furniture & Decor", "Household Supplies"]),
-    ("Housing", "Expense", &["Mortgage", "Rent", "Strata Fees"]),
-    ("Income", "Income", &["Business Income", "Gifts Received", "Interest & Dividends", "Refunds", "Reimbursements", "Rental Income", "Salary", "Sales"]),
-    ("Insurance", "Expense", &["Car Insurance", "Health Insurance", "Home Insurance", "Life Insurance"]),
-    ("Loan Payments", "Transfer", &[]),
-    ("Personal Care", "Expense", &["Hair & Beauty", "Spa & Massage"]),
-    ("Pets", "Expense", &["Pet Food & Supplies", "Vet"]),
-    ("Professional Services", "Expense", &["Accounting", "Legal"]),
-    ("Property Expense", "Expense", &["Cleaning", "Landscaping", "Pest Control", "Pool Service", "Property Management"]),
-    ("Repairs & Maintenance", "Expense", &[]),
-    ("Savings & Investments", "Transfer", &[]),
-    ("Shopping", "Expense", &["Electronics", "Online Shopping", "Shipping & Freight"]),
-    ("Subscriptions & Digital", "Expense", &[]),
-    ("Transfers", "Transfer", &["Credit Card Payments"]),
-    ("Transport", "Expense", &["Car Payment", "Fuel", "Parking", "Taxi & Rideshare", "Vehicle Maintenance"]),
-    ("Travel", "Expense", &["Car Rental", "Flights", "Hotels"]),
-    ("Utilities", "Expense", &["Electricity", "Gas", "Phone & Internet", "Water"]),
-];
+mod schema;
+use schema::{MIGRATIONS, CATEGORIES};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entity {
@@ -417,7 +102,7 @@ pub struct TxRow {
     pub clean_payee: String,
     pub amount: Decimal,
     pub currency: Currency,
-    pub amount_entity: Decimal,
+    pub amount_entity: Option<Decimal>,
     pub balance: Option<Decimal>,
     pub category_id: Option<i64>,
     pub category_name: Option<String>,
@@ -623,8 +308,8 @@ pub struct Sp<'a> {
 
 impl Sp<'_> {
     pub fn commit(mut self) -> Result<()> {
-        self.done = true;
         self.conn.execute_batch("RELEASE fg")?;
+        self.done = true;
         Ok(())
     }
 }
@@ -707,7 +392,7 @@ fn tx_row(r: &Row) -> rusqlite::Result<TxRow> {
         clean_payee: r.get(11)?,
         amount: dec(&r.get::<_, String>(12)?),
         currency: ccy(&r.get::<_, String>(13)?),
-        amount_entity: dec(&r.get::<_, String>(14)?),
+        amount_entity: opt_dec(r.get(14)?),
         balance: opt_dec(r.get(15)?),
         category_id: r.get(16)?,
         category_name: r.get(17)?,
@@ -874,52 +559,14 @@ impl Db {
 
     // ---------------------------------------------------------------- backups
 
-    /// A consistent copy of the whole ledger (settings and preferences included).
-    pub fn backup_to(&self, dest: &Path) -> Result<()> {
-        if let Some(dir) = dest.parent() {
-            std::fs::create_dir_all(dir)?;
+    pub(crate) fn validate_backup_database(src: &Path) -> Result<()> {
+        let db = Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let integrity: String = db.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if integrity != "ok" || version < 0 || version as usize > MIGRATIONS.len() {
+            return Err(Error("Backup is damaged or needs a newer FinGraph version".into()));
         }
-        // written beside it first, so a failed backup never costs the one already there
-        let tmp = dest.with_extension("db-partial");
-        let _ = std::fs::remove_file(&tmp);
-        self.conn.execute("VACUUM INTO ?1", [tmp.to_string_lossy()])?;
-        private(&tmp, 0o600);
-        std::fs::rename(&tmp, dest)?;
-        Ok(())
-    }
-
-    pub fn backups_dir(&self) -> Option<std::path::PathBuf> {
-        Some(self.path()?.parent()?.join("backups"))
-    }
-
-    /// Before something drastic: a timestamped backup, keeping the newest ten. Off in Preferences = no-op.
-    pub fn auto_backup(&self, reason: &str) -> Result<Option<std::path::PathBuf>> {
-        let Some(dir) = self.backups_dir().filter(|_| self.prefs().auto_backup) else { return Ok(None) };
-        let dest = dir.join(format!("ledger-{}-{reason}.db", Local::now().format("%Y%m%d-%H%M%S")));
-        self.backup_to(&dest)?;
-        let mut old: Vec<_> = std::fs::read_dir(&dir)?.flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("ledger-"))).collect();
-        old.sort();
-        for p in old.iter().rev().skip(10) {
-            let _ = std::fs::remove_file(p);
-        }
-        Ok(Some(dest))
-    }
-
-    /// Replace the ledger's contents with a backup's (then bring it up to this version's schema).
-    pub fn restore_from(&self, src: &Path) -> Result<()> {
-        let from = Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        from.query_row("SELECT COUNT(*) FROM entities", [], |r| r.get::<_, i64>(0)).map_err(|_| Error("that file isn't a FinGraph ledger".into()))?;
-        let path = self.path().ok_or_else(|| Error("an in-memory ledger can't be restored into".into()))?;
-        // a second handle on the same file takes the pages; this one sees them on its next read
-        let mut to = Connection::open(&path)?;
-        {
-            let b = rusqlite::backup::Backup::new(&from, &mut to)?;
-            b.run_to_completion(256, std::time::Duration::from_millis(0), None)?;
-        }
-        drop(to);
-        self.migrate()?;
-        self.seed()?;
-        self.prefs().apply_globals();
+        db.query_row("SELECT COUNT(*) FROM entities", [], |r| r.get::<_, i64>(0))?;
         Ok(())
     }
 
@@ -1024,7 +671,7 @@ impl Db {
         Ok(())
     }
 
-    fn migrate(&self) -> Result<()> {
+    pub(crate) fn migrate(&self) -> Result<()> {
         let v: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         for (i, m) in MIGRATIONS.iter().enumerate().skip(v as usize) {
             let tx = self.sp()?;
@@ -1035,7 +682,7 @@ impl Db {
         Ok(())
     }
 
-    fn seed(&self) -> Result<()> {
+    pub(crate) fn seed(&self) -> Result<()> {
         for p in profiles::builtins() {
             let exists: bool = self.conn.query_row("SELECT COUNT(*) FROM bank_profiles WHERE slug = ?1", [&p.slug], |r| r.get::<_, i64>(0))? > 0;
             if !exists {
@@ -1222,10 +869,18 @@ impl Db {
         Ok(Fx { kyd_to_usd: get("KYD", "USD")?.unwrap_or(d.kyd_to_usd), usd_to_kyd: get("USD", "KYD")?.unwrap_or(d.usd_to_kyd), daily })
     }
 
-    /// Currencies in use (accounts' and workspaces') that need downloaded rates: every one but KYD and USD.
+    /// Every currency used by recorded or planned money that needs downloaded rates.
     pub fn floating_currencies(&self) -> Result<Vec<Currency>> {
-        let mut st = self.conn.prepare("SELECT currency FROM accounts UNION SELECT base_currency FROM entities")?;
+        let mut st = self.conn.prepare("SELECT currency FROM accounts UNION SELECT base_currency FROM entities
+            UNION SELECT currency FROM transactions UNION SELECT currency FROM budget_history
+            UNION SELECT currency FROM budget_moves UNION SELECT currency FROM sinking_funds
+            UNION SELECT currency FROM manual_items UNION SELECT currency FROM goals")?;
         let mut v: Vec<Currency> = st.query_map([], |r| r.get::<_, String>(0))?.filter_map(|c| c.ok().and_then(|c| Currency::parse(&c))).filter(|c| !c.pegged()).collect();
+        let mut plans = self.conn.prepare("SELECT value FROM settings WHERE key LIKE 'budget_plan:%'")?;
+        for json in plans.query_map([], |r| r.get::<_, String>(0))? {
+            if let Some(c) = serde_json::from_str::<crate::budget::Plan>(&json?).ok().and_then(|p| p.currency).filter(|c| !c.pegged()) { v.push(c); }
+        }
+        if let Some(c) = self.setting("display_currency").and_then(|c| Currency::parse(&c)).filter(|c| !c.pegged()) { v.push(c); }
         v.sort();
         v.dedup();
         Ok(v)
@@ -1353,7 +1008,7 @@ impl Db {
         let tx = self.sp()?;
         for (id, amt, c, base, memo, day) in rows {
             let v = entity_amount(&fx, dec(&amt), ccy(&c), ccy(&base), parse_fx_memo(&memo), date(&day));
-            tx.execute("UPDATE transactions SET amount_in_entity_currency = ?2, amount_in_entity_minor = ?3 WHERE id = ?1", params![id, v.to_string(), to_minor(v)])?;
+            tx.execute("UPDATE transactions SET amount_in_entity_currency = ?2, amount_in_entity_minor = ?3 WHERE id = ?1", params![id, v.map(|v| v.to_string()).unwrap_or_default(), v.map(to_minor).unwrap_or_default()])?;
         }
         tx.commit()?;
         Ok(())
@@ -1626,7 +1281,7 @@ impl Db {
                 let ent = entity_amount(&fx, t.amount, s.currency, base, t.fx_original, t.posted);
                 let mut memo = t.memo.clone();
                 if let Some((oc, oa)) = t.fx_original
-                    && !memo.contains(&oa.to_string())
+                    && !memo.contains(&format!("FX original {oc} {oa}"))
                 {
                     memo = format!("{memo}{}FX original {oc} {oa}", if memo.is_empty() { "" } else { " | " });
                 }
@@ -1645,8 +1300,8 @@ impl Db {
                         t.amount.to_string(),
                         to_minor(t.amount),
                         s.currency.code(),
-                        ent.to_string(),
-                        to_minor(ent),
+                        ent.map(|v| v.to_string()).unwrap_or_default(),
+                        ent.map(to_minor).unwrap_or_default(),
                         t.balance.map(|b| b.to_string()),
                         rule.and_then(|r| r.category_id),
                         memo,
@@ -1661,7 +1316,7 @@ impl Db {
                     let id = tx.last_insert_rowid();
                     let base: String = tx.query_row("SELECT base_currency FROM entities WHERE id = ?1", [b], |r| r.get(0))?;
                     let v = entity_amount(&fx, t.amount, s.currency, ccy(&base), t.fx_original, t.posted);
-                    tx.execute("UPDATE transactions SET business_entity_id = ?2, amount_in_entity_currency = ?3, amount_in_entity_minor = ?4 WHERE id = ?1", params![id, b, v.to_string(), to_minor(v)])?;
+                    tx.execute("UPDATE transactions SET business_entity_id = ?2, amount_in_entity_currency = ?3, amount_in_entity_minor = ?4 WHERE id = ?1", params![id, b, v.map(|v| v.to_string()).unwrap_or_default(), v.map(to_minor).unwrap_or_default()])?;
                 }
                 if n == 0 {
                     rep.duplicates += 1;
@@ -2373,11 +2028,16 @@ impl Db {
         sql += " ORDER BY t.posted_date DESC, t.id DESC";
         let mut st = self.conn.prepare(&sql)?;
         let rows = st.query_map(params_from_iter(args), tx_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let fx = self.fx()?;
+        let mut rows: Vec<TxRow> = rows.collect::<rusqlite::Result<_>>()?;
+        for t in &mut rows { t.amount_entity = revalidated_entity_amount(&fx, t, crate::money::statement_fx_wins()); }
+        Ok(rows)
     }
 
     pub fn transaction(&self, id: i64) -> Result<TxRow> {
-        Ok(self.conn.query_row(&format!("{TX_SELECT} WHERE t.id = ?1"), [id], tx_row)?)
+        let mut t = self.conn.query_row(&format!("{TX_SELECT} WHERE t.id = ?1"), [id], tx_row)?;
+        t.amount_entity = revalidated_entity_amount(&self.fx()?, &t, crate::money::statement_fx_wins());
+        Ok(t)
     }
 
     pub fn set_category(&self, ids: &[i64], category_id: Option<i64>) -> Result<()> {
@@ -2429,7 +2089,7 @@ impl Db {
             let v = entity_amount(&fx, dec(&amt), ccy(&cur), ccy(&base), parse_fx_memo(&memo), date(&day));
             tx.execute(
                 "UPDATE transactions SET business_entity_id = ?2, amount_in_entity_currency = ?3, amount_in_entity_minor = ?4 WHERE id = ?1",
-                params![id, target, v.to_string(), to_minor(v)],
+                params![id, target, v.map(|v| v.to_string()).unwrap_or_default(), v.map(to_minor).unwrap_or_default()],
             )?;
         }
         tx.commit()?;
@@ -2459,8 +2119,8 @@ impl Db {
                 amount.to_string(),
                 to_minor(amount),
                 cur,
-                ent.to_string(),
-                to_minor(ent),
+                ent.map(|v| v.to_string()).unwrap_or_default(),
+                ent.map(to_minor).unwrap_or_default(),
                 memo,
                 fitid(account_id, posted, amount, seq)
             ],
@@ -2681,7 +2341,7 @@ impl Db {
                     if a.currency == b.currency {
                         a.amount.abs() == b.amount
                     } else {
-                        let conv = fx.convert(a.amount.abs(), a.currency, b.currency);
+                        let Some(conv) = fx.convert(a.amount.abs(), a.currency, b.currency) else { return false };
                         (conv - b.amount).abs() <= conv * Decimal::new(2, 2)
                     }
                 })
@@ -2913,21 +2573,30 @@ fn parse_fx_memo(memo: &str) -> Option<(Currency, Decimal)> {
     Some((Currency::parse(it.next()?)?, Decimal::from_str(it.next()?).ok()?))
 }
 
+// Older ledgers can have a valid statement-quoted amount without a machine-readable memo.
+// Preserve it only when conversion availability can be established; unknown currencies never
+// inherit the old 1:1 fallback. New imports always store the explicit FX original marker.
+fn revalidated_entity_amount(fx: &Fx, t: &TxRow, prefer_statement: bool) -> Option<Decimal> {
+    let original = parse_fx_memo(&t.memo);
+    let available = entity_amount(fx, t.amount, t.currency, t.entity_currency, original, t.posted);
+    if prefer_statement && original.is_none() { available.and(t.amount_entity.or(available)) } else { available }
+}
+
 /// The amount in the workspace's currency: as printed if it already is; the statement's own FX
 /// original if that's in the workspace currency; else the configured rate.
 /// `amount` (in `from`) in the workspace's `base` currency, at `day`'s rate — or the statement's own conversion
 /// (`original`) when it printed one and that's preferred.
-pub fn entity_amount(fx: &Fx, amount: Decimal, from: Currency, base: Currency, original: Option<(Currency, Decimal)>, day: NaiveDate) -> Decimal {
+pub fn entity_amount(fx: &Fx, amount: Decimal, from: Currency, base: Currency, original: Option<(Currency, Decimal)>, day: NaiveDate) -> Option<Decimal> {
     if from == base {
-        return amount;
+        return Some(amount);
     }
     let original = original.filter(|_| crate::money::statement_fx_wins());
     match original {
         Some((c, v)) if c == base => {
             if amount.is_sign_negative() {
-                -v.abs()
+                Some(-v.abs())
             } else {
-                v.abs()
+                Some(v.abs())
             }
         }
         _ => fx.convert_on(amount, from, base, Some(day)),
@@ -2937,6 +2606,16 @@ pub fn entity_amount(fx: &Fx, amount: Decimal, from: Currency, base: Currency, o
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_quoted_amounts_survive_but_old_unknown_one_for_one_values_do_not() {
+        let mut t = crate::insights::tests::row(1, "2026-01-01".parse().unwrap(), "Purchase", "-120", "Shopping", "");
+        t.currency = Currency::USD; t.amount_entity = Some(dec("-99.75"));
+        assert_eq!(revalidated_entity_amount(&Fx::default(), &t, true), Some(dec("-99.75")));
+        assert_eq!(revalidated_entity_amount(&Fx::default(), &t, false), Some(dec("-100")));
+        t.currency = Currency::parse("GBP").unwrap(); t.amount_entity = Some(t.amount);
+        assert_eq!(revalidated_entity_amount(&Fx::default(), &t, true), None);
+    }
 
     #[test]
     fn imports_ask_about_new_accounts_hold_new_layouts_and_never_double_up() {
@@ -3320,18 +2999,18 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
         let needed = db.rates_needed(today).unwrap();
         assert!(needed.iter().any(|(cs, from, to)| cs == &vec![gbp] && *from <= NaiveDate::from_ymd_opt(2026, 2, 1).unwrap() && *to >= NaiveDate::from_ymd_opt(2026, 2, 28).unwrap()), "{needed:?}");
-        // no rate yet: one for one
+        // No rate yet: explicitly unavailable, never one for one.
         let kyd = |db: &Db| {
-            let mut v: Vec<Decimal> = db.transactions(&TxFilter::default()).unwrap().iter().map(|t| t.amount_entity).collect();
+            let mut v: Vec<Option<Decimal>> = db.transactions(&TxFilter::default()).unwrap().iter().map(|t| t.amount_entity).collect();
             v.sort();
             v
         };
-        assert_eq!(kyd(&db), vec![dec("-100.00"), dec("800.00")]);
+        assert_eq!(kyd(&db), vec![None, None]);
         // a pound bought US$1.25 early in the month and US$1.30 late
         let d = |day: u32| NaiveDate::from_ymd_opt(2026, 2, day).unwrap();
         db.store_rates(&[(d(2), gbp, dec("0.80")), (d(16), gbp, dec("0.7692307692"))], "test").unwrap();
         // -100 GBP on the 5th = -125.00 USD = -104.17 KYD; +800 GBP on the 20th = 1,040.00 USD = 866.67 KYD
-        assert_eq!(kyd(&db), vec![dec("-104.17"), dec("866.67")]);
+        assert_eq!(kyd(&db), vec![Some(dec("-104.17")), Some(dec("866.67"))]);
         // the statement's period is covered now; only the days since the latest rate (for today's) are still wanted
         assert!(db.rates_needed(today).unwrap().iter().all(|(_, from, _)| *from > d(16)), "{:?}", db.rates_needed(today).unwrap());
         assert_eq!(db.rates_status().unwrap()[0].1.as_ref().map(|x| x.0), Some(d(16)));
@@ -3515,7 +3194,7 @@ mod tests {
     fn fx_original_wins_over_the_peg() {
         let fx = Fx::default();
         let day = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
-        assert_eq!(entity_amount(&fx, dec("-72.39"), Currency::USD, Currency::KYD, Some((Currency::KYD, dec("59.14"))), day), dec("-59.14"));
-        assert_eq!(entity_amount(&fx, dec("-120.00"), Currency::USD, Currency::KYD, None, day), dec("-100.00"));
+        assert_eq!(entity_amount(&fx, dec("-72.39"), Currency::USD, Currency::KYD, Some((Currency::KYD, dec("59.14"))), day), Some(dec("-59.14")));
+        assert_eq!(entity_amount(&fx, dec("-120.00"), Currency::USD, Currency::KYD, None, day), Some(dec("-100.00")));
     }
 }

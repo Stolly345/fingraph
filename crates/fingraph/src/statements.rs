@@ -46,7 +46,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let cov_title = crate::heading("Statement Coverage");
     cov_title.set_hexpand(true);
     cov_head.append(&cov_title);
-    cov_head.append(&gtk::Label::builder().label("● verified   ◐ doesn't balance   ○ missing   · before the account's first statement").css_classes(["dim-label", "caption"]).build());
+    cov_head.append(&gtk::Label::builder().label("● full month verified   ◔ partial   ◐ needs review   ○ missing   · before the account's first statement").css_classes(["dim-label", "caption"]).build());
     cov_card.append(&cov_head);
     let cov_grid = gtk::Grid::builder().column_spacing(6).row_spacing(4).build();
     cov_card.append(&cov_grid);
@@ -303,6 +303,7 @@ fn fill_coverage(app: &Rc<App>, grid: &gtk::Grid, breaks: &gtk::Box) {
         for (i, (m, s)) in c.months.iter().enumerate() {
             let (glyph, class, what) = match s {
                 MonthState::Verified => ("●", "amount-in", "statement present and verified to the cent"),
+                MonthState::Partial => ("◔", "warning", "only part of this month has verified statements; download the next statement for the remaining dates"),
                 MonthState::Discrepancy => ("◐", "warning", "statement present but it doesn't balance (see its Scan Report)"),
                 MonthState::Missing => ("○", "error", "no statement — download it from your bank and drop it here"),
                 MonthState::Pending => ("·", "dim-label", "this month: the statement isn't out yet"),

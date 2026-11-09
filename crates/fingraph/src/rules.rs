@@ -452,7 +452,8 @@ fn looks_dialog(app: &Rc<App>) {
         let current = Rc::new(std::cell::RefCell::new(look));
         let button = gtk::MenuButton::builder().child(&tile_slot).valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text(format!("Change the look of {}", c.name)).build();
         let pop = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).margin_top(8).margin_bottom(8).margin_start(8).margin_end(8).build();
-        let apply: Rc<dyn Fn(Option<&str>, Option<&str>)> = {
+        type ApplyLook = Rc<dyn Fn(Option<&str>, Option<&str>)>;
+        let apply: ApplyLook = {
             let (w, id, current, tile_slot) = (Rc::downgrade(app), c.id, current.clone(), tile_slot.clone());
             Rc::new(move |icon, color| {
                 let Some(a) = w.upgrade() else { return };

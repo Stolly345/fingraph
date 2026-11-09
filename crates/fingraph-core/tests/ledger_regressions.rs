@@ -248,7 +248,7 @@ fn reset_learning_puts_a_business_row_back_in_its_own_currency() {
     db.set_business(&[t.id], Some(usd)).unwrap();
     db.reset_learning(&[]).unwrap();
     let r = db.transaction(t.id).unwrap();
-    assert_eq!((r.business_entity_id, r.amount_entity), (None, t.amount));
+    assert_eq!((r.business_entity_id, r.amount_entity), (None, Some(t.amount)));
 }
 
 #[test]
@@ -497,5 +497,9 @@ fn verified_months_need_every_account() {
     let db = Db::open_in_memory().unwrap();
     db.load_demo().unwrap();
     let cov = db.coverage(&[], 12, d(11, 2)).unwrap();
-    assert!(verified_months(&cov).contains(&m(10)), "the demo's October is verified everywhere");
+    let verified = verified_months(&cov);
+    assert!(!verified.contains(&m(10)), "mid-October statement ends do not prove the whole calendar month");
+    assert!(verified.contains(&m(8)), "August remains a complete verified month");
+    assert!(!verified.contains(&m(9)), "September has the intentional demo discrepancy");
+    assert!(cov.iter().any(|a| a.months.contains(&(m(10), Partial))));
 }

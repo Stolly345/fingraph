@@ -43,11 +43,11 @@ use std::rc::Rc;
 const APP_ID: &str = "dev.fingraph.FinGraph";
 
 /// Pages reached from Budget (To Review) or the main menu, not listed in the sidebar.
-const OFF_SIDEBAR: [&str; 4] = ["review", "rules", "directory", "profiles"];
+const OFF_SIDEBAR: [&str; 5] = ["review", "rules", "directory", "profiles", "export"];
 /// The sidebar's pages, Ctrl+1 onward. FinGraph always opens on the first.
 const MAIN_PAGES: [&str; 6] = ["budget", "transactions", "reports", "statements", "statement", "summary"];
 /// The tabs of Reports, each a page of its own under the one sidebar row.
-const REPORT_TABS: [(&str, &str); 8] = [("cashflow", "Cash Flow"), ("trends", "Trends"), ("flow", "Where It Went"), ("plan", "Plan"), ("outlook", "Outlook"), ("subscriptions", "Subscriptions"), ("changes", "What Changed"), ("export", "Export")];
+const REPORT_TABS: [(&str, &str); 7] = [("plan", "Plan"), ("outlook", "Outlook"), ("changes", "What Changed"), ("subscriptions", "Subscriptions"), ("cashflow", "Cash Flow"), ("trends", "Trends"), ("flow", "Where It Went")];
 
 /// Which workspaces the window shows.
 #[derive(Clone, PartialEq)]
@@ -307,8 +307,26 @@ impl App {
             ("profiles", "Bank Profiles", p, pr),
         ];
         for (name, title, w, refresh) in pages {
-            app.stack.add_titled(&w, Some(name), title);
-            app.views.borrow_mut().push((name, refresh));
+            if matches!(name, "summary" | "cashflow" | "trends" | "budget" | "flow" | "plan" | "outlook" | "statement" | "changes" | "subscriptions" | "export") {
+                let wrapper = gtk::Stack::new();
+                wrapper.add_named(&w, Some("ready"));
+                let missing = adw::StatusPage::builder().title("Exchange rate needed")
+                    .icon_name("dialog-information-symbolic").build();
+                missing.set_child(Some(&gtk::Button::builder().label("Open Preferences → Money").action_name("win.money-preferences").halign(gtk::Align::Center).build()));
+                wrapper.add_named(&missing, Some("missing"));
+                app.stack.add_titled(&wrapper, Some(name), title);
+                let weak = Rc::downgrade(&app);
+                app.views.borrow_mut().push((name, Rc::new(move || {
+                    let Some(a) = weak.upgrade() else { return };
+                    match a.valuation_error() {
+                        Some(message) => { missing.set_description(Some(&message)); wrapper.set_visible_child_name("missing"); }
+                        None => { wrapper.set_visible_child_name("ready"); refresh(); }
+                    }
+                })));
+            } else {
+                app.stack.add_titled(&w, Some(name), title);
+                app.views.borrow_mut().push((name, refresh));
+            }
         }
         for (name, title, icon) in [
             ("budget", "Budget", "accessories-calculator-symbolic"),
@@ -435,10 +453,11 @@ impl App {
         add("workspaces", Rc::new(wizard::workspaces_dialog));
         add("rescan", Rc::new(statements::rescan_all));
         add("preferences", Rc::new(preferences::show));
+        add("money-preferences", Rc::new(|a| preferences::show_at(a, "money")));
         for (i, page) in MAIN_PAGES.iter().enumerate() {
             add(&format!("page-{}", i + 1), Rc::new(move |a: &Rc<App>| a.show_view(page)));
         }
-        for page in OFF_SIDEBAR.into_iter().chain(["export"]) {
+        for page in OFF_SIDEBAR {
             add(&format!("show-{page}"), Rc::new(move |a: &Rc<App>| a.show_view(page)));
         }
         add("retriage", Rc::new(wizard::reset_and_retriage));
@@ -920,20 +939,22 @@ impl App {
 
     fn build_report_tabs(self: &Rc<Self>, into: &gtk::Box) {
         let mut tabs: Vec<(&'static str, gtk::ToggleButton)> = Vec::new();
-        for (name, title) in REPORT_TABS {
-            let b = gtk::ToggleButton::builder().label(title).build();
-            if let Some((_, first)) = tabs.first() {
-                b.set_group(Some(first));
+        for (label, names) in [
+            ("Plan", &["plan", "outlook"][..]),
+            ("Monitor", &["changes", "subscriptions"][..]),
+            ("Analyze", &["cashflow", "trends", "flow"][..]),
+        ] {
+            let group = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(3).margin_end(16).build();
+            group.append(&gtk::Label::builder().label(label).xalign(0.0).css_classes(["caption", "dim-label"]).build());
+            let buttons = gtk::Box::builder().spacing(4).build();
+            for (name, title) in REPORT_TABS.iter().copied().filter(|(name, _)| names.contains(name)) {
+                let b = gtk::ToggleButton::builder().label(title).build();
+                if let Some((_, first)) = tabs.first() { b.set_group(Some(first)); }
+                let weak = Rc::downgrade(self);
+                b.connect_toggled(move |b| if let Some(a) = weak.upgrade() { if b.is_active() && !a.quiet.get() { a.show_view(name); } });
+                buttons.append(&b); tabs.push((name, b));
             }
-            let w = Rc::downgrade(self);
-            b.connect_toggled(move |b| {
-                let Some(a) = w.upgrade() else { return };
-                if b.is_active() && !a.quiet.get() {
-                    a.show_view(name);
-                }
-            });
-            into.append(&b);
-            tabs.push((name, b));
+            group.append(&buttons); into.append(&group);
         }
         *self.report_tabs.borrow_mut() = tabs;
     }
@@ -975,7 +996,7 @@ impl App {
         let waiting = self.db.documents_all(&ids).unwrap_or_default().iter().filter(|d| !d.review.is_empty()).count();
         let bad = docs.iter().filter(|d| matches!(d.reconciliation, fingraph_core::Reconciliation::Discrepancy(_))).count() + missing + waiting;
         set("statements", if bad > 0 { format!("⚠ {bad}") } else { String::new() }, bad > 0);
-        let (b, over) = budget::badge(self);
+        let (b, over) = if self.valuation_error().is_none() { budget::badge(self) } else { ("Rate needed".into(), false) };
         set("budget", b, over);
 
         // accounts: rebuilt in place at the end, only when they or their balances changed
@@ -1068,6 +1089,18 @@ impl App {
     pub fn show_transactions(self: &Rc<Self>, ids: Vec<i64>) {
         *self.focus_ids.borrow_mut() = Some(ids);
         self.show_view("transactions");
+    }
+
+    pub(crate) fn valuation_error(&self) -> Option<String> {
+        match self.db.missing_conversion_rates(&self.entity_ids(), self.display()) {
+            Ok(missing) if missing.is_empty() => None,
+            Ok(missing) => Some(format!("No rate for {} in {}. Combined totals and plans are unavailable until you add or download a rate in Preferences → Money. Original transactions and statements remain available.", missing.iter().map(|c| c.code()).collect::<Vec<_>>().join(", "), self.display())),
+            Err(e) => Some(format!("Couldn't read the data needed for financial totals: {e}")),
+        }
+    }
+
+    pub(crate) fn financial_ready(&self) -> bool {
+        if let Some(e) = self.valuation_error() { self.toast(&e); false } else { true }
     }
 
     /// Whether a change was saved; when it wasn't, says why.
@@ -1439,6 +1472,7 @@ fn debug_shot(app: &Rc<App>) {
     let scrolled = Cell::new(false);
     let typed = Cell::new(false);
     let clicked = Cell::new(0usize);
+    let budget_edited = Cell::new(false);
     glib::timeout_add_local(std::time::Duration::from_secs(wait), move || {
         if n.get() < steps {
             n.set(n.get() + 1);
@@ -1525,6 +1559,29 @@ fn debug_shot(app: &Rc<App>) {
                 adj.set_value(adj.upper() * frac);
             }
             return glib::ControlFlow::Continue;
+        }
+        // Debug-only end-to-end check: edit a real budget field, then leave it without Enter.
+        // FINGRAPH_BUDGET_EDIT=Groceries=725 (or Groceries=invalid for validation).
+        if let Ok(edit) = std::env::var("FINGRAPH_BUDGET_EDIT") {
+            if !budget_edited.replace(true) {
+                fn budget_entry(w: &gtk::Widget, name: &str) -> Option<gtk::Entry> {
+                    if let Some(entry) = w.downcast_ref::<gtk::Entry>().filter(|e| e.widget_name() == name) { return Some(entry.clone()); }
+                    let mut c = w.first_child();
+                    while let Some(child) = c {
+                        if let Some(entry) = budget_entry(&child, name) { return Some(entry); }
+                        c = child.next_sibling();
+                    }
+                    None
+                }
+                if let Some((category, value)) = edit.split_once('=') {
+                    if let Some(entry) = budget_entry(a.win.upcast_ref(), &format!("budget:{category}")) {
+                        eprintln!("Budget smoke test acquired focus: {}", entry.grab_focus());
+                        entry.set_text(value);
+                        gtk::prelude::GtkWindowExt::set_focus(&a.win, None::<&gtk::Widget>);
+                    } else { eprintln!("Budget smoke test: category field not found"); }
+                }
+                return glib::ControlFlow::Continue;
+            }
         }
         let paint = gtk::WidgetPaintable::new(Some(&a.win));
         let snap = gtk::Snapshot::new();

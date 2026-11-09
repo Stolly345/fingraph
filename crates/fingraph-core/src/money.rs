@@ -211,21 +211,21 @@ impl Fx {
             }
         }
     }
-    /// Today's rate; 1 when a currency's rate isn't known yet (the amount stays as printed until it is).
-    pub fn rate(&self, from: Currency, to: Currency) -> Decimal {
-        self.rate_on(from, to, None).unwrap_or(Decimal::ONE)
+    /// Today's rate, unavailable until both currencies have a valid rate.
+    pub fn rate(&self, from: Currency, to: Currency) -> Option<Decimal> {
+        self.rate_on(from, to, None)
     }
     /// Converted at today's rate and rounded to cents (half up, as statements round).
-    pub fn convert(&self, amount: Decimal, from: Currency, to: Currency) -> Decimal {
+    pub fn convert(&self, amount: Decimal, from: Currency, to: Currency) -> Option<Decimal> {
         self.convert_on(amount, from, to, None)
     }
     /// Converted at `day`'s rate (the latest known on or before it) and rounded to cents.
-    pub fn convert_on(&self, amount: Decimal, from: Currency, to: Currency, day: Option<NaiveDate>) -> Decimal {
+    pub fn convert_on(&self, amount: Decimal, from: Currency, to: Currency, day: Option<NaiveDate>) -> Option<Decimal> {
         if from == to {
-            return amount;
+            return Some(amount);
         }
         // a rate too far out to multiply by is as good as none
-        self.rate_on(from, to, day).and_then(|r| amount.checked_mul(r)).map_or(amount, round2)
+        self.rate_on(from, to, day).and_then(|r| amount.checked_mul(r)).map(round2)
     }
 }
 
@@ -456,7 +456,7 @@ mod tests {
     }
 
     /// Other currencies go through the US dollar at the day's rate (the latest kept on or before it); KYD↔USD stays
-    /// on the peg; a currency with no rate converts one for one.
+    /// on the peg; a currency with no rate stays explicitly unavailable.
     #[test]
     fn dated_rates_through_the_dollar() {
         let gbp = Currency::parse("GBP").unwrap();
@@ -464,13 +464,15 @@ mod tests {
         let mut fx = Fx::default();
         fx.daily.entry(gbp).or_default().insert(day(3, 2), d("0.80"));
         fx.daily.entry(gbp).or_default().insert(day(3, 9), d("0.75"));
-        assert_eq!(fx.convert_on(d("100.00"), gbp, Currency::USD, Some(day(3, 5))), d("125.00"), "the 2nd's rate, on the 5th");
-        assert_eq!(fx.convert_on(d("100.00"), gbp, Currency::USD, Some(day(3, 9))), d("133.33"));
-        assert_eq!(fx.convert_on(d("100.00"), gbp, Currency::KYD, Some(day(3, 5))), d("104.17"), "via the dollar, then the peg");
-        assert_eq!(fx.convert_on(d("100.00"), gbp, Currency::USD, Some(day(1, 1))), d("125.00"), "before any rate: the earliest");
-        assert_eq!(fx.convert(d("120.00"), Currency::USD, Currency::KYD), d("100.00"));
+        assert_eq!(fx.convert_on(d("100.00"), gbp, Currency::USD, Some(day(3, 5))).unwrap(), d("125.00"), "the 2nd's rate, on the 5th");
+        assert_eq!(fx.convert_on(d("100.00"), gbp, Currency::USD, Some(day(3, 9))).unwrap(), d("133.33"));
+        assert_eq!(fx.convert_on(d("100.00"), gbp, Currency::KYD, Some(day(3, 5))).unwrap(), d("104.17"), "via the dollar, then the peg");
+        assert_eq!(fx.convert_on(d("100.00"), gbp, Currency::USD, Some(day(1, 1))).unwrap(), d("125.00"), "before any rate: the earliest");
+        assert_eq!(fx.convert(d("120.00"), Currency::USD, Currency::KYD).unwrap(), d("100.00"));
         let cad = Currency::parse("CAD").unwrap();
-        assert!(!fx.knows(cad) && fx.convert(d("50.00"), cad, Currency::KYD) == d("50.00"));
+        assert!(!fx.knows(cad));
+        assert_eq!(fx.convert(d("50.00"), cad, Currency::KYD), None);
+        assert_eq!(fx.rate(cad, Currency::KYD), None);
     }
 
     #[test]
@@ -510,8 +512,8 @@ mod tests {
     #[test]
     fn peg_and_minor() {
         let fx = Fx::default();
-        assert_eq!(fx.convert(d("100.00"), Currency::KYD, Currency::USD), d("120.00"));
-        assert_eq!(fx.convert(d("120.00"), Currency::USD, Currency::KYD), d("100.00"));
+        assert_eq!(fx.convert(d("100.00"), Currency::KYD, Currency::USD).unwrap(), d("120.00"));
+        assert_eq!(fx.convert(d("120.00"), Currency::USD, Currency::KYD).unwrap(), d("100.00"));
         assert_eq!(to_minor(d("-12.345")), -1235);
         assert_eq!(fmt_plain(d("-1234567.5")), "-1,234,567.50");
         assert_eq!(fmt_money(d("-15.99"), Currency::USD), "-US$ 15.99");

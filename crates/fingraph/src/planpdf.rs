@@ -349,6 +349,7 @@ fn account_names(app: &App) -> BTreeMap<i64, String> {
 }
 
 pub(crate) fn plan_doc(app: &App) -> Option<PlanDoc> {
+    if !app.financial_ready() { return None; }
     let s = snap(app);
     let plan = s.plan.clone()?;
     let (usual_by, _, _) = usual(&s, month_start(today()));
@@ -367,7 +368,7 @@ pub(crate) fn plan_doc(app: &App) -> Option<PlanDoc> {
     let docs = app.db.documents(&app.entity_ids()).unwrap_or_default();
     let balances: BTreeMap<i64, (NaiveDate, Decimal)> = insights::latest_balances(&s.rows, &docs)
         .into_iter()
-        .map(|(id, (d, b))| (id, (d, currency.get(&id).map_or(b, |c| s.fx.convert(b, *c, s.ccy)))))
+        .map(|(id, (d, b))| (id, (d, currency.get(&id).map_or(b, |c| s.fx.convert(b, *c, s.ccy).unwrap_or_default()))))
         .collect();
     // one line per service, however many spellings the bank used
     // (its latest charge, what that costs a year)
@@ -381,7 +382,7 @@ pub(crate) fn plan_doc(app: &App) -> Option<PlanDoc> {
     let mut cancelled: Vec<(String, Decimal)> = by.into_iter().map(|(n, (_, v))| (n, v)).collect();
     cancelled.sort_by_key(|c| std::cmp::Reverse(c.1));
     let roles = plan.accounts.clone();
-    Some(plan_doc::plan_doc(PlanInput {
+    plan_doc::plan_doc(PlanInput {
         plan: &plan,
         roles: &roles,
         ccy: s.ccy,
@@ -397,7 +398,7 @@ pub(crate) fn plan_doc(app: &App) -> Option<PlanDoc> {
         parents: &s.parents,
         today: today(),
         data_through: data_through(app),
-    }))
+    })
 }
 
 /// Whole currency units, for tight spaces: CI$ 1,331.
@@ -410,7 +411,7 @@ fn day(d: NaiveDate) -> String {
     d.format("%a %d %b").to_string()
 }
 
-fn plan_blocks(d: &PlanDoc) -> Vec<Block> {
+fn plan_blocks(app: &App, d: &PlanDoc) -> Vec<Block> {
     let m = |v: Decimal| d.money(v);
     let save = d.saving();
     let short = d.goal > Decimal::ZERO && d.left_to_save < d.goal;
@@ -449,7 +450,7 @@ fn plan_blocks(d: &PlanDoc) -> Vec<Block> {
         ],
     };
     let mut b = vec![
-        Block::Title(d.method.plan_title(), format!("Made {} · from statements up to {} · paid {}", d.made.format("%d %B %Y"), d.data_through.format("%d %b %Y"), d.cycle.to_lowercase())),
+        Block::Title(d.method.plan_title(), format!("Made {} · {} · paid {}", d.made.format("%d %B %Y"), app.db.statement_coverage(&app.entity_ids()).unwrap_or_default().label(), d.cycle.to_lowercase())),
         Block::Tiles(tiles),
     ];
     // when needs crowd out wants, say why and where the room would come from
@@ -642,7 +643,7 @@ fn plan_blocks(d: &PlanDoc) -> Vec<Block> {
         b.push(Block::Table(Table {
             widths: vec![3.0, 1.2, 1.4, 1.2, 1.2, 1.6],
             right: vec![false, true, false, true, false, true],
-            head: vec!["Bill".into(), "Costs".into(), "How often".into(), "A month".into(), "Next due".into(), "Saved by now".into()],
+            head: vec!["Bill".into(), "Costs".into(), "How often".into(), "A month".into(), "Next due".into(), "Target by now".into()],
             rows,
             checks: false,
         }));
@@ -660,7 +661,7 @@ fn plan_blocks(d: &PlanDoc) -> Vec<Block> {
                     if *bal >= need { Look::Bold } else { Look::Warn },
                 ));
             }
-            None => b.push(Block::Para(format!("“Saved by now” is what should be put aside so far: {} in all. Keeping it in its own account makes it easy to check.", m(d.saved_by_now())), Look::Dim)),
+            None => b.push(Block::Para(format!("“Target by now” is planned saving, not confirmed deposits: {} in all. Keeping it in its own account makes it easy to check.", m(d.saved_by_now())), Look::Dim)),
         }
     }
 
@@ -719,12 +720,12 @@ fn plan_blocks(d: &PlanDoc) -> Vec<Block> {
 pub fn save_plan(app: &Rc<App>) {
     with_plan(app, |a, d| {
         let name = format!("Budget Plan {}.pdf", d.made.format("%Y-%m-%d"));
-        save_as(a, &name, move |a, path| output(a, "Budget Plan", footer(&d), plan_blocks(&d), Some(path)));
+        save_as(a, &name, move |a, path| output(a, "Budget Plan", footer(&d), plan_blocks(a, &d), Some(path)));
     });
 }
 
 pub fn print_plan(app: &Rc<App>) {
-    with_plan(app, |a, d| output(a, "Budget Plan", footer(&d), plan_blocks(&d), None));
+    with_plan(app, |a, d| output(a, "Budget Plan", footer(&d), plan_blocks(a, &d), None));
 }
 
 fn ics(app: &App, d: &PlanDoc) -> Option<String> {
@@ -736,7 +737,7 @@ fn ics(app: &App, d: &PlanDoc) -> Option<String> {
 #[cfg(debug_assertions)]
 pub fn export_debug(app: &Rc<App>, what: &str, path: std::path::PathBuf) {
     match what {
-        "plan" => with_plan(app, move |a, d| output(a, "Budget Plan", footer(&d), plan_blocks(&d), Some(path.clone()))),
+        "plan" => with_plan(app, move |a, d| output(a, "Budget Plan", footer(&d), plan_blocks(a, &d), Some(path.clone()))),
         "card" => {
             if let Some(c) = report_card(app, last_full_month(app)) {
                 output(app, "Report Card", "FinGraph Report Card".into(), card_blocks(&c), Some(path));
@@ -785,6 +786,7 @@ pub fn last_full_month(app: &App) -> NaiveDate {
 }
 
 pub(crate) fn report_card(app: &App, month: NaiveDate) -> Option<ReportCard> {
+    if !app.financial_ready() { return None; }
     let s = snap(app);
     let plan = s.plan.clone()?;
     let m = month_start(month);
@@ -795,7 +797,7 @@ pub(crate) fn report_card(app: &App, month: NaiveDate) -> Option<ReportCard> {
         .iter()
         .filter_map(|c| {
             let (v, k) = then.get(&c.id)?;
-            let v = s.fx.convert(*v, *k, s.ccy);
+            let v = s.fx.convert(*v, *k, s.ccy).unwrap_or_default();
             (v > Decimal::ZERO).then(|| (c.name.clone(), s.fixed.contains(&c.name), v))
         })
         .collect();
@@ -805,9 +807,9 @@ pub(crate) fn report_card(app: &App, month: NaiveDate) -> Option<ReportCard> {
         let rows: Vec<_> = s.rows.iter().filter(|t| t.posted <= end).cloned().collect();
         let (_, bal) = *insights::latest_balances(&rows, &docs).get(&a)?;
         let acct = app.db.accounts().ok()?.into_iter().find(|x| x.id == a)?;
-        Some((acct.name, s.fx.convert(bal, acct.currency, s.ccy)))
+        Some((acct.name, s.fx.convert(bal, acct.currency, s.ccy).unwrap_or_default()))
     });
-    Some(plan_doc::report_card(m, &plan, &budgets, &spent, &s.funds, &s.rows, &s.parents, s.ccy, &s.fx, big, &s.needs))
+    plan_doc::report_card(m, &plan, &budgets, &spent, &s.funds, &s.rows, &s.parents, s.ccy, &s.fx, big, &s.needs)
 }
 
 fn card_blocks(c: &ReportCard) -> Vec<Block> {

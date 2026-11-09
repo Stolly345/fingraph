@@ -213,37 +213,37 @@ pub fn bills_for(rows: &[TxRow], covered: &BTreeMap<i64, NaiveDate>, month: Naiv
     let slack = Duration::days(4);
     let mut out = Vec::new();
     for r in regulars(rows, m1 + slack).into_iter().filter(|r| r.amount.is_sign_negative() && !r.is_transfer) {
-        let amount = fx.convert(-r.amount, r.currency, ccy).round_dp(2);
-        // a bill that started this month
-        if month_start(r.first) == m0 {
-            out.push(ExpectedBill { payee: r.payee, account: r.account, account_id: r.account_id, amount, cadence: r.cadence, due: r.first, state: BillState::New });
-            continue;
-        }
-        let Some(&prev) = r.dates.iter().rfind(|d| **d < m0) else { continue };
-        // the first due date this month or later; cycles skipped before it don't belong to this month
+        let Some(amount) = fx.convert(-r.amount, r.currency, ccy) else { continue };
+        let amount = amount.round_dp(2);
+        let new = month_start(r.first) == m0;
+        let anchor = r.dates.iter().copied().rfind(|d| *d < m0).unwrap_or(r.first);
+        let mut k = if anchor < m0 { 1 } else { 0 };
+        let mut due = nth_due(anchor, r.cadence, k);
         let mut skipped = 0;
-        let mut due = nth_due(prev, r.cadence, 1);
         while due < m0 {
+            k += 1;
             skipped += 1;
-            due = nth_due(prev, r.cadence, skipped + 1);
+            due = nth_due(anchor, r.cadence, k);
         }
-        // three cycles without a charge: it stopped
-        if due > m1 || skipped >= 3 {
-            continue;
+        if skipped >= 3 { continue; }
+        let mut unmatched: Vec<_> = r.dates.iter().copied()
+            .filter(|d| *d >= m0 - slack && *d <= m1 + slack).collect();
+        while due <= m1 {
+            // Each actual charge can settle only one occurrence. Prefer the closest date so
+            // a weekly payment cannot also mark its neighbour paid.
+            let matched = unmatched.iter().enumerate()
+                .filter(|(_, d)| (**d - due).num_days().abs() <= 4)
+                .min_by_key(|(_, d)| (**d - due).num_days().abs()).map(|(i, _)| i);
+            let state = if let Some(i) = matched {
+                let paid = unmatched.remove(i);
+                if new && k == 0 { BillState::New } else { BillState::Paid(vec![paid]) }
+            } else if covered.get(&r.account_id).is_some_and(|end| *end >= due) {
+                BillState::Missed
+            } else { BillState::NotYetSeen };
+            out.push(ExpectedBill { payee: r.payee.clone(), account: r.account.clone(), account_id: r.account_id, amount, cadence: r.cadence, due, state });
+            k += 1;
+            due = nth_due(anchor, r.cadence, k);
         }
-        let mut paid: Vec<NaiveDate> = r.dates.iter().copied().filter(|d| *d >= m0 && *d <= m1).collect();
-        // due in the last few days and charged just after the month ended
-        if paid.is_empty() && due > m1 - slack {
-            paid = r.dates.iter().copied().filter(|d| *d > m1 && *d <= m1 + slack).collect();
-        }
-        let state = if !paid.is_empty() {
-            BillState::Paid(paid)
-        } else if covered.get(&r.account_id).is_some_and(|c| *c >= due) {
-            BillState::Missed
-        } else {
-            BillState::NotYetSeen
-        };
-        out.push(ExpectedBill { payee: r.payee, account: r.account, account_id: r.account_id, amount, cadence: r.cadence, due, state });
     }
     out.sort_by(|a, b| a.due.cmp(&b.due).then(a.payee.cmp(&b.payee)));
     out
@@ -418,6 +418,24 @@ mod tests {
         let without: Vec<TxRow> = rows.iter().filter(|t| !(t.account_id == first.account_id && payee(t) == first.payee && month_start(t.posted) == sep)).cloned().collect();
         let again = bills_for(&without, &cov, sep, Currency::KYD, &fx);
         assert!(again.iter().any(|b| b.payee == first.payee && b.state == BillState::Missed), "{again:?}");
+    }
+
+    #[test]
+    fn weekly_and_fortnightly_bills_count_every_occurrence_and_match_once() {
+        let d = |s: &str| s.parse::<NaiveDate>().unwrap();
+        for (cadence, dates, count) in [
+            (7, vec!["2026-01-01", "2026-01-08", "2026-01-15", "2026-01-22", "2026-01-29", "2026-02-05"], 4),
+            (14, vec!["2026-01-01", "2026-01-15", "2026-01-29", "2026-02-12"], 2),
+        ] {
+            let mut rows: Vec<_> = dates.iter().enumerate().map(|(i, day)| crate::insights::tests::row(i as i64, d(day), "REGULAR BILL", "-100", "Insurance", "")).collect();
+            for t in &mut rows { t.is_subscription = true; }
+            let cov = BTreeMap::from([(rows[0].account_id, d("2026-02-28"))]);
+            let bills = bills_for(&rows, &cov, d("2026-02-01"), Currency::KYD, &Fx::default());
+            assert_eq!(bills.len(), count, "cadence {cadence}");
+            assert_eq!(bills.iter().map(|b| b.amount).sum::<Decimal>(), Decimal::from(100 * count));
+            assert_eq!(bills.iter().filter(|b| matches!(b.state, BillState::Paid(_))).count(), 1);
+            assert_eq!(bills.iter().filter(|b| b.state == BillState::Missed).count(), count - 1);
+        }
     }
 
     #[test]

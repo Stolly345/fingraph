@@ -64,6 +64,7 @@ pub fn summary(app: &App, m: NaiveDate) -> CloseSummary {
 
 /// `month`: None = the newest month not yet closed. `done` runs after closing.
 pub fn open(app: &Rc<App>, month: Option<NaiveDate>, done: crate::Refresh) {
+    if !app.financial_ready() { return; }
     let month = Rc::new(Cell::new(month.unwrap_or_else(|| default_month(app))));
     let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::SlideLeftRight).vexpand(true).build();
     let bodies: Vec<gtk::Box> = STEPS
@@ -167,12 +168,13 @@ fn fill(app: &Rc<App>, i: usize, m: NaiveDate, b: &gtk::Box, redo: crate::Refres
                 let st = c.months.iter().find(|x| x.0 == m).map(|x| x.1);
                 let (sub, icon, class) = match st {
                     Some(MonthState::Verified) => ("Statement in and balanced", "emblem-ok-symbolic", "success"),
+                    Some(MonthState::Partial) => ("Only part of this calendar month is covered — import the next statement", "dialog-warning-symbolic", "warning"),
                     Some(MonthState::Discrepancy) => ("Statement in, but it doesn't balance — open it on the Statements page", "dialog-warning-symbolic", "warning"),
                     Some(MonthState::Missing) => ("No statement yet", "dialog-question-symbolic", "error"),
                     Some(MonthState::Pending) => ("Not due yet", "content-loading-symbolic", "dim-label"),
                     Some(MonthState::Before) | None => ("Opened later", "action-unavailable-symbolic", "dim-label"),
                 };
-                if matches!(st, Some(MonthState::Missing | MonthState::Discrepancy)) {
+                if matches!(st, Some(MonthState::Missing | MonthState::Partial | MonthState::Discrepancy)) {
                     missing += 1;
                 }
                 l.append(&row(&c.account, sub, icon, class));
@@ -198,7 +200,7 @@ fn fill(app: &Rc<App>, i: usize, m: NaiveDate, b: &gtk::Box, redo: crate::Refres
             if rows.is_empty() {
                 b.append(&row("Everything in this month has a category", "", "emblem-ok-symbolic", "success"));
             } else {
-                let total: Decimal = rows.iter().filter(|t| t.amount.is_sign_negative()).map(|t| -fx.convert(t.amount, t.currency, ccy)).sum();
+                let total: Decimal = rows.iter().filter(|t| t.amount.is_sign_negative()).map(|t| -fx.convert(t.amount, t.currency, ccy).unwrap_or_default()).sum();
                 b.append(&row(&format!("{} transactions without a category", rows.len()), &format!("{} of spending that can't count against the budget yet", money(total)), "mail-unread-symbolic", "warning"));
                 let go = gtk::Button::builder().label("Start Smart Triage").halign(gtk::Align::Start).css_classes(["suggested-action", "pill"]).build();
                 let w = Rc::downgrade(app);

@@ -35,12 +35,10 @@ pub fn focus_search(_app: &Rc<App>) {
     });
 }
 
-/// `CNB Checking KYD ••6120` → `CNB ••6120`: the bank and the last four, which tell accounts apart.
+/// Preserve bank, account type and currency: last-four digits alone can name several accounts.
 pub fn short_account(name: &str) -> String {
-    match (name.split_whitespace().next(), name.rsplit_once("••")) {
-        (Some(bank), Some((_, last4))) if !last4.is_empty() => format!("{bank} ••{last4}"),
-        _ => name.to_string(),
-    }
+    let normalized = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized.replace("Credit Card", "Card").replace("Checking", "Chq").replace("Savings", "Sav")
 }
 
 fn row_of(item: &gtk::ListItem) -> Option<TxRow> {
@@ -342,8 +340,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 l.set_label(&fmt_money(t.amount, t.currency));
                 l.set_css_classes(&[if t.amount.is_sign_negative() { "amount-out" } else { "amount-in" }]);
                 let (disp, fx) = w.upgrade().map(|a| (a.display(), a.db.fx().unwrap_or_default())).unwrap_or((t.currency, Default::default()));
-                let shown = if t.currency == disp { String::new() } else { format!("≈ {} in {}\n", fmt_money(fingraph_core::insights::value(t, disp, &fx), disp), disp) };
-                l.set_tooltip_text(Some(&format!("{shown}Workspace amount {} {}{}", t.amount_entity, t.entity_currency, t.balance.map(|b| format!("\nBalance after: {b}")).unwrap_or_default())));
+                let shown = if t.currency == disp { String::new() } else { fingraph_core::insights::try_value(t, disp, &fx).map(|v| format!("≈ {} in {}\n", fmt_money(v, disp), disp)).unwrap_or_else(|| format!("{} amount unavailable: exchange rate needed\n", disp)) };
+                l.set_tooltip_text(Some(&format!("{shown}Workspace amount {} {}{}", t.amount_entity.map(|v| v.to_string()).unwrap_or_else(|| "unavailable (missing exchange rate)".into()), t.entity_currency, t.balance.map(|b| format!("\nBalance after: {b}")).unwrap_or_default())));
             }),
         );
     }

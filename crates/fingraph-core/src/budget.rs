@@ -486,14 +486,13 @@ pub fn envelopes(db: &Db, scope: &str, rows: &[TxRow], cats: &[(i64, String)], m
         let spent: BTreeMap<String, Decimal> = by_category(rows, m, month_end(m), ccy, fx, parents).into_iter().collect();
         let mut cur = BTreeMap::new();
         for (id, name) in cats {
-            let budget = budgets.get(id).map_or(Decimal::ZERO, |(a, c)| fx.convert(*a, *c, ccy));
-            let moved: Decimal = moves
-                .iter()
-                .map(|mv| {
-                    let v = fx.convert(mv.amount, mv.currency, ccy);
-                    if mv.to == *id { v } else if mv.from == *id { -v } else { Decimal::ZERO }
-                })
-                .sum();
+            let budget = match budgets.get(id) { Some((a, c)) => fx.convert(*a, *c, ccy).ok_or_else(|| crate::Error(format!("Exchange rate needed for {c} to {ccy}")))?, None => Decimal::ZERO };
+            let mut moved = Decimal::ZERO;
+            for mv in &moves {
+                if mv.to != *id && mv.from != *id { continue; }
+                let v = fx.convert(mv.amount, mv.currency, ccy).ok_or_else(|| crate::Error(format!("Exchange rate needed for {} to {ccy}", mv.currency)))?;
+                moved += if mv.to == *id { v } else { -v };
+            }
             let carried = match (starts.get(id), prev.get(id)) {
                 (Some(s), Some(p)) if *s < m => p.available(),
                 _ => Decimal::ZERO,
@@ -587,8 +586,10 @@ impl Db {
     }
 
     pub fn delete_fund(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM sinking_funds WHERE id = ?1", [id])?;
-        Ok(())
+        let tx = self.sp()?;
+        tx.execute("DELETE FROM sinking_funds WHERE id = ?1", [id])?;
+        tx.execute("DELETE FROM settings WHERE key LIKE ?1", [format!("fund_allocation:{id}:%")])?;
+        tx.commit()
     }
 }
 

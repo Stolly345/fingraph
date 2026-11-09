@@ -956,7 +956,7 @@ fn budget(g: &G, app: &Rc<App>) {
                 format!("{} — step 3 of the setup starts from these.", ideas.iter().take(4).map(|i| i.payee.clone()).collect::<Vec<_>>().join(", ")),
             )
         } else {
-            let a_month: Decimal = s.funds.iter().map(|f| s.fx.convert(f.monthly(), f.currency, ccy)).sum();
+            let a_month: Decimal = s.funds.iter().map(|f| s.fx.convert(f.monthly(), f.currency, ccy).unwrap_or_default()).sum();
             (format!("{} big yearly bill{} planned", s.funds.len(), if s.funds.len() == 1 { "" } else { "s" }), format!("Setting aside {} a month for them.", money(a_month)))
         };
         l.append(&icon_row("x-office-calendar-symbolic", &title, &sub));
@@ -1013,7 +1013,7 @@ fn monthly(g: &G, app: &Rc<App>) {
         "Run Monthly Close",
         "On the Budget page. It walks you through the month: are all the statements in, sort anything new, cover overspending, tick off the regular bills, update your goals, then close the month with a summary.",
     ));
-    l.append(&numbered(3, "In between, look at Outlook under Reports", "Where each account's balance is probably heading until the next statement, what's safe to spend, and the bills still to come."));
+    l.append(&numbered(3, "In between, look at Outlook under Reports", "Where each account's balance is probably heading until the next statement, your daily budget allowance, and the bills still to come."));
     g.body.append(&l);
     g.body.append(&heading("When you have a moment"));
     let l = list();

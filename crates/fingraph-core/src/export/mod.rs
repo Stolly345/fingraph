@@ -30,7 +30,7 @@ pub fn csv(rows: &[TxRow]) -> String {
             csv_text(&t.raw_description),
             csv_field(&t.amount.to_string()),
             csv_field(t.currency.code()),
-            csv_field(&t.amount_entity.to_string()),
+            csv_field(&t.amount_entity.map(|v| v.to_string()).unwrap_or_default()),
             csv_field(t.entity_currency.code()),
             csv_text(t.category_name.as_deref().unwrap_or_default()),
             csv_text(&t.tag),

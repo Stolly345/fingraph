@@ -133,7 +133,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 }
                 if t.posted >= from && t.posted <= to {
                     // the combined balance, once every chosen account has one
-                    let total = (bal.len() == picked.len()).then(|| bal.iter().map(|(id, v)| fx.convert(*v, chosen.iter().find(|x| x.id == *id).map_or(ccy, |x| x.currency), ccy)).sum());
+                    let total = (bal.len() == picked.len()).then(|| bal.iter().map(|(id, v)| fx.convert(*v, chosen.iter().find(|x| x.id == *id).map_or(ccy, |x| x.currency), ccy).unwrap_or_default()).sum());
                     lines.push((t, total));
                 }
             }
@@ -157,7 +157,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             for (m, ls) in &by_month {
                 let (mut i, mut o) = (Decimal::ZERO, Decimal::ZERO);
                 for (t, _) in ls.iter().map(|x| (&x.0, x.1)).filter(|(t, _)| !t.is_transfer()) {
-                    let v = fx.convert(t.amount, t.currency, ccy);
+                    let v = fx.convert(t.amount, t.currency, ccy).unwrap_or_default();
                     if v.is_sign_negative() { o -= v } else { i += v }
                 }
                 tin += i;

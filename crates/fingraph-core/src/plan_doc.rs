@@ -218,27 +218,28 @@ pub fn running_bills(rows: &[TxRow], fixed: &[String], parents: &BTreeMap<i64, S
         .filter(|r| !r.is_transfer && r.amount.is_sign_negative() && matches!(r.cadence, 7 | 14 | 30))
         .filter(is_bill)
         .filter(|r| (data_through - r.last).num_days() <= 2 * r.cadence + 7)
-        .map(|r| {
+        .filter_map(|r| {
             let mut k = 1;
             let mut next = nth_due(r.last, r.cadence, k);
             while next < today && k < 2000 {
                 k += 1;
                 next = nth_due(r.last, r.cadence, k);
             }
-            Bill { name: r.payee, account: r.account, amount: fx.convert(-r.amount, r.currency, ccy).round_dp(2), cadence: r.cadence, next }
+            Some(Bill { name: r.payee, account: r.account, amount: fx.convert(-r.amount, r.currency, ccy)?.round_dp(2), cadence: r.cadence, next })
         })
         .collect();
     out.sort_by(|a, b| a.next.cmp(&b.next).then(a.name.cmp(&b.name)));
     out
 }
 
-pub fn plan_doc(i: PlanInput) -> PlanDoc {
+pub fn plan_doc(i: PlanInput) -> Option<PlanDoc> {
+    if !crate::insights::missing_rates(i.rows, i.ccy, i.fx).is_empty() { return None; }
     let p = i.plan;
     let name = |id: Option<i64>| id.and_then(|id| i.accounts.get(&id).cloned());
     let pay_account = name(i.roles.pay).unwrap_or_else(|| "your pay account".into());
     let fixed: Decimal = i.cats.iter().filter(|c| c.fixed).map(|c| c.budget).sum();
     let variable: Decimal = i.cats.iter().filter(|c| !c.fixed).map(|c| c.budget).sum();
-    let big: Decimal = i.funds.iter().map(|f| i.fx.convert(f.monthly(), f.currency, i.ccy)).sum::<Decimal>().round_dp(2);
+    let big: Decimal = i.funds.iter().map(|f| i.fx.convert(f.monthly(), f.currency, i.ccy)).collect::<Option<Vec<_>>>()?.into_iter().sum::<Decimal>().round_dp(2);
     let income = p.monthly_income();
     let left_to_save = income - fixed - variable - big - p.loan_payments - p.debt_extra;
     let per_year = p.cycle.per_year();
@@ -288,20 +289,20 @@ pub fn plan_doc(i: PlanInput) -> PlanDoc {
     let big_bills: Vec<BigBill> = i
         .funds
         .iter()
-        .map(|f| BigBill {
+        .map(|f| Some(BigBill {
             name: f.name.clone(),
-            amount: i.fx.convert(f.amount, f.currency, i.ccy),
+            amount: i.fx.convert(f.amount, f.currency, i.ccy)?,
             every_months: f.every_months,
-            monthly: i.fx.convert(f.monthly(), f.currency, i.ccy),
+            monthly: i.fx.convert(f.monthly(), f.currency, i.ccy)?,
             due: f.due(i.today),
-            saved_by_now: i.fx.convert(f.set_aside(i.today), f.currency, i.ccy),
-        })
-        .collect();
+            saved_by_now: i.fx.convert(f.set_aside(i.today), f.currency, i.ccy)?,
+        }))
+        .collect::<Option<Vec<_>>>()?;
     let big_account = i.roles.big_bills.filter(|a| Some(*a) != i.roles.pay).and_then(|a| Some((i.accounts.get(&a)?.clone(), i.balances.get(&a)?.0, i.balances.get(&a)?.1)));
     let mut cats = i.cats;
     cats.sort_by(|a, b| b.fixed.cmp(&a.fixed).then(b.budget.cmp(&a.budget)));
 
-    PlanDoc {
+    Some(PlanDoc {
         method: p.method,
         debt: p.debt_extra,
         debt_account: name(i.roles.debt),
@@ -335,7 +336,7 @@ pub fn plan_doc(i: PlanInput) -> PlanDoc {
         big_bills,
         big_account,
         cancelled: i.cancelled,
-    }
+    })
 }
 
 fn join_and(v: &[&str]) -> String {
@@ -411,7 +412,8 @@ pub fn report_card(
     fx: &Fx,
     big_account: Option<(String, Decimal)>,
     needs: &[String],
-) -> ReportCard {
+) -> Option<ReportCard> {
+    if !crate::insights::missing_rates(rows, ccy, fx).is_empty() { return None; }
     let month = month_start(month);
     let end = add_months(month, 1) - Duration::days(1);
     let in_month = |t: &&TxRow| t.posted >= month && t.posted <= end && !t.is_transfer();
@@ -422,12 +424,12 @@ pub fn report_card(
     let mut unbudgeted: Vec<(String, Decimal)> = spent.iter().filter(|(n, v)| **v > Decimal::ZERO && *n != "Loan Payments" && !budgets.iter().any(|b| &b.0 == *n)).map(|(n, v)| (n.clone(), *v)).collect();
     unbudgeted.sort_by_key(|x| std::cmp::Reverse(x.1));
     let spent_actual: Decimal = spent.iter().filter(|(n, _)| *n != "Loan Payments").map(|(_, v)| *v).sum();
-    let big_plan: Decimal = funds.iter().map(|f| fx.convert(f.monthly(), f.currency, ccy)).sum::<Decimal>().round_dp(2);
+    let big_plan: Decimal = funds.iter().map(|f| fx.convert(f.monthly(), f.currency, ccy)).collect::<Option<Vec<_>>>()?.into_iter().sum::<Decimal>().round_dp(2);
     let spent_plan: Decimal = budgets.iter().map(|b| b.2).sum();
     let needs_actual: Decimal = spent.iter().filter(|(n, _)| needs.contains(n)).map(|(_, v)| *v).sum::<Decimal>() + loans_actual;
     let wants_actual: Decimal = spent.iter().filter(|(n, _)| !needs.contains(n) && *n != "Loan Payments").map(|(_, v)| *v).sum();
     let pension = plan.pension_monthly();
-    ReportCard {
+    Some(ReportCard {
         method: plan.method,
         base: income_actual.round_dp(2) + pension,
         pension,
@@ -447,9 +449,9 @@ pub fn report_card(
         loans_actual: loans_actual.round_dp(2),
         save_plan: if plan.savings_goal > Decimal::ZERO { plan.savings_goal } else { (plan.monthly_income() - spent_plan - big_plan - plan.loan_payments - plan.debt_extra).max(Decimal::ZERO) },
         saved_actual: (income_actual - spent_actual - loans_actual).round_dp(2),
-        big_should_have: funds.iter().map(|f| fx.convert(f.set_aside(end), f.currency, ccy)).sum(),
+        big_should_have: funds.iter().map(|f| fx.convert(f.set_aside(end), f.currency, ccy)).collect::<Option<Vec<_>>>()?.into_iter().sum(),
         big_account,
-    }
+    })
 }
 
 // ──────────────────────────────────────────────────────────────── the calendar file
@@ -567,13 +569,21 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_with_an_unpriced_bill_is_unavailable() {
+        let (plan, roles, accounts, mut funds) = sample();
+        funds[0].currency = Currency::parse("GBP").unwrap();
+        let doc = plan_doc(PlanInput { plan: &plan, roles: &roles, ccy: Currency::KYD, fx: &Fx::default(), cats: vec![], funds: &funds, rows: &[], accounts: &accounts, balances: &BTreeMap::new(), owed: Decimal::ZERO, cancelled: vec![], fixed: vec![], parents: &BTreeMap::new(), today: d(2026, 11, 6), data_through: d(2026, 10, 31) });
+        assert!(doc.is_none(), "an unknown bill cost must not improve the savings projection");
+    }
+
+    #[test]
     fn checklist_moves_each_pot_to_its_account() {
         let (plan, roles, accounts, funds) = sample();
         let cats = vec![
             CatPlan { name: "Housing".into(), fixed: true, need: true, budget: dec("2000"), usual: Some(dec("2000")) },
             CatPlan { name: "Groceries".into(), fixed: false, need: true, budget: dec("1040"), usual: Some(dec("1200")) },
         ];
-        let doc = plan_doc(PlanInput { plan: &plan, roles: &roles, ccy: Currency::KYD, fx: &Fx::default(), cats, funds: &funds, rows: &[], accounts: &accounts, balances: &BTreeMap::new(), owed: Decimal::ZERO, cancelled: vec![], fixed: vec![], parents: &BTreeMap::new(), today: d(2026, 11, 6), data_through: d(2026, 10, 31) });
+        let doc = plan_doc(PlanInput { plan: &plan, roles: &roles, ccy: Currency::KYD, fx: &Fx::default(), cats, funds: &funds, rows: &[], accounts: &accounts, balances: &BTreeMap::new(), owed: Decimal::ZERO, cancelled: vec![], fixed: vec![], parents: &BTreeMap::new(), today: d(2026, 11, 6), data_through: d(2026, 10, 31) }).unwrap();
         let lines: Vec<(&str, Decimal)> = doc.checklist.iter().map(|s| (s.action.as_str(), s.amount)).collect();
         // big bills (100) and savings (500) share the savings account; spending goes to the card; bills stay
         assert_eq!(lines.len(), 3);
@@ -589,7 +599,7 @@ mod tests {
     #[test]
     fn calendar_has_paydays_bills_and_reminders() {
         let (plan, roles, accounts, funds) = sample();
-        let mut doc = plan_doc(PlanInput { plan: &plan, roles: &roles, ccy: Currency::KYD, fx: &Fx::default(), cats: vec![], funds: &funds, rows: &[], accounts: &accounts, balances: &BTreeMap::new(), owed: Decimal::ZERO, cancelled: vec![], fixed: vec![], parents: &BTreeMap::new(), today: d(2026, 11, 6), data_through: d(2026, 10, 31) });
+        let mut doc = plan_doc(PlanInput { plan: &plan, roles: &roles, ccy: Currency::KYD, fx: &Fx::default(), cats: vec![], funds: &funds, rows: &[], accounts: &accounts, balances: &BTreeMap::new(), owed: Decimal::ZERO, cancelled: vec![], fixed: vec![], parents: &BTreeMap::new(), today: d(2026, 11, 6), data_through: d(2026, 10, 31) }).unwrap();
         doc.bills.push(Bill { name: "CUC".into(), account: "Chequing".into(), amount: dec("250"), cadence: 30, next: d(2026, 11, 20) });
         let ics = calendar(&doc, &plan, 12, d(2026, 11, 6).and_hms_opt(12, 0, 0).unwrap());
         assert!(ics.starts_with("BEGIN:VCALENDAR\r\n") && ics.ends_with("END:VCALENDAR\r\n"));
@@ -605,7 +615,7 @@ mod tests {
     fn report_card_sums() {
         let (plan, ..) = sample();
         let spent: BTreeMap<String, Decimal> = [("Groceries".to_string(), dec("1100")), ("Shopping".to_string(), dec("90"))].into_iter().collect();
-        let c = report_card(d(2026, 10, 1), &plan, &[("Groceries".into(), false, dec("1040"))], &spent, &[], &[], &BTreeMap::new(), Currency::KYD, &Fx::default(), None, &["Groceries".to_string()]);
+        let c = report_card(d(2026, 10, 1), &plan, &[("Groceries".into(), false, dec("1040"))], &spent, &[], &[], &BTreeMap::new(), Currency::KYD, &Fx::default(), None, &["Groceries".to_string()]).unwrap();
         assert_eq!(c.over().len(), 1);
         assert_eq!(c.unbudgeted, vec![("Shopping".to_string(), dec("90"))]);
         assert_eq!(c.spent_actual, dec("1190"));

@@ -3,9 +3,11 @@
 //! deterministic demo data set (`demo`). Money is `rust_decimal::Decimal` everywhere; no floats.
 
 pub mod db;
+pub mod backup;
 pub mod demo;
 pub mod export;
 pub mod insights;
+pub mod reporting;
 pub mod learn;
 pub mod looks;
 pub mod hints;
@@ -16,7 +18,11 @@ pub mod prefs;
 pub mod rates;
 pub mod rules;
 pub mod workflows;
+pub mod coverage;
+pub mod funding;
+pub mod valuation;
 pub mod budget;
+pub mod budget_setup;
 pub mod outlook;
 pub mod plan_doc;
 pub mod method;

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::db::{self, Db, TxFilter, TxRow};
 use crate::insights::{add_months, month_start};
 use crate::money::{round2, to_minor};
-use crate::{Currency, Error, Reconciliation, Result};
+use crate::{Currency, Error, Result};
 
 // ──────────────────────────────────────────────────────────────── splits
 
@@ -101,17 +101,18 @@ impl Db {
                 r.business_entity_id = l.business_entity_id;
                 r.entity_id = l.business_entity_id.unwrap_or(t.account_entity_id);
                 let share = (r.entity_id == t.entity_id && !t.amount.is_zero()).then(|| {
+                    let converted = t.amount_entity?;
                     let before = cum.1;
                     cum.0 += l.amount;
-                    cum.1 = round2(t.amount_entity * cum.0 / t.amount);
-                    cum.1 - before
-                });
+                    cum.1 = round2(converted * cum.0 / t.amount);
+                    Some(cum.1 - before)
+                }).flatten();
                 if !wanted.is_empty() && !wanted.contains(&r.entity_id) {
                     continue;
                 }
                 r.entity_currency = bases.get(&r.entity_id).copied().unwrap_or(t.entity_currency);
                 // same workspace: keep the statement's own exchange rate; another: convert
-                r.amount_entity = share.unwrap_or_else(|| db::entity_amount(&fx, l.amount, t.currency, r.entity_currency, None, t.posted));
+                r.amount_entity = share.or_else(|| db::entity_amount(&fx, l.amount, t.currency, r.entity_currency, None, t.posted));
                 r.category_id = l.category_id;
                 (r.category_name, r.category_kind) = match l.category_id.and_then(|c| cats.get(&c)) {
                     Some((n, k)) => (Some(n.clone()), Some(*k)),
@@ -161,12 +162,12 @@ impl Db {
             st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?
         };
         let rows = self.transactions(&TxFilter { entity_ids: vec![business], split_lines: true, ..Default::default() })?;
-        Ok(rows
+        rows
             .into_iter()
             .filter(|t| t.account_entity_id != business && t.amount.is_sign_negative() && !t.is_transfer())
             .map(|t| {
                 let seq = t.split_seq.unwrap_or(-1);
-                OwedItem {
+                Ok(OwedItem {
                     reimbursed: paid.contains(&(t.account_id, t.fitid.clone(), seq)),
                     tx_id: t.id,
                     account_id: t.account_id,
@@ -175,11 +176,11 @@ impl Db {
                     posted: t.posted,
                     payee: t.clean_payee.clone(),
                     account: t.account_name.clone(),
-                    owed: -t.amount_entity,
+                    owed: -t.amount_entity.ok_or_else(|| Error(format!("Exchange rate needed for {} to {}", t.currency, t.entity_currency)))?,
                     currency: t.entity_currency,
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// Money that came in and could be the business paying you back: credits to accounts outside
@@ -194,7 +195,7 @@ impl Db {
             .into_iter()
             .filter(|t| t.amount.is_sign_positive() && t.account_entity_id != business && !used.contains(&(t.account_id, t.fitid.clone())))
             .collect();
-        v.sort_by_key(|t| ((t.amount_entity - amount).abs(), std::cmp::Reverse(t.posted)));
+        v.sort_by_key(|t| (t.amount_entity.map(|v| (v - amount).abs()).unwrap_or(Decimal::MAX), std::cmp::Reverse(t.posted)));
         v.truncate(25);
         Ok(v)
     }
@@ -315,6 +316,8 @@ pub enum MonthState {
     Before,
     /// A statement covers it and reconciled.
     Verified,
+    /// Only part of the calendar month is covered by verified statements.
+    Partial,
     /// A statement covers it but didn't balance.
     Discrepancy,
     /// No statement, though the month is over.
@@ -370,7 +373,9 @@ impl Db {
                     let end = add_months(m, 1) - Duration::days(1);
                     let over: Vec<_> = mine.iter().filter(|d| d.period.is_some_and(|(s, e)| s <= end && e >= m)).collect();
                     let state = if !over.is_empty() {
-                        if over.iter().all(|d| d.reconciliation == Reconciliation::Reconciled) { MonthState::Verified } else { MonthState::Discrepancy }
+                        if over.iter().any(|d| !crate::coverage::verified(d)) { MonthState::Discrepancy }
+                        else if crate::coverage::covers_period(&docs, a.id, m, end) { MonthState::Verified }
+                        else { MonthState::Partial }
                     } else if end < start {
                         MonthState::Before
                     } else if m >= month_start(today) {
@@ -511,7 +516,8 @@ mod tests {
         let all = db.coverage(&[], 12, today).unwrap();
         let rbc = all.iter().find(|c| c.account.contains("3390")).unwrap();
         assert!(rbc.breaks.is_empty(), "{:?}", rbc.breaks);
-        assert!(rbc.months.iter().all(|(_, s)| matches!(s, MonthState::Verified | MonthState::Pending)), "{:?}", rbc.months);
+        assert!(rbc.months[..11].iter().all(|(_, s)| *s == MonthState::Verified));
+        assert_eq!(rbc.months.last(), Some(&(d(2026, 10, 1), MonthState::Partial)), "October has only partial statement coverage");
         // drop June's RBC statement: June is missing and the chain breaks around it
         let june = db.documents(&[]).unwrap().into_iter().find(|x| x.account_name.contains("3390") && x.period.is_some_and(|p| p.0 == d(2026, 6, 1))).unwrap();
         db.delete_document(june.id).unwrap();
@@ -533,7 +539,7 @@ mod tests {
         let third = (t.amount / Decimal::from(3)).round_dp(2);
         let lines: Vec<SplitLine> = [third, third, t.amount - third - third].into_iter().map(|amount| SplitLine { amount, ..Default::default() }).collect();
         db.set_splits(t.id, &lines).unwrap();
-        let got: Decimal = db.transactions(&TxFilter { split_lines: true, ..Default::default() }).unwrap().iter().filter(|r| r.id == t.id).map(|r| r.amount_entity).sum();
-        assert_eq!(got, t.amount_entity);
+        let got: Decimal = db.transactions(&TxFilter { split_lines: true, ..Default::default() }).unwrap().iter().filter(|r| r.id == t.id).filter_map(|r| r.amount_entity).sum();
+        assert_eq!(Some(got), t.amount_entity);
     }
 }

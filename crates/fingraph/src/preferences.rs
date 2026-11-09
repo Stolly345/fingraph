@@ -109,6 +109,10 @@ pub fn confirm(app: &Rc<App>, title: &str, body: &str, verb: &str, then: impl Fn
 }
 
 pub fn show(app: &Rc<App>) {
+    show_at(app, "general");
+}
+
+pub(crate) fn show_at(app: &Rc<App>, page: &str) {
     let dlg = adw::PreferencesDialog::builder().search_enabled(true).build();
     dlg.add(&general(app));
     dlg.add(&money(app));
@@ -117,6 +121,7 @@ pub fn show(app: &Rc<App>) {
     dlg.add(&dashboard(app));
     dlg.add(&workspaces(app, &dlg));
     dlg.add(&data(app, &dlg));
+    dlg.set_visible_page_name(page);
     dlg.present(Some(&app.win));
 }
 
@@ -684,22 +689,22 @@ fn data(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPage {
     b.add(&switch(
         app,
         "Back up before risky changes",
-        "Before Reset, Rescan, deleting a workspace, restoring or erasing. The last ten are kept.",
+        "Includes ledger, statement copies and receipts before Reset, Rescan, deleting a workspace, restoring or erasing. The last ten are kept.",
         p.auto_backup,
         |_, p, v| p.auto_backup = v,
     ));
-    let now = adw::ButtonRow::builder().title("Back Up Now…").start_icon_name("document-save-symbolic").build();
+    let now = adw::ButtonRow::builder().title("Complete Backup (Ledger and Documents)…").start_icon_name("document-save-symbolic").build();
     let restore = adw::ButtonRow::builder().title("Restore from a Backup…").start_icon_name("document-open-recent-symbolic").build();
     let folder = adw::ButtonRow::builder().title("Open Backups Folder").start_icon_name("folder-documents-symbolic").build();
     {
         let w = Rc::downgrade(app);
         now.connect_activated(move |_| {
             let Some(a) = w.upgrade() else { return };
-            let fd = gtk::FileDialog::builder().title("Back Up Ledger").initial_name(format!("fingraph-backup-{}.db", crate::today())).modal(true).build();
+            let fd = gtk::FileDialog::builder().title("Complete Backup").initial_name(format!("fingraph-backup-{}.tar", crate::today())).modal(true).build();
             let w = Rc::downgrade(&a);
             fd.save(Some(&a.win), gio::Cancellable::NONE, move |res| {
                 let (Some(a), Some(p)) = (w.upgrade(), res.ok().and_then(|f| f.path())) else { return };
-                match a.db.backup_to(&p) {
+                match a.db.backup_archive(&p) {
                     Ok(()) => a.toast(&format!("Backed up to {}", p.display())),
                     Err(e) => a.toast(&e.to_string()),
                 }
@@ -744,6 +749,21 @@ fn data(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPage {
             }
         });
     }
+    let database_only = adw::ButtonRow::builder().title("Database-Only Backup (No Documents)…").tooltip_text("Ledger and settings only; statement files and receipts are not included").build();
+    {
+        let w = Rc::downgrade(app);
+        database_only.connect_activated(move |_| {
+            let Some(a) = w.upgrade() else { return };
+            let fd = gtk::FileDialog::builder().title("Database-Only Backup").initial_name(format!("fingraph-ledger-{}.db", crate::today())).build();
+            let weak = Rc::downgrade(&a);
+            fd.save(Some(&a.win), gio::Cancellable::NONE, move |result| {
+                if let (Some(a), Some(path)) = (weak.upgrade(), result.ok().and_then(|f| f.path())) {
+                    if a.saved(a.db.backup_to(&path)) { a.toast("Database saved; documents are not included"); }
+                }
+            });
+        });
+    }
+    b.add(&database_only);
     b.add(&now);
     b.add(&restore);
     b.add(&folder);
@@ -838,7 +858,7 @@ fn rates_group(app: &Rc<App>, p: &fingraph_core::prefs::Prefs) -> adw::Preferenc
         .title("Exchange Rates")
         .description("KYD and USD always convert at the peg, 1 KYD = 1.20 USD. Other currencies convert at each day's rate: from Frankfurter (central-bank rates), or the fawazahmed0 currency API when it's down. Only currency codes and dates are sent; rates are kept, so each day is fetched once.")
         .build();
-    g.add(&switch(app, "Download exchange rates", "For accounts and workspaces in other currencies (GBP, CAD, JMD…)", p.download_rates, |a, p, v| {
+    g.add(&switch(app, "Download exchange rates", "For accounts, budgets, bills, assets and goals in other currencies (GBP, CAD, JMD…)", p.download_rates, |a, p, v| {
         p.download_rates = v;
         if v {
             let a = a.clone();
@@ -846,12 +866,12 @@ fn rates_group(app: &Rc<App>, p: &fingraph_core::prefs::Prefs) -> adw::Preferenc
         }
     }));
     match app.db.rates_status() {
-        Ok(v) if v.is_empty() => g.add(&adw::ActionRow::builder().title("No other currencies in use").subtitle("Every account and workspace is in KYD or USD").build()),
+        Ok(v) if v.is_empty() => g.add(&adw::ActionRow::builder().title("No other currencies in use").subtitle("All recorded and planned amounts are in KYD or USD").build()),
         Ok(v) => {
             for (c, last) in v {
                 let sub = match last {
                     Some((day, src)) => format!("Latest rate {day}, from {src}"),
-                    None => "No rate yet: its amounts count one for one until one is downloaded".into(),
+                    None => "No rate yet: combined totals and plans need a rate before these amounts can be converted".into(),
                 };
                 g.add(&adw::ActionRow::builder().title(glib::markup_escape_text(&c.label())).subtitle(glib::markup_escape_text(&sub)).build());
             }

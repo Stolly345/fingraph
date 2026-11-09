@@ -56,7 +56,7 @@ pub(crate) fn account_debts(app: &App) -> Vec<(i64, Decimal, Option<Decimal>)> {
         .filter(|(_, x)| x.liability)
         .filter_map(|(id, x)| {
             let (_, v) = x.points.last().filter(|(_, v)| v.is_sign_negative() && !v.is_zero())?;
-            Some((*id, s.fx.convert(-*v, x.currency, s.ccy).round_dp(2), apr_for(app, &s, *id, -*v).0))
+            Some((*id, s.fx.convert(-*v, x.currency, s.ccy).unwrap_or_default().round_dp(2), apr_for(app, &s, *id, -*v).0))
         })
         .collect()
 }
@@ -76,11 +76,11 @@ pub(crate) fn payoff_outlook(app: &App, regular: Decimal, extra: Decimal) -> Opt
     for (id, x) in s.accounts.iter().filter(|(_, x)| x.liability) {
         let Some((_, v)) = x.points.last().filter(|(_, v)| v.is_sign_negative() && !v.is_zero()) else { continue };
         let (apr, _) = apr_for(app, &s, *id, -*v);
-        debts.push(Debt { name: x.name.clone(), balance: s.fx.convert(-*v, x.currency, s.ccy), apr: apr.unwrap_or_default() });
+        debts.push(Debt { name: x.name.clone(), balance: s.fx.convert(-*v, x.currency, s.ccy).unwrap_or_default(), apr: apr.unwrap_or_default() });
     }
     for i in s.items.iter().filter(|i| i.liability) {
         if let Some((_, v)) = i.values.last().filter(|v| v.1 > Decimal::ZERO) {
-            debts.push(Debt { name: i.name.clone(), balance: s.fx.convert(*v, i.currency, s.ccy), apr: i.apr.unwrap_or_default() });
+            debts.push(Debt { name: i.name.clone(), balance: s.fx.convert(*v, i.currency, s.ccy).unwrap_or_default(), apr: i.apr.unwrap_or_default() });
         }
     }
     if debts.is_empty() {
@@ -108,7 +108,7 @@ fn apr_for(app: &App, s: &Snap, id: i64, owed: Decimal) -> (Option<Decimal>, boo
 
 /// A linked account's balance in the goal's currency, and contributions recorded.
 fn goal_inputs(app: &App, s: &Snap, g: &Goal) -> (Option<Decimal>, Decimal) {
-    let bal = g.account_id.and_then(|id| s.accounts.get(&id)).and_then(|a| a.points.last().map(|p| s.fx.convert(p.1, a.currency, g.currency)));
+    let bal = g.account_id.and_then(|id| s.accounts.get(&id)).and_then(|a| a.points.last().map(|p| s.fx.convert(p.1, a.currency, g.currency).unwrap_or_default()));
     let entries = app.db.goal_entries(g.id).unwrap_or_default().values().copied().sum();
     (bal, entries)
 }
@@ -170,7 +170,7 @@ pub fn parts(app: &Rc<App>) -> (gtk::Widget, gtk::Widget, crate::Refresh) {
     ));
     card.append(&dim("Verified month-end balances from your statements, plus what you've added by hand."));
     card.append(&chart.widget);
-    body.append(&card);
+    body.append(&gtk::Expander::builder().label_widget(&crate::heading("Net Worth History")).child(&card).build());
     let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).build();
     content.set_margin_top(12);
     let content_out = content.clone();
@@ -199,13 +199,11 @@ pub fn parts(app: &Rc<App>) -> (gtk::Widget, gtk::Widget, crate::Refresh) {
             let series: Vec<core::NetWorth> = core::net_worth_series(&s.accounts, &s.items, end, MONTHS, ccy, &s.fx).into_iter().filter(|p| first.is_some_and(|f| p.date >= f)).collect();
             let now = *series.last().unwrap_or(&core::NetWorth { date: end, assets: Decimal::ZERO, debts: Decimal::ZERO });
             let year = series.get(series.len().saturating_sub(13)).copied().unwrap_or(now);
-            let newest = s.accounts.values().filter_map(|x| x.points.last().map(|p| p.0)).max();
+            let coverage = a.db.statement_coverage(&a.entity_ids()).unwrap_or_default();
             net_v.set_label(&money(now.net()));
-            net_s.set_label(&newest.map(|d| format!("Verified statements to {}", d.format("%d %b %Y"))).unwrap_or_else(|| "No statements yet".into()));
-            // the same verified mark as Overview's headline
-            if newest.is_some() {
-                net_s.set_css_classes(&["caption", "verified"]);
-            }
+            net_s.set_label(&coverage.label());
+            net_s.set_tooltip_text(Some(&coverage.details()));
+            net_s.set_css_classes(&["caption"]);
             as_v.set_label(&money(now.assets));
             as_s.set_label(&format!("{} accounts + {} items", s.accounts.values().filter(|x| !x.liability).count(), s.items.iter().filter(|i| !i.liability).count()));
             de_v.set_label(&money(now.debts));
@@ -372,11 +370,11 @@ fn payoff_section(app: &Rc<App>, s: &Snap, into: &gtk::Box, redraw: crate::Refre
             continue;
         }
         let (apr, typed) = apr_for(app, s, *id, owed);
-        debts.push((x.name.clone(), s.fx.convert(owed, x.currency, ccy), apr, typed, Ok(*id)));
+        debts.push((x.name.clone(), s.fx.convert(owed, x.currency, ccy).unwrap_or_default(), apr, typed, Ok(*id)));
     }
     for i in s.items.iter().filter(|i| i.liability) {
         if let Some((_, v)) = i.values.last().filter(|v| v.1 > Decimal::ZERO) {
-            debts.push((i.name.clone(), s.fx.convert(*v, i.currency, ccy), i.apr, true, Err(i.clone())));
+            debts.push((i.name.clone(), s.fx.convert(*v, i.currency, ccy).unwrap_or_default(), i.apr, true, Err(i.clone())));
         }
     }
     into.append(&info_heading(
@@ -595,7 +593,7 @@ fn goal_dialog(app: &Rc<App>, goal: Option<Goal>, done: crate::Refresh) {
         let by = by.text();
         n.target_date = if by.trim().is_empty() { None } else { parse_date(&format!("1 {}", by.trim())).or_else(|| parse_date(&by)) };
         // where it starts: the linked account now, else what's already saved
-        let bal = n.account_id.and_then(|id| s.accounts.get(&id)).and_then(|x| x.points.last().map(|p| s.fx.convert(p.1, x.currency, ccy)));
+        let bal = n.account_id.and_then(|id| s.accounts.get(&id)).and_then(|x| x.points.last().map(|p| s.fx.convert(p.1, x.currency, ccy).unwrap_or_default()));
         let changed_link = n.account_id != g0.account_id || n.paydown != g0.paydown || g0.id == 0;
         if changed_link {
             n.start_value = match (n.paydown, bal) {

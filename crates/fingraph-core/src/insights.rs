@@ -82,19 +82,20 @@ impl Range {
 /// Money in the display currency: exact when it already is, the workspace figure (which honours
 /// statement FX lines) when that matches, else the rate on the day it was posted. Nothing (zero) while
 /// no rate is known for its currency: see [`missing_rates`]. An unknown currency is never counted 1:1.
+pub fn try_value(t: &TxRow, display: Currency, fx: &Fx) -> Option<Decimal> {
+    if t.currency == display { Some(t.amount) }
+    else if t.entity_currency == display { t.amount_entity }
+    else { known(fx, t.amount, t.currency, display, t.posted)
+        .or_else(|| t.amount_entity.and_then(|v| known(fx, v, t.entity_currency, display, t.posted))) }
+}
+
 pub fn value(t: &TxRow, display: Currency, fx: &Fx) -> Decimal {
-    if t.currency == display {
-        t.amount
-    } else if t.entity_currency == display {
-        t.amount_entity
-    } else {
-        known(fx, t.amount, t.currency, display, t.posted).or_else(|| known(fx, t.amount_entity, t.entity_currency, display, t.posted)).unwrap_or_default()
-    }
+    try_value(t, display, fx).unwrap_or_default()
 }
 
 /// `v` converted at `day`'s rate, if rates for both currencies are known.
 pub fn known(fx: &Fx, v: Decimal, from: Currency, to: Currency, day: NaiveDate) -> Option<Decimal> {
-    (from == to || (fx.knows(from) && fx.knows(to))).then(|| fx.convert_on(v, from, to, Some(day)))
+    fx.convert_on(v, from, to, Some(day))
 }
 
 /// The currencies in `rows` that can't be shown in `display` yet (no rate downloaded): their amounts are
@@ -102,7 +103,7 @@ pub fn known(fx: &Fx, v: Decimal, from: Currency, to: Currency, day: NaiveDate) 
 pub fn missing_rates(rows: &[TxRow], display: Currency, fx: &Fx) -> Vec<Currency> {
     let mut out: Vec<Currency> = rows
         .iter()
-        .filter(|t| t.currency != display && t.entity_currency != display && !(fx.knows(t.currency) && fx.knows(display)) && !(fx.knows(t.entity_currency) && fx.knows(display)))
+        .filter(|t| try_value(t, display, fx).is_none())
         .map(|t| t.currency)
         .collect();
     out.sort();
@@ -698,7 +699,7 @@ pub fn whole_charges(rows: &[TxRow]) -> Vec<TxRow> {
         match (t.split_seq, at.get(&t.id)) {
             (Some(_), Some(&i)) => {
                 out[i].amount += t.amount;
-                out[i].amount_entity += t.amount_entity;
+                out[i].amount_entity = out[i].amount_entity.zip(t.amount_entity).map(|(a, b)| a + b);
             }
             _ => {
                 if t.split_seq.is_some() {
@@ -954,7 +955,7 @@ pub(crate) mod tests {
             clean_payee: raw.into(),
             amount: amount.parse().unwrap(),
             currency: Currency::KYD,
-            amount_entity: amount.parse().unwrap(),
+            amount_entity: Some(amount.parse().unwrap()),
             balance: None,
             category_id: Some(9),
             category_name: Some(cat.into()),
@@ -990,7 +991,7 @@ pub(crate) mod tests {
         let ins = insights(&rows, &[], d(2026, 8), d(2026, 8) + Duration::days(20), Currency::KYD, &fx, &parents, &Tuning::default());
         assert!(ins.iter().all(|i| i.kind != InsightKind::Spike), "seasonal, not news: {ins:#?}");
         rows.last_mut().unwrap().amount = "-420.00".parse().unwrap();
-        rows.last_mut().unwrap().amount_entity = "-420.00".parse().unwrap();
+        rows.last_mut().unwrap().amount_entity = Some("-420.00".parse().unwrap());
         let ins = insights(&rows, &[], d(2026, 8), d(2026, 8) + Duration::days(20), Currency::KYD, &fx, &parents, &Tuning::default());
         assert!(ins.iter().any(|i| i.kind == InsightKind::Spike && i.title.contains("vs August last year")), "{ins:#?}");
     }

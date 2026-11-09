@@ -5,7 +5,9 @@
 use crate::db::Category;
 
 /// (name, shade on dark, shade on light, chart colour).
-pub const COLORS: [(&str, &str, &str, (f64, f64, f64)); 10] = [
+pub type NamedColor = (&'static str, &'static str, &'static str, (f64, f64, f64));
+
+pub const COLORS: [NamedColor; 10] = [
     ("blue", "#62a0ea", "#1c71d8", (0.21, 0.52, 0.89)),
     ("green", "#57e389", "#26a269", (0.18, 0.76, 0.49)),
     ("orange", "#ffa348", "#c64600", (1.0, 0.47, 0.0)),

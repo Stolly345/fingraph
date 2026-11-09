@@ -52,7 +52,7 @@ pub fn remember_forecast(app: &App) {
 
 /// Variable categories' money left this month, spread over the days the statements don't cover yet.
 /// (daily, left, days, through)
-fn safe_to_spend(app: &App) -> Option<(Decimal, Decimal, i64, NaiveDate)> {
+fn daily_budget_allowance(app: &App) -> Option<(Decimal, Decimal, i64, NaiveDate)> {
     let s = crate::budget::snap(app);
     let m = month_start(today());
     let env = crate::budget::envs(app, &s, m);
@@ -78,7 +78,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(18).margin_bottom(24).margin_start(18).margin_end(18).build();
     // the answer first: what you can spend a day, then what's ahead
     let (summary, nums) = crate::summary_row(
-        ("Safe to Spend", "How much you can spend a day for the rest of the month and stay within budget: what's left in your variable budgets (fixed bills left out) divided by the days remaining. Your statements stop at their last date, so take off anything you've spent since then."),
+        ("Daily Budget Allowance", "Remaining variable budget divided by the days your statements do not cover. This is a planning allowance, not available cash or a guarantee that you can afford another purchase. Recent spending and outstanding commitments may reduce it."),
         &[("Lowest Balance Ahead", "The lowest an account is expected to get before your next statement, and roughly when. It shows an account heading below zero first; otherwise your main account. Red means it would go overdrawn unless something changes."), ("Bills This Month", "All your regular bills for this month added up, and how many already show on a statement. The rest should appear once the next statements arrive. The Bills list further down shows each one."), ("Age of Money", "How many days money sits between arriving and being spent. Each purchase spends the oldest money still in your accounts. Under 30 days means you're spending this month's pay as it arrives; over 30 means you're living on last month's money, which is the goal.")],
     );
     let [(safe_v, safe_s), (low_v, low_s), (bill_v, bill_s), (age_v, age_s)] = <[(gtk::Label, gtk::Label); 4]>::try_from(nums).unwrap();
@@ -113,19 +113,19 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let t = today();
 
             // ── the ribbon
-            match safe_to_spend(&a) {
+            match daily_budget_allowance(&a) {
                 Some((daily, left, days, through)) => {
                     safe_v.set_label(&format!("{} a day", money(daily.max(Decimal::ZERO))));
                     safe_v.set_css_classes(&["value", "tnum", if daily.is_sign_negative() { "amount-out" } else { "amount-in" }]);
                     safe_s.set_label(&format!(
-                        "{} left in variable budgets over the {days} days {}. Spending since then isn't in yet — take it off.",
+                        "{} left in variable budgets over the {days} days {}. Not an available cash balance. Subtract spending since your statements.",
                         money(left),
                         if through >= month_start(t) { format!("after your newest statement ({})", through.format("%d %b")) } else { "of this month".into() }
                     ));
                 }
                 None => {
                     safe_v.set_label("—");
-                    safe_s.set_label("Set up a budget to see what's safe to spend");
+                    safe_s.set_label("Set up a budget to see a daily planning allowance");
                 }
             }
             let aom = core::age_of_money(&rows, &docs, ccy, &fx);
@@ -162,7 +162,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let paid = bills.iter().filter(|b| matches!(b.state, BillState::Paid(_))).count();
             let total: Decimal = bills.iter().map(|b| b.amount).sum();
             bill_v.set_label(&money(total));
-            bill_s.set_label(&format!("{} regular bills: {paid} seen on statements so far, the rest after the next ones arrive", bills.len()));
+            bill_s.set_label(&format!("{} expected payments: {paid} seen on statements so far, the rest after the next ones arrive", bills.len()));
 
             // ── the estimate, one line per account (in the display currency)
             // a dormant account's old statement shouldn't stretch the chart back for months
@@ -178,7 +178,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let series: Vec<LineSeries> = fcs
                 .iter()
                 .enumerate()
-                .map(|(i, fc)| LineSeries { name: crate::transactions::short_account(&fc.account), points: fc.points.iter().filter(|p| p.0 >= start).map(|p| (x(p.0), f(fx.convert(p.1, fc.currency, ccy)))).collect(), color: charts::PALETTE[i % charts::PALETTE.len()], dashed: false })
+                .map(|(i, fc)| LineSeries { name: crate::transactions::short_account(&fc.account), points: fc.points.iter().filter(|p| p.0 >= start).map(|p| (x(p.0), f(fx.convert(p.1, fc.currency, ccy).unwrap_or_default()))).collect(), color: charts::PALETTE[i % charts::PALETTE.len()], dashed: false })
                 .collect();
             let mut stops = Vec::new();
             let mut d = start;
