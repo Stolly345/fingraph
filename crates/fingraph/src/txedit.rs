@@ -73,6 +73,30 @@ pub fn dialog(app: &Rc<App>, tx_id: i64, on_closed: Option<Rc<dyn Fn()>>) {
     }
     what.add(&category);
 
+    // a refund tied to the purchase it gives back: which one, and a way to say it isn't
+    if t.amount.is_sign_positive()
+        && let Ok(Some(p)) = app.db.refund_of(tx_id)
+    {
+        let r = adw::ActionRow::builder()
+            .title("Refund of")
+            .subtitle(glib::markup_escape_text(&format!("{} · {} on {} · filed with it so it offsets that spending", if p.clean_payee.is_empty() { &p.raw_description } else { &p.clean_payee }, fmt_money(p.amount.abs(), p.currency), p.posted.format("%d %b %Y"))))
+            .subtitle_lines(2)
+            .build();
+        let unlink = gtk::Button::builder().label("Not This Purchase").valign(gtk::Align::Center).css_classes(["flat"]).build();
+        let (w, touch) = (Rc::downgrade(app), touch.clone());
+        unlink.connect_clicked(move |b| {
+            if let Some(a) = w.upgrade()
+                && a.saved(a.db.unlink_refund(tx_id))
+            {
+                b.set_sensitive(false);
+                a.toast("Unlinked: it's back in To Review");
+                touch();
+            }
+        });
+        r.add_suffix(&unlink);
+        what.add(&r);
+    }
+
     // the workspace it counts in: its account's own, or a business it was paid for
     let ents = app.entities.borrow().clone();
     let ws_names: Vec<String> = ents.iter().map(|e| if e.id == t.account_entity_id { format!("{} (paid from)", e.name) } else { e.name.clone() }).collect();

@@ -2365,7 +2365,8 @@ impl Db {
             n += self.apply_rule(&r, false)?;
         }
         self.match_transfers()?;
-        Ok(n + self.mark_card_payments()? + self.apply_directory()?)
+        // refunds last: they take the category their purchase was just given
+        Ok(n + self.mark_card_payments()? + self.apply_directory()? + self.link_refunds()?)
     }
 
     /// File uncategorized charges from businesses in the merchant directory (and, if allowed in
@@ -2421,6 +2422,30 @@ impl Db {
         }
         tx.commit()?;
         Ok(n)
+    }
+
+    /// Rules your recent hand-filing contradicts (the last six months), minus the ones you said to
+    /// keep, until the disagreement grows by two more.
+    pub fn rule_drift(&self) -> Result<Vec<rules::Drift>> {
+        let kept: std::collections::BTreeMap<i64, usize> = self.setting("drift_kept").and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default();
+        let since = Local::now().date_naive() - chrono::Duration::days(183);
+        Ok(rules::drift(&self.rules()?, &self.transactions(&TxFilter::default())?, since).into_iter().filter(|d| kept.get(&d.rule_id).is_none_or(|n| d.disagree >= n + 2)).collect())
+    }
+
+    /// "Keep the rule as it is": not asked again unless you file two more against it.
+    pub fn keep_drifting_rule(&self, rule_id: i64, disagree: usize) -> Result<()> {
+        let mut kept: std::collections::BTreeMap<i64, usize> = self.setting("drift_kept").and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default();
+        kept.insert(rule_id, disagree);
+        self.set_setting("drift_kept", &serde_json::to_string(&kept)?)
+    }
+
+    /// Point a rule at another category, and apply it to what you haven't filed yourself.
+    pub fn set_rule_category(&self, rule_id: i64, category_id: i64) -> Result<usize> {
+        self.conn.execute("UPDATE learned_rules SET category_id = ?2 WHERE id = ?1", params![rule_id, category_id])?;
+        match self.rules()?.into_iter().find(|r| r.id == rule_id) {
+            Some(r) => self.apply_rule(&r, false),
+            None => Ok(0),
+        }
     }
 
     pub fn delete_rule(&self, id: i64) -> Result<()> {
@@ -3278,6 +3303,29 @@ mod tests {
         db.save_prefs(&p).unwrap();
         db.reset_learning(&[]).unwrap();
         assert_eq!(db.apply_directory().unwrap(), 0);
+    }
+
+    /// A rule you keep overruling is offered for an update; "keep" quiets it, switching fixes it.
+    #[test]
+    fn a_rule_you_keep_overruling_is_offered_for_an_update() {
+        let db = Db::open_in_memory().unwrap();
+        db.load_demo().unwrap();
+        let today = Local::now().date_naive();
+        let ids: Vec<i64> = db.transactions(&TxFilter::default()).unwrap().into_iter().filter(|t| t.amount.is_sign_negative() && t.transfer_peer.is_none() && t.split_seq.is_none()).map(|t| t.id).take(3).collect();
+        for (i, id) in ids.iter().enumerate() {
+            db.conn.execute("UPDATE transactions SET raw_description = 'ZZ HARDWARE DEPOT', memo = '', posted_date = ?2 WHERE id = ?1", params![id, (today - chrono::Duration::days(10 + i as i64)).to_string()]).unwrap();
+        }
+        let (a, b) = (db.category_id("Groceries").unwrap().unwrap(), db.category_id("Repairs & Maintenance").unwrap().unwrap());
+        db.learn(&Rule { kind: RuleKind::NormalizedTokens, pattern: "ZZ HARDWARE DEPOT".into(), category_id: Some(a), ..Default::default() }).unwrap();
+        assert!(db.rule_drift().unwrap().is_empty(), "nothing filed by hand yet");
+        db.set_category(&ids, Some(b)).unwrap();
+        let d = db.rule_drift().unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].instead, (b, 3));
+        db.keep_drifting_rule(d[0].rule_id, d[0].disagree).unwrap();
+        assert!(db.rule_drift().unwrap().is_empty(), "kept: not asked again");
+        db.set_rule_category(d[0].rule_id, b).unwrap();
+        assert_eq!(db.rules().unwrap().iter().find(|r| r.id == d[0].rule_id).unwrap().category_id, Some(b));
     }
 
     /// One digital purchase is a purchase: the subscription flag waits for charges on a schedule.

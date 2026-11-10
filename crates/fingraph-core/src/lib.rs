@@ -16,6 +16,7 @@ pub mod money;
 pub mod parser;
 pub mod prefs;
 pub mod rates;
+pub mod refunds;
 pub mod rules;
 pub mod workflows;
 pub mod coverage;

@@ -262,6 +262,59 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
                 let cats = a.categories();
                 let ents = a.entities.borrow().clone();
                 let learned = a.db.rules().unwrap_or_default();
+                // rules your own filing has moved away from: switch them, or keep them as they are
+                for d in a.db.rule_drift().unwrap_or_default() {
+                    let name = |id: i64| cats.iter().find(|c| c.id == id).map_or("—".to_string(), |c| c.name.clone());
+                    let r = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&format!("“{}” may be out of date", d.pattern)))
+                        .subtitle(glib::markup_escape_text(&format!(
+                            "It files to {}, but you put {} of the last {} you filed yourself in {}",
+                            name(d.rule_category),
+                            d.instead.1,
+                            d.confirmed,
+                            name(d.instead.0)
+                        )))
+                        .subtitle_lines(3)
+                        .build();
+                    r.add_prefix(&gtk::Image::from_icon_name("dialog-information-symbolic"));
+                    let switch = gtk::Button::builder().label("Update Rule").valign(gtk::Align::Center).css_classes(["suggested-action"]).tooltip_text(format!("File “{}” under {} from now on (what you filed yourself stays)", d.pattern, name(d.instead.0))).build();
+                    let keep = gtk::Button::builder().label("Keep").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Leave the rule as it is; asked again only if you file two more against it").build();
+                    let show = gtk::Button::builder().icon_name("view-list-bullet-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).tooltip_text("Show the ones you filed differently").build();
+                    {
+                        let (w, id, to) = (Rc::downgrade(&a), d.rule_id, d.instead.0);
+                        switch.connect_clicked(move |_| {
+                            if let Some(a) = w.upgrade() {
+                                match a.db.set_rule_category(id, to) {
+                                    Ok(n) => a.toast(&format!("Rule updated · {n} transactions refiled")),
+                                    Err(e) => a.toast(&e.to_string()),
+                                }
+                                a.refresh();
+                            }
+                        });
+                    }
+                    {
+                        let (w, id, n) = (Rc::downgrade(&a), d.rule_id, d.disagree);
+                        keep.connect_clicked(move |_| {
+                            if let Some(a) = w.upgrade() {
+                                a.saved(a.db.keep_drifting_rule(id, n));
+                                a.refresh();
+                            }
+                        });
+                    }
+                    {
+                        let (w, ids) = (Rc::downgrade(&a), d.tx_ids.clone());
+                        show.connect_clicked(move |_| {
+                            if let Some(a) = w.upgrade() {
+                                a.show_transactions(ids.clone());
+                            }
+                        });
+                    }
+                    r.add_suffix(&show);
+                    r.add_suffix(&keep);
+                    r.add_suffix(&switch);
+                    rules.add(&r);
+                    rule_rows.borrow_mut().push(r.upcast());
+                }
                 if learned.is_empty() {
                     let r = adw::ActionRow::builder().title("Nothing learned yet").subtitle("Answer the Smart Triage cards, or edit a category in Transactions and choose “Remember”.").build();
                     rules.add(&r);

@@ -1,6 +1,6 @@
 # FinGraph: Product Requirements
 
-Last updated: 8 November 2026 (version 0.2.22, with the interface redesign unreleased)
+Last updated: 9 November 2026 (version 0.2.30, on the `interface-redesign` branch; `main` is still 0.2.22)
 
 ## 1. What FinGraph is
 
@@ -171,7 +171,7 @@ offers **Put the Rest in Savings**. The budget can't be saved until the unassign
 - **Report Card:** grades the month's needs, wants and saving (pension included) as shares of what
   came in.
 
-## 7. Feature: the interface redesign (finished on the `interface-redesign` branch, not yet released)
+## 7. Feature: the interface redesign (released from the `interface-redesign` branch as 0.2.28)
 
 ### Problem
 
@@ -226,13 +226,91 @@ People need one job per screen, and categories they recognise at a glance.
 - [x] **Step 4. Summary.** Net worth leads, then the Overview figures and charts for the chosen date range.
   Accounts, other assets and debts, goals and debt payoff are kept, folded under the charts (the fold is
   remembered). Left to Spend and the Review banner are no longer repeated here; they live on Budget.
-- [x] **Step 5. Reports.** One sidebar row and a tab strip: Cash Flow, Trends, Where It Went, Plan, Outlook,
-  Subscriptions, What Changed and Export. Cash Flow and Trends are new: one large chart and a ranked
+- [x] **Step 5. Reports.** One sidebar row and a tab strip, grouped as Plan (Plan, Outlook), Monitor (What
+  Changed, Subscriptions) and Analyze (Cash Flow, Trends, Where It Went). Export moved to the main menu. Cash Flow and Trends are new: one large chart and a ranked
   breakdown over the twelve months ending with the newest statement, with stacked bars by category for Trends.
 - [x] **Step 6. Finish.** Getting Started, card help, the README and its screenshots all describe the new
   layout. Old `last_page` values in saved preferences are ignored.
 
-## 8. Known issues and next steps
+## 8. Honest numbers (0.2.28)
+
+A critique found places where a figure claimed more than the statements prove. Each now says exactly
+what it rests on.
+
+- **Coverage is per account.** "Verified statement ends" gives the oldest and newest date, with each
+  account in a tooltip. A month counts as verified only when every account's statements cover all of it;
+  a statement ending mid-month makes the month *Partial*, never verified.
+- **Bill funds show a target, not a deposit.** "Target by now" is what should have been set aside. What you
+  actually moved is recorded separately (Record Allocation), per bill and due date, and is marked as not
+  bank-verified.
+- **Daily Budget Allowance** (was Safe to Spend) is a planning figure, not cash you have.
+- **Weekly and fortnightly bills** count every occurrence in a month; each payment settles one occurrence.
+- **No 1:1 exchange-rate fallback.** A page that needs a missing rate says so and offers the download;
+  transactions and statements stay readable. Planned currencies are downloaded too.
+- **Budget setup saves in one step** and rolls back on failure.
+- **Complete backups:** one archive of the ledger, every statement and receipt, with a SHA-256 manifest;
+  restore validates everything first and puts the old ledger back if anything fails.
+- **Averages use complete months only**; partial months are marked, never counted as zero.
+- **Budget amounts save when you leave the field**; invalid input keeps the saved amount.
+
+## 9. Matching you can trust (0.2.29)
+
+An independent review of merchant recognition, then checked against a real ledger before release: no learned
+rule changed what it matched, and the directory filed more transactions, almost all agreeing with the
+categories chosen by hand.
+
+- **A rule for one business never catches another** the directory knows apart (FLOW is not FLOW TAXI).
+  *Contains text* rules match broadly, and the rule dialog says so. A rule written for a payment platform
+  (PADDLE.NET) still covers what it billed.
+- **A brand word the rest of the name contradicts is left for you** (PANDORA JEWELRY, PARAMOUNT PLUMBING),
+  with the other words' category suggested. Related categories (a grocer's FOOD FAIR) are not a conflict.
+- **The most specific keyword wins** (ANIMAL HOSPITAL → Vet over HOSPITAL); statement text and keywords
+  share one tokenizer (H&R BLOCK). Two equally specific keywords in unrelated categories are left for you.
+- **Direction matters.** Income entries (SALARY, INTEREST PAID) file only deposits; everything else files
+  only payments. Money in from a shop is pay or a refund, so it is asked about.
+- **Subscriptions & Digital is a category, not a schedule:** the subscription flag waits for charges that
+  come on a schedule.
+- **Names keep what tells them apart:** six words, a leading number (7 ELEVEN), the bank's name when it is
+  the payee. Choices saved under the old names are moved over once, when the ledger opens.
+- **Every match is explained** in To Review and the transaction editor: your rule, the directory entry and
+  the words matched, a keyword, or why FinGraph left it to you.
+
+## 10. Planning and monitoring (0.2.29)
+
+Chosen from a survey of Simplifi, Monarch, YNAB, PocketGuard, Rocket Money and Quicken, keeping only what
+fits FinGraph's existing screens and its statement-based, local design.
+
+- **Payment status** on Subscriptions: paid, due, late (the statement covering the due date is in, no
+  charge), price changed, gone quiet, cancelled. Summary's Next Steps lists the ones to check, and missed bills.
+- **A minimum per account** on Outlook: the first day and the payment that would take the account under it;
+  Summary warns too.
+- **Why spending changed** (What Changed): spending against the period before, the categories that moved
+  most, and for each the merchant or the one-off charge behind it. A long range without the period before
+  compares its latest month instead.
+- **Watchlist pace:** where the month is heading, from the second week and two charges on.
+- **What if you paid more?** The debt-free date, months sooner and interest saved for an extra amount a
+  month, with what it costs a year.
+- **Rule preview:** before saving, how many transactions a rule matches, how many would move, and how many
+  you confirmed (left alone).
+- **Financial Health** on Summary: emergency fund (cash ÷ essential spending), debt load (owed ÷ income),
+  fees and interest over 12 months. Three figures, each with its sum, never one score.
+
+Left out on purpose: credit scores (no Cayman bureau feed), bill negotiation (a human service), bank sync
+(statements are the source), investment performance (no holdings data yet).
+
+## 11. Refunds and rule drift (0.2.30)
+
+- **Refunds find their purchase.** A deposit from a shop is tied to the purchase it gives back: the same
+  merchant, within 120 days before, at least as much. Only on good evidence: the very same amount, or refund
+  wording. It takes the purchase's category, so the spending is offset, and the transaction editor says which
+  purchase it was, with *Not This Purchase* to undo it for good. A purchase gives back no more than it cost
+  across all its refunds. Pay from a business you also buy from is never mistaken for a refund.
+- **Rules that your choices have moved away from** are offered for an update: at least three matching
+  transactions filed by hand in the last six months, most of them elsewhere, two or more in one other
+  category. *Update Rule* refiles what you haven't filed yourself; *Keep* quiets it until two more disagree.
+  Rules & Categories shows them first, and Summary's Next Steps counts them.
+
+## 12. Known issues and next steps
 
 Left out of the interface redesign, in the order they'd help most: **manual transaction entry** (which
 would let 80/20's weekly view cover the current week, since statements only arrive after a month ends),
@@ -254,3 +332,7 @@ multi-step undo, more themes, and customisable Summary widgets.
    Todoist rather than a calendar.
 7. **Several pay sources.** Two earners or a second job: more than one pay line, each with its own
    account and cycle.
+8. **Refunds are linked whole.** A refund for part of a split purchase takes the purchase's main category.
+9. **Drift counts a more specific sub-category as disagreement** (a rule to Dining & Takeaway, filed as
+   Restaurants). It's offered as an update rather than ignored; a "refine" wording would be clearer.
+10. **Android.** A companion app is planned: see `docs/ANDROID-PLAN.md`.

@@ -83,6 +83,17 @@ pub(super) fn fill(app: &Rc<App>, into: &gtk::Box) {
         row.add_suffix(&open);
         list.append(&row);
     }
+    // rules your own filing has moved away from
+    let drift = app.db.rule_drift().unwrap_or_default();
+    if !drift.is_empty() {
+        let n = drift.len();
+        add(
+            &format!("{n} rule{} may be out of date", if n == 1 { "" } else { "s" }),
+            &format!("You've been filing “{}” somewhere else. Update the rule or keep it.", drift[0].pattern),
+            "Rules",
+            "win.show-rules",
+        );
+    }
     let row = adw::ActionRow::builder().title("Review and close the month").subtitle("Check statement coverage, reconcile the budget and save your report card.").build();
     let close = gtk::Button::builder().label("Monthly Close…").valign(gtk::Align::Center).build();
     let weak = Rc::downgrade(app);

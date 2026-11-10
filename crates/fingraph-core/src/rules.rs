@@ -494,6 +494,47 @@ impl RulePreview {
     }
 }
 
+/// A rule your own choices have moved away from: of the transactions it matches that you filed by
+/// hand lately, most went somewhere else.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Drift {
+    pub rule_id: i64,
+    pub pattern: String,
+    pub rule_category: i64,
+    /// Matching transactions you filed yourself since `since`.
+    pub confirmed: usize,
+    /// How many of those you put somewhere other than the rule's category.
+    pub disagree: usize,
+    /// Where you put most of them instead, and how many.
+    pub instead: (i64, usize),
+    pub tx_ids: Vec<i64>,
+}
+
+/// Rules that your recent choices contradict: at least three matching transactions filed by hand
+/// since `since`, most of them not in the rule's category, and at least two in one other category.
+pub fn drift(rules: &[Rule], rows: &[crate::db::TxRow], since: NaiveDate) -> Vec<Drift> {
+    let mut out = Vec::new();
+    for r in rules.iter().filter(|r| r.category_id.is_some() && !r.is_transfer) {
+        let cat = r.category_id.unwrap_or_default();
+        let mine: Vec<&crate::db::TxRow> = rows
+            .iter()
+            .filter(|t| t.posted >= since && t.split_seq.is_none() && t.review == crate::ReviewStatus::Confirmed && t.category_id.is_some())
+            .filter(|t| r.entity_id.is_none_or(|e| e == t.account_entity_id || e == t.entity_id))
+            .filter(|t| r.applies(&t.raw_description, &t.memo, t.amount))
+            .collect();
+        let other: Vec<&&crate::db::TxRow> = mine.iter().filter(|t| t.category_id != Some(cat)).collect();
+        let mut by: BTreeMap<i64, usize> = BTreeMap::new();
+        for t in &other {
+            *by.entry(t.category_id.unwrap_or_default()).or_default() += 1;
+        }
+        let Some((&instead, &n)) = by.iter().max_by_key(|(id, n)| (**n, std::cmp::Reverse(**id))) else { continue };
+        if mine.len() >= 3 && other.len() * 2 > mine.len() && n >= 2 {
+            out.push(Drift { rule_id: r.id, pattern: r.pattern.clone(), rule_category: cat, confirmed: mine.len(), disagree: other.len(), instead: (instead, n), tx_ids: other.iter().map(|t| t.id).collect() });
+        }
+    }
+    out
+}
+
 /// Charges this regular (median gap 6–8, 13–16, 26–35 or 350–380 days, amounts within 25%) are recurring.
 pub fn cadence(dates: &[NaiveDate]) -> Option<i64> {
     if dates.len() < 2 {
@@ -845,5 +886,28 @@ mod tests {
         assert_eq!(p.now_in, vec![("Entertainment".to_string(), 2)]);
         assert!(p.label().contains("1 would change category"));
         assert!(preview(&Rule { pattern: "NOBODY".into(), ..Default::default() }, &[]).label().starts_with("Matches nothing"));
+    }
+
+    #[test]
+    fn a_rule_your_choices_moved_away_from() {
+        let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        let mk = |id, m, cat: i64| {
+            let mut t = crate::insights::tests::row(id, d(m, 3), "ISLAND HARDWARE", "-40", "x", "");
+            t.category_id = Some(cat);
+            t.review = crate::ReviewStatus::Confirmed;
+            t
+        };
+        let r = Rule { id: 7, pattern: "ISLAND HARDWARE".into(), category_id: Some(1), ..Default::default() };
+        // you filed four of the last five as 2 instead of the rule's 1
+        let rows = vec![mk(1, 5, 1), mk(2, 6, 2), mk(3, 7, 2), mk(4, 8, 2), mk(5, 9, 2)];
+        let dr = drift(std::slice::from_ref(&r), &rows, d(1, 1));
+        assert_eq!(dr.len(), 1);
+        assert_eq!((dr[0].confirmed, dr[0].disagree, dr[0].instead), (5, 4, (2, 4)));
+        // agreeing, too few, or older than the window: nothing
+        assert!(drift(std::slice::from_ref(&r), &[mk(1, 5, 1), mk(2, 6, 1), mk(3, 7, 2)], d(1, 1)).is_empty());
+        assert!(drift(std::slice::from_ref(&r), &rows[..2], d(1, 1)).is_empty());
+        assert!(drift(std::slice::from_ref(&r), &rows, d(10, 1)).is_empty());
+        // scattered choices aren't one clear direction
+        assert!(drift(&[r], &[mk(1, 5, 1), mk(2, 6, 2), mk(3, 7, 3), mk(4, 8, 4)], d(1, 1)).is_empty());
     }
 }

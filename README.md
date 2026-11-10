@@ -113,7 +113,7 @@ personal and a property-business workspace, across all five banks, in KYD and US
 2. Answer anything it asks (see [Importing statements](#importing-statements)), and anything waiting
    in **To Review**.
 3. Run **Monthly Close** on the Budget page.
-4. Between statements, **Outlook** (under Reports) shows where balances are heading and what's safe to spend.
+4. Between statements, **Outlook** (under Reports) shows where balances are heading, the daily budget allowance, and the first bill that would take an account under the minimum you set.
 
 ## Finding your way around
 
@@ -123,7 +123,7 @@ FinGraph always opens on **Budget**. The **sidebar**, in order:
 |---|---|---|
 | Budget | 1 | This month, laid out for the budgeting method you chose: one headline number, your categories, non-monthly bills and watchlists; a **Review** banner while merchants wait for an answer |
 | Transactions | 2 | Every transaction: search, filter, edit, split, attach receipts |
-| Reports | 3 | A strip of tabs: Cash Flow, Trends, Where It Went, Plan, Outlook, Subscriptions, What Changed and Export |
+| Reports | 3 | Tabs grouped as Plan (Plan, Outlook), Monitor (What Changed, Subscriptions) and Analyze (Cash Flow, Trends, Where It Went); Export is in the main menu |
 | Statements | 4 | Every statement read, its reconciliation, coverage by month, and anything waiting for approval |
 | Combined Statement | 5 | Under Statements: chosen accounts month by month with one running balance |
 | Summary | 6 | Net worth over time, the headline figures, **Big Bills Coming Up** and six charts; under them, your accounts, other assets and debts, goals, and debt payoff |
@@ -196,13 +196,16 @@ searches transactions and Ctrl+O imports.
 The steps are tried in this order:
 
 1. Your rules. A rule can be limited to an amount (*only when CI$ 125.00*) or match a reference
-   number.
+   number. *Merchant words* rules stay with one business (FLOW never catches FLOW TAXI); *Contains
+   text* rules match any business with that text. The rule dialog shows how many transactions a rule
+   would change before you save it, and a rule you keep overruling is offered for an update.
 2. Transfers between your accounts and credit card payments.
-3. A directory of 1,270 Cayman businesses and online services, plus the US and Canadian stores, restaurants, airlines and hotels people from Cayman use when they travel. It only files money going out: a deposit from a business in it (pay from an airline, a refund) is asked about instead.
-4. Keyword guesses (MARKET → groceries, DIGITAL → subscriptions).
-5. Whatever's left goes to **To Review**. There's one card per merchant with every charge listed;
+3. A directory of 1,270 Cayman businesses and online services, plus the US and Canadian stores, restaurants, airlines and hotels people from Cayman use when they travel. Pay, interest and rent entries file only deposits, everything else only payments; a deposit from a shop (pay, or a refund) is asked about instead. A brand word the rest of the name contradicts (PARAMOUNT PLUMBING) is left for you.
+4. Keyword guesses (MARKET → groceries, DIGITAL → subscriptions); the most specific wins (EYE CLINIC → Optical, not CLINIC → Doctor).
+5. Refunds: a deposit from a shop that matches an earlier purchase (the same amount, or refund wording) is filed with that purchase, so it offsets the spending.
+6. Whatever's left goes to **To Review**. There's one card per merchant with every charge listed;
    answer it once and the answer is applied to past and future statements. Suggestions come from
-   how you filed similar charges.
+   how you filed similar charges, and each card says why FinGraph suggests what it does.
 
 ### Keeps money apart
 
@@ -265,15 +268,15 @@ The steps are tried in this order:
 
 - **Outlook** covers the weeks before the next statement arrives:
   - each bank account's estimated balance until then
-  - the lowest point ahead
-  - safe to spend per day
+  - the lowest point ahead, and the first payment that would take an account under the minimum you set
+  - the daily budget allowance (a planning figure, not cash)
   - the month's bills
   - **Age of Money:** how long money sits before it's spent
 - **Net worth**, on Summary:
   - statement balances plus assets and debts you value by hand, over time
   - **goals** (save up, or pay a card down) with on-track status
   - **debt payoff:** highest rate first vs smallest balance first, with rates read from your
-    interest charges
+    interest charges, and *what if you paid more?* (the debt-free date and interest saved)
 
 <table>
 <tr>
@@ -291,6 +294,11 @@ The steps are tried in this order:
 ![Combined Statement: chosen accounts month by month with one running balance](docs/screenshots/statement.png)
 
 ### Reports and receipts
+
+- **Subscriptions** shows where each one stands: paid, due, late, price changed, gone quiet or cancelled.
+- **What Changed** starts with *why spending changed*: the categories that moved most against the period
+  before, and the merchant or one-off charge behind each.
+- **Financial Health** on Summary: emergency fund, debt load, and fees and interest, each with its sum.
 
 - **Receipts:** drop a PDF or photo on a transaction.
 - **Exports:** CSV, QIF, OFX 1.0.2, QuickBooks QBO per account, a P&L, and a P&L with every receipt
