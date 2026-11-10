@@ -1,6 +1,6 @@
 # FinGraph: Product Requirements
 
-Last updated: 9 November 2026 (version 0.2.30, on the `interface-redesign` branch; `main` is still 0.2.22)
+Last updated: 10 November 2026 (version 0.3.0, on the `interface-redesign` branch; `main` is still 0.2.22)
 
 ## 1. What FinGraph is
 
@@ -310,11 +310,31 @@ Left out on purpose: credit scores (no Cayman bureau feed), bill negotiation (a 
   category. *Update Rule* refiles what you haven't filed yourself; *Keep* quiets it until two more disagree.
   Rules & Categories shows them first, and Summary's Next Steps counts them.
 
-## 12. Known issues and next steps
+## 12. FinGraph Server and the phone app (0.3.0)
 
-Left out of the interface redesign, in the order they'd help most: **manual transaction entry** (which
-would let 80/20's weekly view cover the current week, since statements only arrive after a month ends),
-multi-step undo, more themes, and customisable Summary widgets.
+Plan and decisions: [`SERVER-PLAN.md`](SERVER-PLAN.md). Syncthing (tried first) took far too much setup.
+
+- **FinGraph Server** (Docker, amd64 and arm64) holds the ledger and a statements folder you can mount
+  anywhere. Statements are filed as `YYYY/MM Mon/<the bank's file name>` under their closing month; PDFs
+  dropped in `inbox/` are imported with the desktop's checks, and anything needing a person goes to
+  `needs-attention/` with a note. Nightly complete backups, 7 daily, 4 weekly, 12 monthly.
+- **Pairing** with a one-time code (`fingraph-server pair`, with a QR code for the phone), bound to the
+  server's own certificate, which the apps pin. Each device can be unpaired.
+- **One device edits at a time.** The desktop holds an edit lease while in use, works on its own copy,
+  and sends it back after imports, after ten quiet minutes and on closing; it fetches the server's
+  ledger first when something else changed it. Inbox files and phone purchases wait while a computer edits.
+- **The phone** (Android, Flutter) shows Summary (what's left, watch list, next steps, accounts), Budget,
+  Transactions with search, Bills, Subscriptions and Accounts, kept for offline use; app lock; hidden from
+  screenshots by default. It sends statement PDFs (Share → FinGraph), **quick purchases** and receipt
+  photos. A quick purchase is replaced by the statement's own line when that arrives (same account and
+  amount, 3 days before to a week after), keeping its category, tag and receipt.
+
+## 13. Known issues and next steps
+
+Left out of the interface redesign, in the order they'd help most: manual transaction entry on the
+desktop (the phone has quick purchases since 0.3.0), multi-step undo, more themes, and customisable
+Summary widgets. For the server and phone: answering To Review cards on the phone, an iPhone build, and
+a live desktop client so two devices can edit at once.
 
 1. **Twice-a-month pay ignores the payday you type.** It assumes the 15th and the last day, so a
    payday on the 12th gives 12th, 15th, 30th. Fix: step from the typed day.

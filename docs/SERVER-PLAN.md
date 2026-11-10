@@ -154,7 +154,13 @@ About 6–7 weeks to all of it; S1–S3 (about 3½ weeks) already replaces Synct
 - **Support load.** Docker is still setup. For people without a server nothing changes, and the desktop
   remains the whole product.
 
-## 9. Decisions (10 November 2026)
+## 9. Status (0.3.0)
+
+All six phases are built: S1–S5 in 0.3.0, with tests for each (server, client against a real server,
+core, phone). S6: the image is built and published by `.github/workflows/server-image.yml` when a
+release is published; the APK is built and signed on the owner's machine and attached to the release.
+
+## 10. Decisions (10 November 2026)
 
 | Question | Answer |
 |---|---|

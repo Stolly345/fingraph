@@ -88,6 +88,60 @@ Packages: `cargo build --release`, then `cargo deb -p fingraph --no-build` and
 `packaging/aur/PKGBUILD` and run `makepkg --printsrcinfo > .SRCINFO`. Same-version `.deb`s need
 `sudo apt install --reinstall …`, so every release gets a new version number.
 
+## FinGraph Server and the phone app (optional)
+
+FinGraph works on its own on one computer. To also see your budget on your phone, or to use the same
+ledger on two computers, run **FinGraph Server**: one Docker container on a machine that's always on (a
+home server, a NAS, a Raspberry Pi 4 or 5). It holds the ledger and a folder with every statement file.
+
+```yaml
+# compose.yaml (also in server/compose.yaml)
+services:
+  fingraph:
+    image: ghcr.io/stolly345/fingraph-server:latest
+    container_name: fingraph
+    ports: ["8743:8743"]
+    environment:
+      PUID: "1000"                          # your user and group (id -u, id -g)
+      PGID: "1000"
+      TZ: "Etc/UTC"                         # your time zone
+      FINGRAPH_ADDRESS: "192.168.1.20:8743" # how the phone reaches this machine (for the QR code)
+    volumes:
+      - ./fingraph-data:/data               # ledger, settings, nightly backups
+      - ./statements:/statements            # every statement, filed as 2026/10 Oct/…
+    restart: unless-stopped
+```
+
+1. `docker compose up -d`, then `docker exec fingraph fingraph-server pair`. It prints a one-time
+   pairing code, the server's fingerprint and a QR code.
+2. **Desktop:** Preferences → Server, type the address and the code, check the fingerprint, then
+   *Send This Computer's Ledger*.
+3. **Phone:** install the APK from the release, open it and scan the QR code.
+
+**The statements folder** keeps each statement under its month with the bank's own file name
+(`2026/09 Sep/September 2026 e-statement.pdf`). Drop a PDF in `statements/inbox/` (or share it to
+FinGraph on the phone) and the server reads it with the same checks as the desktop, imports it and
+files it. Anything that needs a person (an unknown bank, an unreadable account number, a second copy
+of a period already imported) goes to `statements/needs-attention/` with a note saying why.
+
+**One device edits at a time.** The desktop works on its own copy as always and holds the server's
+*edit lease* while in use. It sends the ledger back after an import, after ten quiet minutes (letting
+go of the lease) and on closing. When it's used again it fetches the server's ledger first if
+something changed (the phone, the inbox, another computer). While a computer edits, inbox files and
+purchases from the phone wait and are applied as soon as it's done.
+
+**The phone** shows the month's budget, what's left, bills, subscriptions, accounts and next steps,
+searches every transaction, and keeps the last answers for when the server can't be reached. It adds
+quick purchases (replaced by the statement's own line when that arrives), receipt photos and statement
+PDFs. It has an app lock and hides itself from screenshots (Settings).
+
+**Security.** The server makes its own certificate on first start; the apps trust exactly that
+certificate (its fingerprint comes with the QR code, or you compare it when typing the code). Each
+device has its own token and can be unpaired (`docker exec fingraph fingraph-server devices`, then
+`unpair ID`). Run it on your home network or a VPN such as Tailscale; **don't expose it to the
+internet**. The server keeps a complete backup every night (7 daily, 4 weekly, 12 monthly) in
+`fingraph-data/backups`, and each one restores in the desktop (Preferences → Data → Restore).
+
 ## Getting started
 
 The first time it opens, **Getting Started** walks you through setup. After a welcome page, its steps are:
@@ -332,6 +386,11 @@ bring one up to accuracy:
 |---|---|
 | `crates/fingraph-core` | No GUI. Scanner (`parser/`: profiles, multipass, dates, reconcile, OCR), ledger and import rules (`db.rs`), rules and triage (`rules.rs`), learning (`learn.rs`), directory (`merchants.rs`, `data/merchants.tsv`), splits, reimbursements, attachments and coverage (`workflows.rs`), `insights.rs`, `budget.rs`, `outlook.rs`, `wealth.rs`, exports, preferences, demo statements |
 | `crates/fingraph` | The app, one file per page or dialog: `dashboard` (Summary), `wealth`, `budget`, `reports`, `close`, `outlook`, `transactions`, `statement`, `statements`, `changes`, `rules`, `review`, `account`, `export`, `directory`, `profiles`, `preferences`, `guide`, `wizard`, `split`, `owed`, `txedit`. Cairo charts are in `charts.rs`; the shell, sidebar, menu and shared helpers are in `main.rs` |
+| `crates/fingraph-server` | FinGraph Server: the ledger on one thread, the inbox and filing, nightly backups, pairing, the edit lease and the phone's views (`views.rs`), over HTTPS (`api.rs`) |
+| `crates/fingraph-client` | The desktop's side of the server: a small HTTPS client that trusts only the paired certificate |
+| `crates/fingraph-ffi` | The Rust core for the phone app through flutter_rust_bridge (for a later offline mode) |
+| `mobile/` | The Android app (Flutter); see `mobile/README.md` |
+| `server/` | Dockerfile and compose example for FinGraph Server |
 | `packaging/` | Desktop entry (PDF/CSV/OFX "Open With"), icon, Arch PKGBUILD |
 
 ## Adding businesses

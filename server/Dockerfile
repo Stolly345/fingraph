@@ -4,9 +4,8 @@ FROM rust:1-slim-trixie AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-# only the server and the core it needs (the desktop's GTK and the phone bridge aren't built)
-RUN sed -i 's|members = .*|members = ["crates/fingraph-core", "crates/fingraph-server"]|' Cargo.toml \
- && cargo build --release --locked -p fingraph-server \
+# only the server and the core it needs are built (not the desktop's GTK or the phone bridge)
+RUN cargo build --release --locked -p fingraph-server \
  && strip target/release/fingraph-server
 
 FROM ubuntu:26.04 AS runtime

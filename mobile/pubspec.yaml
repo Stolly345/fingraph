@@ -1,7 +1,7 @@
 name: fingraph
 description: "FinGraph on the phone: a read-only companion to the desktop ledger."
 publish_to: 'none'
-version: 0.2.30+230
+version: 0.3.0+300
 
 environment:
   sdk: ^3.13.7
