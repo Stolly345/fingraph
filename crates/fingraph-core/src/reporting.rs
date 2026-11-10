@@ -39,6 +39,44 @@ impl Db {
     }
 }
 
+/// Financial health, each figure with what it was worked out from (no combined score).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Health {
+    /// Cash, and the essential (fixed-category) spending of an average complete month.
+    pub emergency: Option<(Decimal, Decimal)>,
+    /// Owed on cards and loans, and the income of an average complete month.
+    pub debt: Option<(Decimal, Decimal)>,
+    /// Bank fees and interest charged over the last 12 months, and how many charges.
+    pub fees_12m: (Decimal, usize),
+}
+
+impl Health {
+    /// Months of essential spending the cash would cover.
+    pub fn emergency_months(&self) -> Option<Decimal> {
+        self.emergency.filter(|e| !e.1.is_zero()).map(|(c, e)| (c / e).round_dp(1))
+    }
+    /// Debt as months of income.
+    pub fn debt_months(&self) -> Option<Decimal> {
+        self.debt.filter(|d| !d.1.is_zero()).map(|(o, i)| (o / i).round_dp(1))
+    }
+}
+
+/// `(cash, owed)` from account balances; the rest from rows over the complete months in `avg`.
+pub fn health(rows: &[TxRow], avg: &FlowAverage, (cash, owed): (Decimal, Decimal), fixed: &[String], parents: &std::collections::BTreeMap<i64, String>, (ccy, fx): (Currency, &crate::Fx), today: NaiveDate) -> Health {
+    let n = Decimal::from(avg.months.len());
+    let essential = (!n.is_zero()).then(|| {
+        let total: Decimal = avg.months.iter().map(|m| crate::insights::by_category(rows, *m, add_months(*m, 1).pred_opt().unwrap_or(*m), ccy, fx, parents).into_iter().filter(|(c, _)| fixed.contains(c)).map(|x| x.1).sum::<Decimal>()).sum();
+        (total / n).round_dp(2)
+    });
+    let year_ago = today - chrono::Duration::days(365);
+    let fees: Vec<&TxRow> = rows.iter().filter(|t| t.posted > year_ago && t.posted <= today && t.amount.is_sign_negative() && !t.is_transfer() && (t.category_name.as_deref() == Some("Bank Fees & Interest") || crate::rules::is_bank_fee(&t.raw_description, &t.memo))).collect();
+    Health {
+        emergency: essential.filter(|e| !e.is_zero() && !cash.is_sign_negative()).map(|e| (cash, e)),
+        debt: avg.monthly().filter(|m| !m.0.is_zero()).map(|m| (owed.max(Decimal::ZERO), m.0)),
+        fees_12m: (fees.iter().map(|t| -crate::insights::value(t, ccy, fx)).sum::<Decimal>().round_dp(2), fees.len()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +118,27 @@ mod tests {
         assert!(FlowAverage::default().monthly().is_none());
         let average = FlowAverage { months, income: 300.into(), expenses: 100.into() };
         assert_eq!(average.monthly(), Some((300.into(), 100.into())));
+    }
+
+    #[test]
+    fn health_shows_each_figure_with_its_parts() {
+        use crate::insights::tests::row;
+        let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        let rows = vec![
+            row(1, d(8, 9), "CUC", "-200", "Utilities", ""),
+            row(2, d(9, 9), "CUC", "-210", "Utilities", ""),
+            row(3, d(9, 12), "FOSTERS", "-400", "Groceries", ""),
+            row(4, d(9, 30), "MONTHLY FEE", "-5", "Bank Fees & Interest", ""),
+        ];
+        let avg = FlowAverage { months: vec![d(8, 1), d(9, 1)], income: Decimal::from(6000), expenses: Decimal::from(815) };
+        let v = |s: &str| s.parse::<Decimal>().unwrap();
+        let h = health(&rows, &avg, (v("2050"), v("3000")), &["Utilities".to_string()], &Default::default(), (Currency::KYD, &crate::Fx::default()), d(10, 1));
+        assert_eq!(h.emergency, Some((v("2050"), v("205"))));
+        assert_eq!(h.emergency_months(), Some(v("10.0")));
+        assert_eq!(h.debt_months(), Some(v("1.0")));
+        assert_eq!(h.fees_12m, (v("5"), 1));
+        // no complete months: no emergency or debt figure, never a made-up zero
+        let none = health(&rows, &FlowAverage::default(), (v("2050"), v("3000")), &[], &Default::default(), (Currency::KYD, &crate::Fx::default()), d(10, 1));
+        assert_eq!((none.emergency, none.debt), (None, None));
     }
 }

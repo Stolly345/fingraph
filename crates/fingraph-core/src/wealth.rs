@@ -424,6 +424,34 @@ pub fn payoff(debts: &[Debt], monthly: Decimal, strategy: Strategy) -> Option<Pa
     None
 }
 
+/// Paying `extra` a month on top of `monthly`, highest rate first: the plan with it and without it.
+pub struct WhatIf {
+    pub without: Payoff,
+    pub with: Payoff,
+}
+
+impl WhatIf {
+    pub fn months_sooner(&self) -> u32 {
+        self.without.months.saturating_sub(self.with.months)
+    }
+    pub fn interest_saved(&self) -> Decimal {
+        (self.without.interest - self.with.interest).max(Decimal::ZERO)
+    }
+}
+
+pub fn what_if(debts: &[Debt], monthly: Decimal, extra: Decimal) -> Option<WhatIf> {
+    Some(WhatIf { without: payoff(debts, monthly, Strategy::Avalanche)?, with: payoff(debts, monthly + extra.max(Decimal::ZERO), Strategy::Avalanche)? })
+}
+
+#[test]
+fn paying_extra_ends_sooner_and_costs_less() {
+    let d = |v: &str| v.parse::<Decimal>().unwrap();
+    let debts = [Debt { name: "Card".into(), balance: d("3000"), apr: d("24") }];
+    let w = what_if(&debts, d("150"), d("100")).unwrap();
+    assert!(w.months_sooner() > 0 && w.interest_saved() > Decimal::ZERO);
+    assert_eq!(what_if(&debts, d("150"), Decimal::ZERO).unwrap().months_sooner(), 0);
+}
+
 #[test]
 fn minimums_only_takes_longest_and_costs_most() {
     let d = |v: &str| v.parse::<Decimal>().unwrap();

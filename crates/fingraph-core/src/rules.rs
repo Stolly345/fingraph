@@ -444,6 +444,56 @@ pub fn explain(rules: &[Rule], entity_id: i64, raw: &str, memo: &str, amount: De
     })
 }
 
+/// What saving a rule would do, before it's saved: the transactions it matches, how many would move
+/// to its category, and how many you confirmed by hand (left as they are). Same test as applying it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RulePreview {
+    pub matched: Vec<i64>,
+    pub would_change: usize,
+    pub kept_confirmed: usize,
+    /// Where the matched transactions are filed now, most first: (category, count).
+    pub now_in: Vec<(String, usize)>,
+}
+
+pub fn preview(rule: &Rule, rows: &[crate::db::TxRow]) -> RulePreview {
+    let mut p = RulePreview::default();
+    let mut now: BTreeMap<String, usize> = BTreeMap::new();
+    for t in rows.iter().filter(|t| t.split_seq.is_none() && rule.entity_id.is_none_or(|e| e == t.account_entity_id || e == t.entity_id)) {
+        if !rule.applies(&t.raw_description, &t.memo, t.amount) {
+            continue;
+        }
+        p.matched.push(t.id);
+        *now.entry(t.category_name.clone().unwrap_or_else(|| "Uncategorized".into())).or_default() += 1;
+        if t.review == crate::ReviewStatus::Confirmed && t.category_id.is_some() {
+            p.kept_confirmed += 1;
+        } else if rule.category_id.is_some() && rule.category_id != t.category_id {
+            p.would_change += 1;
+        }
+    }
+    p.now_in = now.into_iter().collect();
+    p.now_in.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    p
+}
+
+impl RulePreview {
+    pub fn label(&self) -> String {
+        if self.matched.is_empty() {
+            return "Matches nothing in your ledger yet; it will apply to new statements".into();
+        }
+        let n = self.matched.len();
+        let mut s = format!("Matches {n} transaction{}", if n == 1 { "" } else { "s" });
+        if self.would_change > 0 {
+            s.push_str(&format!(" · {} would change category", self.would_change));
+        }
+        if self.kept_confirmed > 0 {
+            s.push_str(&format!(" · {} you confirmed stay as they are", self.kept_confirmed));
+        }
+        let now: Vec<String> = self.now_in.iter().take(3).map(|(c, k)| format!("{c} {k}")).collect();
+        s.push_str(&format!("\nNow in: {}", now.join(", ")));
+        s
+    }
+}
+
 /// Charges this regular (median gap 6–8, 13–16, 26–35 or 350–380 days, amounts within 25%) are recurring.
 pub fn cadence(dates: &[NaiveDate]) -> Option<i64> {
     if dates.len() < 2 {
@@ -721,7 +771,7 @@ mod tests {
         // matching every business with the text is still there, asked for by name
         // a rule you wrote for a payment platform still covers what it billed
         let paddle = Rule { pattern: "PADDLE.NET".into(), ..Default::default() };
-        assert!(paddle.matches("PADDLE.NET* INCOGNI", ""));
+        assert!(paddle.matches("PADDLE.NET* NORDVPN", ""));
         let broad = Rule { kind: RuleKind::Substring, pattern: "FLOW".into(), ..Default::default() };
         assert!(broad.matches("FLOW TAXI", ""));
     }
@@ -778,5 +828,22 @@ mod tests {
         assert_eq!(explain(&[], 1, "HARBOUR EYE CLINIC", "", out).as_deref(), Some("Keyword \u{201c}EYE CLINIC\u{201d} suggests Optical"));
         let r = Rule { pattern: "NETFLIX".into(), category_id: Some(1), ..Default::default() };
         assert!(explain(&[r], 1, "NETFLIX.COM", "", out).unwrap().starts_with("Your rule"));
+    }
+
+    #[test]
+    fn a_rule_preview_counts_what_saving_would_change() {
+        let d = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+        let mut confirmed = crate::insights::tests::row(1, d, "NETFLIX.COM", "-15.99", "Entertainment", "");
+        confirmed.review = crate::ReviewStatus::Confirmed;
+        let mut auto = crate::insights::tests::row(2, d, "NETFLIX.COM", "-15.99", "Entertainment", "");
+        auto.review = crate::ReviewStatus::AutoCategorized;
+        let other = crate::insights::tests::row(3, d, "KIRK MARKET", "-50", "Groceries", "");
+        let r = Rule { pattern: "NETFLIX".into(), category_id: Some(17), ..Default::default() };
+        let p = preview(&r, &[confirmed, auto, other]);
+        assert_eq!(p.matched, vec![1, 2]);
+        assert_eq!((p.would_change, p.kept_confirmed), (1, 1));
+        assert_eq!(p.now_in, vec![("Entertainment".to_string(), 2)]);
+        assert!(p.label().contains("1 would change category"));
+        assert!(preview(&Rule { pattern: "NOBODY".into(), ..Default::default() }, &[]).label().starts_with("Matches nothing"));
     }
 }

@@ -415,6 +415,7 @@ pub struct Subscription {
     pub stem: String,
     pub payee: String,
     pub account: String,
+    pub account_id: i64,
     pub currency: Currency,
     pub latest: Decimal,
     pub previous: Option<Decimal>,
@@ -507,6 +508,7 @@ pub fn subscriptions(rows: &[TxRow], ccy: Currency, fx: &Fx, today: NaiveDate) -
             Subscription {
                 payee: payee(last),
                 account: last.account_name.clone(),
+                account_id: last.account_id,
                 currency: last.currency,
                 latest: -last.amount,
                 previous: v.len().checked_sub(2).map(|i| -v[i].amount),
@@ -547,8 +549,83 @@ pub fn subscriptions(rows: &[TxRow], ccy: Currency, fx: &Fx, today: NaiveDate) -
     out
 }
 
+/// Where a subscription or bill stands this cycle.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PayStatus {
+    /// Charged for this cycle; the next charge is due then.
+    Paid { on: NaiveDate, next: NaiveDate },
+    /// Charged for this cycle, but at a new price.
+    Changed { old: Decimal, new: Decimal, on: NaiveDate, next: NaiveDate },
+    /// Due within a few days.
+    Expected { due: NaiveDate },
+    /// Past due, and the statement covering that day is in, but no charge: missed, or paid another way.
+    Late { due: NaiveDate },
+    /// Past due, but the statement covering that day hasn't been imported yet.
+    NotYetSeen { due: NaiveDate },
+    /// No charge for more than two cycles, and you haven't said it was cancelled.
+    Lapsed { last: NaiveDate },
+    /// You said so.
+    Cancelled,
+}
+
+impl PayStatus {
+    pub fn label(&self) -> String {
+        let d = |d: &NaiveDate| d.format("%d %b").to_string();
+        match self {
+            Self::Paid { on, next } => format!("Paid {} · next around {}", d(on), d(next)),
+            Self::Changed { old, new, on, next } => format!("Price changed {old} → {new} on {} · next around {}", d(on), d(next)),
+            Self::Expected { due } => format!("Due around {}", d(due)),
+            Self::Late { due } => format!("Late: due around {}, not on the statement", d(due)),
+            Self::NotYetSeen { due } => format!("Due around {}, after your newest statement", d(due)),
+            Self::Lapsed { last } => format!("No charge since {}: stopped, or charged elsewhere?", d(last)),
+            Self::Cancelled => "Cancelled".into(),
+        }
+    }
+    /// Something to look at: late, a new price, or gone quiet.
+    pub fn needs_attention(&self) -> bool {
+        matches!(self, Self::Late { .. } | Self::Changed { .. } | Self::Lapsed { .. })
+    }
+}
+
+/// The day the next charge is due: calendar cycles by the calendar (the 31st, then the 30th).
+pub fn next_due(last: NaiveDate, cadence_days: i64) -> NaiveDate {
+    let months = match cadence_days {
+        30 => 1,
+        91 => 3,
+        365 => 12,
+        _ => return last + Duration::days(cadence_days),
+    };
+    let m = add_months(month_start(last), months);
+    let end = add_months(m, 1) - Duration::days(1);
+    m.with_day(last.day()).unwrap_or(end)
+}
+
+/// Where `s` stands on `today`. `covered_end` = the end of its account's newest statement, which
+/// tells a missed charge from one that simply isn't on a statement yet.
+pub fn pay_status(s: &Subscription, covered_end: Option<NaiveDate>, today: NaiveDate) -> PayStatus {
+    if s.cancelled {
+        return PayStatus::Cancelled;
+    }
+    let grace = Duration::days(4);
+    if (today - s.last_charged).num_days() > 2 * s.cadence_days + 7 {
+        return PayStatus::Lapsed { last: s.last_charged };
+    }
+    let due = next_due(s.last_charged, s.cadence_days);
+    if today > due + grace {
+        return if covered_end.is_some_and(|e| e >= due + grace) { PayStatus::Late { due } } else { PayStatus::NotYetSeen { due } };
+    }
+    if today >= due - grace {
+        return PayStatus::Expected { due };
+    }
+    match s.last_rise {
+        Some((old, new, when)) if when == s.last_charged => PayStatus::Changed { old, new, on: when, next: due },
+        _ => PayStatus::Paid { on: s.last_charged, next: due },
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InsightKind {
+    SpendingChange,
     PriceCreep,
     Spike,
     Duplicate,
@@ -559,9 +636,10 @@ pub enum InsightKind {
 }
 
 impl InsightKind {
-    pub const ALL: [InsightKind; 7] = [Self::PriceCreep, Self::Spike, Self::Annual, Self::Duplicate, Self::BankFees, Self::CategoryDrift, Self::TaxSummary];
+    pub const ALL: [InsightKind; 8] = [Self::SpendingChange, Self::PriceCreep, Self::Spike, Self::Annual, Self::Duplicate, Self::BankFees, Self::CategoryDrift, Self::TaxSummary];
     pub fn label(self) -> &'static str {
         match self {
+            Self::SpendingChange => "Why spending changed",
             Self::PriceCreep => "Subscription price creep",
             Self::Spike => "Utility & vendor spikes",
             Self::Duplicate => "Possible double charges",
@@ -573,6 +651,7 @@ impl InsightKind {
     }
     pub fn icon(self) -> &'static str {
         match self {
+            Self::SpendingChange => "view-sort-descending-symbolic",
             Self::PriceCreep => "go-up-symbolic",
             Self::Spike => "dialog-warning-symbolic",
             Self::Duplicate => "edit-copy-symbolic",
@@ -673,6 +752,78 @@ pub fn bank_fees(rows: &[TxRow], ccy: Currency, fx: &Fx) -> Vec<FeeLine> {
     let mut v: Vec<FeeLine> = m.into_iter().map(|((bank, year), (total, count))| FeeLine { bank, year, total, count }).collect();
     v.sort_by(|a, b| b.year.cmp(&a.year).then(b.total.cmp(&a.total)));
     v
+}
+
+/// The "Why spending changed" card: spending between `from` and `to` against the same stretch before
+/// it, the categories that moved most (up to five), and for each the merchant that moved most or the
+/// one charge that made most of the rise. Nothing when the ledger doesn't reach back that far.
+pub fn spending_change(rows: &[TxRow], from: NaiveDate, to: NaiveDate, ccy: Currency, fx: &Fx, parents: &BTreeMap<i64, String>) -> Option<Insight> {
+    let (first, last) = data_span(rows)?;
+    // the ledger has to reach back to (about) the start of the period before; a statement can start a few
+    // days in. A range too long for that (this year, with last year missing) compares its latest month instead
+    let reaches = |from: NaiveDate, to: NaiveDate| first <= Range::prior(from, to).0 + Duration::days(7);
+    let (from, to) = if reaches(from, to) {
+        (from, to)
+    } else {
+        let end = to.min(last);
+        let m = month_start(end);
+        if m <= from || !reaches(m, end) {
+            return None;
+        }
+        (m, end)
+    };
+    let (pf, pt) = Range::prior(from, to);
+    let now: BTreeMap<String, Decimal> = by_category(rows, from, to, ccy, fx, parents).into_iter().collect();
+    let before: BTreeMap<String, Decimal> = by_category(rows, pf, pt, ccy, fx, parents).into_iter().collect();
+    let (total_now, total_before): (Decimal, Decimal) = (now.values().sum(), before.values().sum());
+    if total_before.is_zero() || total_now.is_zero() {
+        return None;
+    }
+    let money = |d: Decimal| fmt_money(d, ccy);
+    let signed = |d: Decimal| format!("{}{}", if d.is_sign_negative() { "−" } else { "+" }, money(d.abs()));
+    let delta = total_now - total_before;
+    let mut movers: Vec<(String, Decimal, Decimal)> = now.keys().chain(before.keys()).map(|k| (k.clone(), now.get(k).copied().unwrap_or_default(), before.get(k).copied().unwrap_or_default())).collect();
+    movers.sort_by(|a, b| a.0.cmp(&b.0));
+    movers.dedup_by(|a, b| a.0 == b.0);
+    movers.retain(|m| m.0 != "Uncategorized" || (m.1 - m.2).abs() > Decimal::ZERO);
+    movers.sort_by_key(|m| std::cmp::Reverse((m.1 - m.2).abs()));
+    let floor = (total_before / Decimal::from(50)).max(Decimal::ONE);
+    let parts: Vec<InsightPart> = movers
+        .iter()
+        .filter(|m| (m.1 - m.2).abs() >= floor)
+        .take(5)
+        .map(|(cat, n, b)| {
+            let d = *n - *b;
+            let mine: Vec<&TxRow> = rows.iter().filter(|t| in_range(t, from, to) && counts(t) && t.amount.is_sign_negative() && top_category(t, parents) == *cat).collect();
+            let mn: BTreeMap<String, Decimal> = merchants_in(rows, cat, from, to, ccy, fx, parents).into_iter().collect();
+            let mb: BTreeMap<String, Decimal> = merchants_in(rows, cat, pf, pt, ccy, fx, parents).into_iter().collect();
+            let biggest = mine.iter().max_by_key(|t| -value(t, ccy, fx));
+            let why = match biggest {
+                // one charge from a merchant you didn't pay last time made most of the rise: a one-off, not a trend
+                Some(t) if d > Decimal::ZERO && -value(t, ccy, fx) * Decimal::TWO > d && mb.get(&payee(t)).is_none_or(|v| v.is_zero()) => {
+                    format!("mostly one charge: {} {} on {}", payee(t), money(-value(t, ccy, fx)), t.posted.format("%d %b"))
+                }
+                _ => mn
+                    .keys()
+                    .chain(mb.keys())
+                    .map(|k| (k, mn.get(k).copied().unwrap_or_default() - mb.get(k).copied().unwrap_or_default()))
+                    .max_by_key(|(_, v)| if d.is_sign_negative() { -*v } else { *v })
+                    .filter(|(_, v)| !v.is_zero())
+                    .map(|(k, v)| format!("mostly {k} ({})", signed(v)))
+                    .unwrap_or_default(),
+            };
+            (format!("{cat} {}", signed(d)), format!("{} against {}{}", money(*n), money(*b), if why.is_empty() { String::new() } else { format!(" · {why}") }), mine.iter().map(|t| t.id).collect())
+        })
+        .collect();
+    let p = pct(total_now, total_before).map(|p| format!(" ({p:+.0}%)")).unwrap_or_default();
+    let period = |a: NaiveDate, b: NaiveDate| if a.day() == 1 && b + Duration::days(1) == add_months(month_start(b), 1) && month_start(a) == month_start(b) { a.format("%B").to_string() } else { format!("{} – {}", a.format("%d %b"), b.format("%d %b")) };
+    Some(Insight {
+        kind: InsightKind::SpendingChange,
+        title: format!("Spending {} {}{p} vs {}", if delta.is_sign_negative() { "down" } else { "up" }, money(delta.abs()), period(pf, pt)),
+        detail: format!("{} in {} against {}; the categories that moved most are below, each with what drove it", money(total_now), period(from, to), money(total_before)),
+        tx_ids: Vec::new(),
+        parts,
+    })
 }
 
 /// The knobs behind the "What changed?" cards (Preferences → Dashboard).
@@ -894,6 +1045,10 @@ pub fn insights(rows: &[TxRow], entities: &[Entity], from: NaiveDate, to: NaiveD
             },
         });
     }
+
+    // why spending changed: this range against the one before, the categories that moved most, and
+    // within each the merchant or the single charge behind it
+    out.extend(spending_change(rows, from, to, ccy, fx, parents));
 
     // drift: categories this month above their trailing three-month average
     let this = month_start(to);
@@ -1169,5 +1324,49 @@ pub(crate) mod tests {
         assert_eq!((s[0].monthly, s[0].annual), ("10.00".parse().unwrap(), "120.00".parse().unwrap()));
         let k = kpis(&rows, &[], d(9), d(10), Currency::KYD, &fx, d(10));
         assert_eq!((k.subs_monthly, k.subs_annual), (s[0].monthly, s[0].annual));
+    }
+
+    #[test]
+    fn spending_change_names_the_categories_and_the_one_off() {
+        let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        let rows = vec![
+            row(1, d(8, 5), "FOSTERS", "-400", "Groceries", ""),
+            row(2, d(9, 5), "FOSTERS", "-420", "Groceries", ""),
+            row(3, d(8, 9), "CUC", "-200", "Utilities", ""),
+            row(4, d(9, 9), "CUC", "-210", "Utilities", ""),
+            row(5, d(9, 20), "ISLAND APPLIANCES", "-1500", "Appliances", ""),
+        ];
+        let fx = Fx::default();
+        // (the ledger starts 5 August: a statement a few days into the month still counts)
+        let i = spending_change(&rows, d(9, 1), d(9, 30), Currency::KYD, &fx, &BTreeMap::new()).unwrap();
+        assert!(i.title.starts_with("Spending up") && i.title.contains("August"), "{}", i.title);
+        assert!(i.parts[0].0.starts_with("Appliances"), "{:?}", i.parts);
+        assert!(i.parts[0].1.contains("mostly one charge"), "{:?}", i.parts[0]);
+        assert_eq!(i.parts[0].2, vec![5]);
+        assert!(i.parts.iter().any(|p| p.0.starts_with("Groceries") && p.1.contains("mostly FOSTERS")), "{:?}", i.parts);
+        // nothing before the range to compare with: no card
+        assert!(spending_change(&rows, d(7, 1), d(7, 31), Currency::KYD, &fx, &BTreeMap::new()).is_none());
+        // a whole year without the year before: its latest month so far (to 20 September, the newest
+        // charge) against the same days of the month before
+        let y = spending_change(&rows, NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(), NaiveDate::from_ymd_opt(2026, 12, 31).unwrap(), Currency::KYD, &fx, &BTreeMap::new()).unwrap();
+        assert!(y.title.ends_with("vs 01 Aug – 20 Aug"), "{}", y.title);
+    }
+
+    #[test]
+    fn where_a_subscription_stands() {
+        let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        let ten: Decimal = "9.99".parse().unwrap();
+        let mut s = Subscription { stem: "ZZFLIX".into(), payee: "ZZFlix".into(), account: "Chq".into(), account_id: 1, currency: Currency::KYD, latest: ten, previous: Some(ten), last_rise: None, cadence_days: 30, last_charged: d(9, 10), charges: 3, monthly: ten, annual: ten * Decimal::from(12), active: true, cancelled: false, tx_ids: vec![], cadence_guessed: false };
+        assert_eq!(next_due(d(1, 31), 30), d(2, 28), "a month end stays a month end");
+        assert_eq!(pay_status(&s, None, d(9, 20)), PayStatus::Paid { on: d(9, 10), next: d(10, 10) });
+        assert_eq!(pay_status(&s, None, d(10, 8)), PayStatus::Expected { due: d(10, 10) });
+        assert_eq!(pay_status(&s, Some(d(9, 30)), d(10, 20)), PayStatus::NotYetSeen { due: d(10, 10) }, "October's statement isn't in yet");
+        assert_eq!(pay_status(&s, Some(d(10, 31)), d(10, 20)), PayStatus::Late { due: d(10, 10) });
+        assert!(pay_status(&s, Some(d(10, 31)), d(10, 20)).needs_attention());
+        assert_eq!(pay_status(&s, None, d(12, 1)), PayStatus::Lapsed { last: d(9, 10) });
+        s.last_rise = Some((ten, "12.99".parse().unwrap(), d(9, 10)));
+        assert!(matches!(pay_status(&s, None, d(9, 20)), PayStatus::Changed { .. }));
+        s.cancelled = true;
+        assert_eq!(pay_status(&s, None, d(9, 20)), PayStatus::Cancelled);
     }
 }

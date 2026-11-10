@@ -37,6 +37,18 @@ fn forecasts(app: &App) -> Vec<Forecast> {
     core::forecast(&rows, &docs, today() + Duration::days(AHEAD)).into_iter().filter(|x| !hidden.contains(&x.account_id)).collect()
 }
 
+/// Accounts expected to dip below the minimum you set for them (zero when unset) before the horizon:
+/// (account, what happens and when), soonest first.
+pub fn shortfalls(app: &App) -> Vec<(String, String)> {
+    let t = today();
+    let mut v: Vec<(NaiveDate, String, String)> = forecasts(app)
+        .iter()
+        .filter_map(|fc| fc.first_below(app.db.min_balance(fc.account_id), t, t + Duration::days(AHEAD)).map(|s| (s.date, fc.account.clone(), s.label(fc.currency))))
+        .collect();
+    v.sort();
+    v.into_iter().map(|(_, a, l)| (a, l)).collect()
+}
+
 /// Keep each account's estimate for the end of next month, to check against its statement later
 /// (Monthly Close calls this when you close a month).
 pub fn remember_forecast(app: &App) {
@@ -146,12 +158,22 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             }
             // an account heading below zero, else the one most bills go through (your main account)
             let lows: Vec<(&Forecast, (NaiveDate, Decimal))> = fcs.iter().filter_map(|fc| fc.low(t, t + Duration::days(AHEAD)).map(|l| (fc, l))).collect();
-            let low = lows.iter().filter(|x| x.1.1.is_sign_negative()).min_by_key(|x| x.1.1).or_else(|| lows.iter().max_by_key(|x| x.0.events.len())).copied();
+            // an account going below the minimum you set for it comes first, then one heading below zero
+            let below = |fc: &Forecast, v: Decimal| v < a.db.min_balance(fc.account_id);
+            let low = lows.iter().filter(|x| below(x.0, x.1.1)).min_by_key(|x| x.1.0).or_else(|| lows.iter().max_by_key(|x| x.0.events.len())).copied();
             match low {
                 Some((fc, (d, v))) => {
+                    let min = a.db.min_balance(fc.account_id);
                     low_v.set_label(&fmt_money(v, fc.currency));
-                    low_v.set_css_classes(&["value", "tnum", if v.is_sign_negative() { "amount-out" } else { "" }]);
-                    low_s.set_label(&format!("{} around {}{}", fc.account, d.format("%d %b"), if v.is_sign_negative() { " — overdrawn unless something changes" } else { "" }));
+                    low_v.set_css_classes(&["value", "tnum", if v.is_sign_negative() { "amount-out" } else if v < min { "warning" } else { "" }]);
+                    let why = if v.is_sign_negative() {
+                        " — overdrawn unless something changes".to_string()
+                    } else if v < min {
+                        format!(" — under your {} minimum", fmt_money(min, fc.currency))
+                    } else {
+                        String::new()
+                    };
+                    low_s.set_label(&format!("{} around {}{why}", fc.account, d.format("%d %b")));
                 }
                 None => {
                     low_v.set_label("—");
@@ -215,6 +237,13 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                         second.push(format!("{} about {} a day otherwise", if fc.daily.is_sign_negative() { "spends" } else { "gains" }, m(fc.daily.abs())));
                     }
                     let mut sub = vec![first.join(" · "), second.join(" · ")];
+                    // the minimum you keep in it, and the first payment that would take it under
+                    let min = a.db.min_balance(fc.account_id);
+                    match fc.first_below(min, t, end) {
+                        Some(sh) => sub.push(sh.label(fc.currency)),
+                        None if !min.is_zero() => sub.push(format!("Stays above your {} minimum for the next {AHEAD} days", m(min))),
+                        None => {}
+                    }
                     // how the last remembered estimate did, once a statement covers its date
                     if let Some((when, est, made)) = checks.get(&fc.account_id)
                         && fc.start.0 >= *when
@@ -224,7 +253,27 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                             sub.push(format!("estimated {} for {} on {}; the statement says {} (off by {})", m(*est), when.format("%d %b"), made.format("%d %b"), m(act), m((act - est).abs())));
                         }
                     }
-                    let r = adw::ActionRow::builder().title(glib::markup_escape_text(&fc.account)).subtitle(glib::markup_escape_text(&sub.iter().filter(|l| !l.is_empty()).cloned().collect::<Vec<_>>().join("\n"))).subtitle_lines(4).build();
+                    let r = adw::ActionRow::builder().title(glib::markup_escape_text(&fc.account)).subtitle(glib::markup_escape_text(&sub.iter().filter(|l| !l.is_empty()).cloned().collect::<Vec<_>>().join("\n"))).subtitle_lines(5).build();
+                    let keep = gtk::Entry::builder()
+                        .placeholder_text("Minimum")
+                        .text(if min.is_zero() { String::new() } else { min.normalize().to_string() })
+                        .width_chars(10)
+                        .max_width_chars(10)
+                        .valign(gtk::Align::Center)
+                        .tooltip_text(format!("The lowest balance you want this account to reach ({}). Enter to save; empty means just not overdrawn.", fc.currency.code()))
+                        .build();
+                    {
+                        let (w, id) = (Rc::downgrade(&a), fc.account_id);
+                        keep.connect_activate(move |e| {
+                            if let Some(a) = w.upgrade() {
+                                let v = fingraph_core::money::parse_user(&e.text());
+                                if a.saved(a.db.set_min_balance(id, v)) {
+                                    a.refresh();
+                                }
+                            }
+                        });
+                    }
+                    r.add_suffix(&keep);
                     r.add_suffix(&gtk::Label::builder().label(format!("≈ {} today", m(today_est))).css_classes(["tnum", "heading", if today_est.is_sign_negative() { "amount-out" } else { "" }]).build());
                     l.append(&r);
                 }

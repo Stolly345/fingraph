@@ -228,14 +228,21 @@ fn keyword_tokens(k: &str) -> Vec<String> {
 static KEYWORD_TOKENS: LazyLock<Vec<(Keys, &'static str)>> =
     LazyLock::new(|| KEYWORDS.iter().map(|(ks, cat)| (ks.split('|').map(keyword_tokens).filter(|k| !k.is_empty()).collect(), *cat)).collect());
 
-fn keyword_hit(words: &[String], key: &[String]) -> bool {
-    key.len() <= words.len()
-        && words.windows(key.len()).any(|w| {
-            w.iter().zip(key).all(|(a, b)| match b.strip_suffix('*') {
-                Some(prefix) => a.starts_with(prefix),
-                None => a == b,
-            })
+/// The words of `words` that `key` matches, when it does (`LANDSCAP*` → `LANDSCAPING`).
+fn keyword_at<'a>(words: &'a [String], key: &[String]) -> Option<&'a [String]> {
+    if key.len() > words.len() {
+        return None;
+    }
+    words.windows(key.len()).find(|w| {
+        w.iter().zip(key).all(|(a, b)| match b.strip_suffix('*') {
+            Some(prefix) => a.starts_with(prefix),
+            None => a == b,
         })
+    })
+}
+
+fn keyword_hit(words: &[String], key: &[String]) -> bool {
+    keyword_at(words, key).is_some()
 }
 
 /// A keyword guess and why: the words that matched and, when an equally specific keyword points at
@@ -267,7 +274,8 @@ fn keyword_match_words(words: &[String]) -> Option<KeywordHit> {
             }
             Some((len, _, _)) if k.len() < *len => {}
             _ => {
-                best = Some((k.len(), cat, k.join(" ")));
+                // the words as the statement has them, not the pattern
+                best = Some((k.len(), cat, keyword_at(words, k).map(|w| w.join(" ")).unwrap_or_else(|| k.join(" "))));
                 conflict = None;
             }
         }

@@ -42,6 +42,47 @@ pub(super) fn fill(app: &Rc<App>, into: &gtk::Box) {
             add(&fund.name, &detail, "Open Budget", "win.page-1");
         }
     }
+    // subscriptions and bills that need a look: late, a new price, or gone quiet
+    {
+        let rows = app.all_rows();
+        let fx = app.db.fx().unwrap_or_default();
+        let covered = fingraph_core::outlook::covered(&app.db.documents(&ids).unwrap_or_default());
+        let subs = insights::subscriptions(&rows, app.display(), &fx, today());
+        let flagged: Vec<String> = subs.iter().filter_map(|s| {
+            let st = insights::pay_status(s, covered.get(&s.account_id).copied(), today());
+            st.needs_attention().then(|| format!("{}: {}", s.payee, st.label()))
+        }).collect();
+        let missed: Vec<String> = fingraph_core::outlook::bills_for(&rows, &covered, insights::month_start(today()), app.display(), &fx)
+            .into_iter().filter(|b| b.state == fingraph_core::outlook::BillState::Missed && !subs.iter().any(|s| s.payee == b.payee))
+            .map(|b| format!("{}: due around {}, not on the statement", b.payee, b.due.format("%d %b"))).collect();
+        let n = flagged.len() + missed.len();
+        if n > 0 {
+            let detail: Vec<String> = flagged.into_iter().chain(missed).take(3).collect();
+            let row = adw::ActionRow::builder()
+                .title(glib::markup_escape_text(&format!("{n} payment{} to check", if n == 1 { "" } else { "s" })))
+                .subtitle(glib::markup_escape_text(&detail.join("\n")))
+                .subtitle_lines(3)
+                .build();
+            let open = gtk::Button::builder().label("Subscriptions").valign(gtk::Align::Center).build();
+            let weak = Rc::downgrade(app);
+            open.connect_clicked(move |_| if let Some(a) = weak.upgrade() { a.show_view("subscriptions"); });
+            row.add_suffix(&open);
+            list.append(&row);
+        }
+    }
+    // an account expected to dip below the minimum you set (or below zero)
+    for (fc, short) in crate::outlook::shortfalls(app) {
+        let row = adw::ActionRow::builder()
+            .title(glib::markup_escape_text(&format!("{} may run low", fc)))
+            .subtitle(glib::markup_escape_text(&short))
+            .subtitle_lines(2)
+            .build();
+        let open = gtk::Button::builder().label("Outlook").valign(gtk::Align::Center).build();
+        let weak = Rc::downgrade(app);
+        open.connect_clicked(move |_| if let Some(a) = weak.upgrade() { a.show_view("outlook"); });
+        row.add_suffix(&open);
+        list.append(&row);
+    }
     let row = adw::ActionRow::builder().title("Review and close the month").subtitle("Check statement coverage, reconcile the budget and save your report card.").build();
     let close = gtk::Button::builder().label("Monthly Close…").valign(gtk::Align::Center).build();
     let weak = Rc::downgrade(app);

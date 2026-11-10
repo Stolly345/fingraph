@@ -253,7 +253,7 @@ checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
 name = "fingraph"
-version = "0.2.28"
+version = "0.2.29"
 dependencies = [
  "chrono",
  "fingraph-core",
@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "fingraph-core"
-version = "0.2.28"
+version = "0.2.29"
 dependencies = [
  "chrono",
  "regex",

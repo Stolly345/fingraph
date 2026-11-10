@@ -146,8 +146,11 @@ pub fn alerts(app: &App) -> Vec<(String, Decimal, Decimal, Alert)> {
     let end = add_months(m, 1).pred_opt().unwrap_or(m);
     for wl in app.db.watchlists(&s.scope) {
         let limit = s.fx.convert(wl.limit, wl.currency, s.ccy).unwrap_or_default();
-        let (spent, _) = core::watched(&s.rows, &wl, m, end, s.ccy, &s.fx);
-        if let Some(al) = core::alert(spent, limit, elapsed(m, data_through(app))) {
+        let (spent, hits) = core::watched(&s.rows, &wl, m, end, s.ccy, &s.fx);
+        let done = elapsed(m, data_through(app));
+        // over, near, or on pace to go over by month end (a pace needs more than one charge to go on)
+        let heading_over = hits.len() >= 2 && core::month_end_pace(spent, done).is_some_and(|p| p > limit && limit > Decimal::ZERO);
+        if let Some(al) = core::alert(spent, limit, done).or(heading_over.then_some(Alert::Near)) {
             out.push((format!("Watch: {}", wl.name), spent, limit, al));
         }
     }
@@ -1102,12 +1105,20 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                 for (i, wl) in watches.iter().enumerate() {
                     let limit = s.fx.convert(wl.limit, wl.currency, ccy).unwrap_or_default();
                     let (sp, ids) = core::watched(&s.rows, wl, m, end, ccy, &s.fx);
-                    let r = adw::ActionRow::builder().title(glib::markup_escape_text(&wl.name)).subtitle(glib::markup_escape_text(&format!("Matches “{}” · {} charge{} in {}", wl.pattern, ids.len(), if ids.len() == 1 { "" } else { "s" }, m.format("%B")))).build();
+                    // where this month is heading at its pace so far (from the second week on, with two charges or more)
+                    let pace = core::month_end_pace(sp, elapsed(m, through)).filter(|_| ids.len() >= 2);
+                    let pace_note = pace.map(|p| format!("\nOn pace for {} by month end{}", money(p), if p > limit && limit > Decimal::ZERO { format!(", {} over", money(p - limit)) } else { String::new() })).unwrap_or_default();
+                    let r = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&wl.name))
+                        .subtitle(glib::markup_escape_text(&format!("Matches “{}” · {} charge{} in {}{pace_note}", wl.pattern, ids.len(), if ids.len() == 1 { "" } else { "s" }, m.format("%B"))))
+                        .subtitle_lines(3)
+                        .build();
                     let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).valign(gtk::Align::Center).width_request(220).build();
                     let st = gtk::Label::builder().label(format!("{} of {}", money(sp), money(limit))).xalign(1.0).css_classes(["tnum", "caption"]).build();
                     match core::alert(sp, limit, elapsed(m, through)) {
                         Some(Alert::Over) => st.add_css_class("amount-out"),
                         Some(Alert::Near) => st.add_css_class("warning"),
+                        None if pace.is_some_and(|p| p > limit && limit > Decimal::ZERO) => st.add_css_class("warning"),
                         None => {}
                     }
                     col.append(&st);

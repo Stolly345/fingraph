@@ -286,6 +286,50 @@ impl Forecast {
     pub fn low(&self, from: NaiveDate, to: NaiveDate) -> Option<(NaiveDate, Decimal)> {
         self.points.iter().filter(|p| p.0 >= from && p.0 <= to).min_by_key(|p| p.1).copied()
     }
+
+    /// The first day between the dates the estimate goes below `minimum`, and what takes it there:
+    /// the regular payment(s) due that day, or (`None`) everyday spending wearing it down.
+    pub fn first_below(&self, minimum: Decimal, from: NaiveDate, to: NaiveDate) -> Option<Shortfall> {
+        let (date, balance) = self.points.iter().filter(|p| p.0 >= from && p.0 <= to).find(|p| p.1 < minimum).copied()?;
+        let due: Vec<&(NaiveDate, String, Decimal)> = self.events.iter().filter(|e| e.0 == date && e.2.is_sign_negative()).collect();
+        let cause = due.iter().min_by_key(|e| e.2).map(|e| (e.1.clone(), -e.2));
+        Some(Shortfall { date, balance, minimum, cause, already: date == from })
+    }
+}
+
+/// When an account is expected to dip below the minimum you set for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shortfall {
+    pub date: NaiveDate,
+    pub balance: Decimal,
+    pub minimum: Decimal,
+    /// The biggest payment due that day (payee, amount), when a payment tips it over.
+    pub cause: Option<(String, Decimal)>,
+    /// Already under it on the first day looked at (today).
+    pub already: bool,
+}
+
+impl Shortfall {
+    pub fn label(&self, currency: Currency) -> String {
+        let m = |d: Decimal| crate::money::fmt_money(d, currency);
+        if self.already {
+            return format!("Already below your {} minimum: about {} now", m(self.minimum), m(self.balance));
+        }
+        match &self.cause {
+            Some((who, v)) => format!("Below your {} minimum around {}: {who} {} takes it to {}", m(self.minimum), self.date.format("%d %b"), m(*v), m(self.balance)),
+            None => format!("Below your {} minimum around {}, from everyday spending ({})", m(self.minimum), self.date.format("%d %b"), m(self.balance)),
+        }
+    }
+}
+
+impl crate::db::Db {
+    /// The lowest balance you want an account to reach (its own currency); zero = just not overdrawn.
+    pub fn min_balance(&self, account_id: i64) -> Decimal {
+        self.setting(&format!("min_balance:{account_id}")).and_then(|v| v.parse().ok()).unwrap_or_default()
+    }
+    pub fn set_min_balance(&self, account_id: i64, v: Option<Decimal>) -> crate::Result<()> {
+        self.set_setting(&format!("min_balance:{account_id}"), &v.map(|v| v.abs().to_string()).unwrap_or_default())
+    }
 }
 
 /// For each bank account (not cards or loans): start from its latest verified balance, add every
@@ -497,5 +541,31 @@ mod tests {
         let mine = db.transactions(&TxFilter { entity_ids: vec![personal], by_account: true, ..Default::default() }).unwrap();
         assert!(mine.iter().any(|x| x.id == t.id));
         assert!(!db.transactions(&TxFilter { entity_ids: vec![biz], by_account: true, ..Default::default() }).unwrap().iter().any(|x| x.id == t.id));
+    }
+
+    #[test]
+    fn the_first_payment_that_takes_an_account_under_its_minimum() {
+        let d = |day| NaiveDate::from_ymd_opt(2026, 11, day).unwrap();
+        let v = |s: &str| s.parse::<Decimal>().unwrap();
+        let fc = Forecast {
+            account_id: 1,
+            account: "Chq".into(),
+            currency: Currency::KYD,
+            start: (d(1), v("900")),
+            points: vec![(d(1), v("900")), (d(5), v("850")), (d(10), v("380")), (d(15), v("300"))],
+            events: vec![(d(10), "CUC".into(), v("-320")), (d(10), "Flow".into(), v("-150"))],
+            daily: v("-10"),
+        };
+        let s = fc.first_below(v("500"), d(1), d(30)).unwrap();
+        assert_eq!((s.date, s.balance), (d(10), v("380")));
+        assert_eq!(s.cause, Some(("CUC".into(), v("320"))), "the biggest payment that day");
+        assert!(s.label(Currency::KYD).contains("CUC"));
+        assert_eq!(fc.first_below(v("200"), d(1), d(30)), None);
+        assert!(fc.first_below(v("880"), d(1), d(30)).unwrap().cause.is_none(), "worn down by everyday spending");
+        assert!(fc.first_below(v("1000"), d(1), d(30)).unwrap().label(Currency::KYD).starts_with("Already below"));
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.min_balance(7), Decimal::ZERO);
+        db.set_min_balance(7, Some(v("-500"))).unwrap();
+        assert_eq!(db.min_balance(7), v("500"));
     }
 }

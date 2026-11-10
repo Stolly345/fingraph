@@ -46,7 +46,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     let head = gtk::Box::builder().spacing(12).build();
     let title = gtk::Box::builder().orientation(gtk::Orientation::Vertical).hexpand(true).build();
     title.append(&heading("What Changed?"));
-    title.append(&dim("Price rises, unusual bills, possible double charges and what the banks charged you, for the date range above."));
+    title.append(&dim("Why spending changed, price rises, unusual bills, possible double charges and what the banks charged you, for the date range above."));
     head.append(&title);
     let choose = gtk::Button::builder().label("Choose Cards…").css_classes(["flat"]).valign(gtk::Align::Center).build();
     {
@@ -97,6 +97,7 @@ fn render(a: &Rc<App>, cards: &gtk::FlowBox, ins: &[Insight], hidden: &[String],
                 many => {
                     let n = many.len();
                     let title = match kind {
+                        InsightKind::SpendingChange => "Spending changed".into(),
                         InsightKind::Duplicate => format!("{n} possible double charges"),
                         InsightKind::Spike => format!("{n} bills above their usual"),
                         InsightKind::PriceCreep => format!("{n} subscriptions got dearer"),

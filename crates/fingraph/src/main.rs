@@ -1411,7 +1411,7 @@ fn css() {
 
 #[cfg(debug_assertions)]
 fn debug_shot(app: &Rc<App>) {
-    // FINGRAPH_SHOT=out.png FINGRAPH_VIEW=transactions FINGRAPH_DIALOG=triage|onboarding|report
+    // FINGRAPH_SHOT=out.png FINGRAPH_VIEW=transactions FINGRAPH_DIALOG=triage|onboarding|report|rule:PATTERN
     let Some(out) = std::env::var_os("FINGRAPH_SHOT") else { return };
     if let Some((w, h)) = std::env::var("FINGRAPH_SHOT_SIZE").ok().and_then(|s| Some((s.split_once('x')?.0.parse().ok()?, s.split_once('x')?.1.parse().ok()?))) {
         app.win.set_default_size(w, h);
@@ -1456,6 +1456,7 @@ fn debug_shot(app: &Rc<App>) {
         Ok("close") => close::open(app, None, Rc::new(|| {})),
         Ok(d) if d.starts_with("tx:") => txedit::dialog(app, d[3..].parse().unwrap_or(0), None),
         Ok("share") => share::open(app),
+        Ok(d) if d.starts_with("rule:") => rules::rule_dialog(app, Some(fingraph_core::rules::Rule { pattern: d[5..].to_string(), ..Default::default() })),
         Ok("preferences") => {
             preferences::show(app);
             if let (Some(d), Ok(page)) = (app.win.visible_dialog().and_downcast::<adw::PreferencesDialog>(), std::env::var("FINGRAPH_PAGE")) {

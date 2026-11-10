@@ -489,6 +489,43 @@ fn payoff_section(app: &Rc<App>, s: &Snap, into: &gtk::Box, redraw: crate::Refre
         }
         into.append(&dim(&t));
     }
+    // what if you paid more: the debt-free date and interest with a little extra each month, and what
+    // that extra takes from the month's other plans
+    into.append(&info_heading(
+        "What If You Paid More?",
+        "Adds an amount on top of what you pay towards debt each month, paid highest rate first, and shows how much sooner you'd be debt-free and the interest you'd save. That money comes out of spending or saving each month, so it's shown against your cash too.",
+    ));
+    let extra_key = format!("payoff_extra:{}", s.scope);
+    let extra = app.db.setting(&extra_key).and_then(|v| parse_user(&v)).unwrap_or(Decimal::from(100));
+    let eg = adw::PreferencesGroup::new();
+    let extra_row = adw::EntryRow::builder().title(format!("Extra each month ({})", ccy.symbol())).text(amount_text(extra)).show_apply_button(true).build();
+    {
+        let (w, r2) = (Rc::downgrade(app), redraw.clone());
+        extra_row.connect_apply(move |e| {
+            if let Some(a) = w.upgrade() {
+                a.saved(a.db.set_setting(&extra_key, &parse_user(&e.text()).map(|v| v.abs().to_string()).unwrap_or_default()));
+                r2();
+            }
+        });
+    }
+    eg.add(&extra_row);
+    into.append(&eg);
+    let free = |m: u32| fingraph_core::insights::add_months(month_start(today()), m as i32).format("%B %Y").to_string();
+    into.append(&dim(&match core::what_if(&list, planned, extra) {
+        Some(w) if w.months_sooner() > 0 || w.interest_saved() > Decimal::ZERO => format!(
+            "With {} more a month ({} a month in all): debt-free {} instead of {}, {} month{} sooner, saving {} in interest. That's {} a year less for spending or saving until then.",
+            money(extra),
+            money(planned + extra),
+            free(w.with.months),
+            free(w.without.months),
+            w.months_sooner(),
+            if w.months_sooner() == 1 { "" } else { "s" },
+            money(w.interest_saved()),
+            money(extra * Decimal::from(12)),
+        ),
+        Some(_) => "Paying that much more wouldn't change the date or the interest here.".to_string(),
+        None => format!("Set the monthly amount above to at least the minimums (about {}) to compare.", money(mins)),
+    }));
     into.append(&info_heading("Other Ways to Tackle Debt", "Approaches that change the debts themselves rather than the order you pay them. FinGraph doesn't model these; try them out by typing the new rate above."));
     let other = self::list();
     for (t, about) in [

@@ -191,8 +191,30 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     for c in [&c2, &c_run, &c5, &c3, &c4, &c_bill] {
         strip.append(c);
     }
+    // financial health: three figures, each with how it was worked out, never one combined score
+    let health = gtk::Box::builder().spacing(24).homogeneous(true).css_classes(["card", "stat-strip"]).build();
+    let (c_em, k_em) = stat(
+        "Emergency Fund",
+        "How many months your cash would cover your essential bills: the fixed-expense categories (set them on the Budget page) in an average complete month. 3 to 6 months is the usual aim. Cash Runway beside it counts all spending instead.",
+    );
+    let (c_debt, k_debt) = stat(
+        "Debt Load",
+        "What you owe on cards and loans, as months of income: the latest statement balances against the income of an average complete month. Under 1 month is light; over 6 deserves a plan (Net Worth → paying off debt).",
+    );
+    let (c_fee, k_fee) = stat(
+        "Fees & Interest",
+        "What the banks charged you in the last 12 months: service charges, wire and FX fees, and interest on cards and loans. The What Changed page breaks it down by bank.",
+    );
+    for c in [&c_em, &c_debt, &c_fee] {
+        health.append(c);
+    }
     let analysis = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(16).build();
     analysis.append(&strip);
+    analysis.append(&with_info(
+        &heading("Financial Health"),
+        "Three separate measures, each showing its own calculation. They depend on complete months of statements and on which categories you count as fixed.",
+    ));
+    analysis.append(&health);
     // what each business owes you for spending you paid personally
     let owed_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
     body.append(&owed_box);
@@ -414,6 +436,34 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
                     k_run.sub.set_label(&format!("{} cash ÷ {} a month usual spending", money(cash.round_dp(2)), money(monthly.round_dp(2))));
                     k_run.sub.set_tooltip_text(Some(&average.label()));
                 }
+                let owed: Decimal = accts
+                    .iter()
+                    .filter(|(id, b)| b.liability && !hidden_accounts.contains(id))
+                    .filter_map(|(_, b)| b.points.last().map(|p| -fx.convert(p.1, b.currency, ccy).unwrap_or_default()))
+                    .sum();
+                let h = fingraph_core::reporting::health(&all_rows, &average, (cash, owed), &a.db.fixed_categories(), &a.parents(), (ccy, &fx), today());
+                match (h.emergency_months(), h.emergency) {
+                    (Some(n), Some((c, e))) => {
+                        k_em.value.set_label(&format!("{n} months"));
+                        k_em.sub.set_label(&format!("{} cash ÷ {} a month essentials", money(c.round_dp(2)), money(e)));
+                    }
+                    _ => {
+                        k_em.value.set_label("—");
+                        k_em.sub.set_label("Needs balances, complete months and fixed categories");
+                    }
+                }
+                match (h.debt_months(), h.debt) {
+                    (Some(n), Some((o, i))) => {
+                        k_debt.value.set_label(&format!("{n} months of income"));
+                        k_debt.sub.set_label(&format!("{} owed ÷ {} a month income", money(o.round_dp(2)), money(i)));
+                    }
+                    _ => {
+                        k_debt.value.set_label("—");
+                        k_debt.sub.set_label("Needs complete months with income");
+                    }
+                }
+                k_fee.value.set_label(&money(h.fees_12m.0));
+                k_fee.sub.set_label(&format!("{} charge{} in the last 12 months", h.fees_12m.1, if h.fees_12m.1 == 1 { "" } else { "s" }));
             }
             k_rate.value.set_label(&k.savings_rate_pct.map_or("—".into(), |p| format!("{p:.1}%")));
             k_rate.sub.set_label("Of income kept, transfers left out");

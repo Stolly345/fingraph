@@ -767,6 +767,12 @@ pub fn watched(rows: &[TxRow], w: &Watch, from: NaiveDate, to: NaiveDate, ccy: C
     (hits.iter().map(|t| -crate::insights::value(t, ccy, fx)).sum(), hits.iter().map(|t| t.id).collect())
 }
 
+/// Where spending is heading by month end at its pace so far: `spent` over `done` of the month (0–1).
+/// `None` in the first week (too little to go on) or once the month is over.
+pub fn month_end_pace(spent: Decimal, done: Decimal) -> Option<Decimal> {
+    (done >= Decimal::new(25, 2) && done < Decimal::ONE).then(|| (spent / done).round_dp(2))
+}
+
 // ──────────────────────────────────────────────────────────────── rules of thumb
 
 /// A well-known way to divide take-home pay. Needs are fixed expenses, non-monthly bills and loan
@@ -1147,5 +1153,13 @@ mod tests {
         let rows: Vec<TxRow> = [(1, ymd(2026, 1, 10)), (2, ymd(2026, 7, 11))].into_iter().map(|(id, day)| TxRow { is_subscription: true, ..crate::insights::tests::row(id, day, "NORDVPN", "-60.00", "Subscriptions", "") }).collect();
         let ideas = fund_ideas(&rows, Currency::KYD, &Fx::default(), ymd(2026, 10, 1));
         assert_eq!(ideas.iter().map(|f| (f.every_months, f.next_due)).collect::<Vec<_>>(), vec![(6, ymd(2027, 1, 11))]);
+    }
+
+    #[test]
+    fn month_end_pace_needs_a_week_and_stops_at_month_end() {
+        let v = |s: &str| s.parse::<Decimal>().unwrap();
+        assert_eq!(month_end_pace(v("100"), v("0.5")), Some(v("200")));
+        assert_eq!(month_end_pace(v("100"), v("0.1")), None);
+        assert_eq!(month_end_pace(v("100"), Decimal::ONE), None);
     }
 }

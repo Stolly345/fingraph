@@ -104,6 +104,8 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
                 let rows = a.all_rows();
                 let fx = a.db.fx().unwrap_or_default();
                 let mut list = insights::subscriptions(&rows, a.display(), &fx, today());
+                // each account's newest statement: tells a missed charge from one not on a statement yet
+                let covered = fingraph_core::outlook::covered(&a.db.documents(&a.entity_ids()).unwrap_or_default());
                 match a.db.prefs().subscription_sort {
                     0 => list.sort_by_key(|x| std::cmp::Reverse(x.last_charged)),
                     1 => list.sort_by_key(|x| x.last_charged),
@@ -128,21 +130,35 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
                         365 => "yearly".into(),
                         d => format!("every {d} days"),
                     };
+                    let status = insights::pay_status(&s, covered.get(&s.account_id).copied(), today());
                     let r = adw::ActionRow::builder()
                         .title(glib::markup_escape_text(&s.payee))
                         .subtitle(glib::markup_escape_text(&format!(
-                            "{} {every}{} · {} · last {} · {} charge{}{}{}",
+                            "{}\n{} {every}{} · {} · {} charge{}{}",
+                            status.label(),
                             fmt_money(s.latest, s.currency),
                             if s.cadence_guessed { " (a guess: set the cycle)" } else { "" },
                             s.account,
-                            s.last_charged.format("%d %b %Y"),
                             s.charges,
                             if s.charges == 1 { "" } else { "s" },
-                            s.last_rise.map(|(o, n, _)| format!(" · ▲ price rose {o} → {n}")).unwrap_or_default(),
-                            if s.cancelled { " · cancelled" } else if s.active { "" } else { " · lapsed" }
+                            s.last_rise.filter(|_| !matches!(status, insights::PayStatus::Changed { .. })).map(|(o, n, _)| format!(" · ▲ price rose {o} → {n}")).unwrap_or_default(),
                         )))
                         .subtitle_lines(3)
                         .build();
+                    // expected, paid, late, changed or gone quiet: one icon to scan the list by
+                    let icon = match status {
+                        insights::PayStatus::Paid { .. } => "emblem-ok-symbolic",
+                        insights::PayStatus::Changed { .. } => "go-up-symbolic",
+                        insights::PayStatus::Expected { .. } | insights::PayStatus::NotYetSeen { .. } => "content-loading-symbolic",
+                        insights::PayStatus::Late { .. } | insights::PayStatus::Lapsed { .. } => "dialog-warning-symbolic",
+                        insights::PayStatus::Cancelled => "action-unavailable-symbolic",
+                    };
+                    let img = gtk::Image::from_icon_name(icon);
+                    img.set_tooltip_text(Some(&status.label()));
+                    if status.needs_attention() {
+                        img.add_css_class("warning");
+                    }
+                    r.add_prefix(&img);
                     // the billing cycle: what you pick here beats any guess
                     const CYCLES: [(&str, i64); 5] = [("Weekly", 7), ("Fortnightly", 14), ("Monthly", 30), ("Quarterly", 91), ("Yearly", 365)];
                     // a menu built when opened: a DropDown per row cost ~4 ms each
@@ -360,10 +376,10 @@ fn keep_scroll(page: &adw::PreferencesPage) {
 /// How each kind of match reads in the rule dialog.
 fn kind_label(k: RuleKind) -> &'static str {
     match k {
-        RuleKind::NormalizedTokens => "Merchant words (this business only)",
-        RuleKind::Substring => "Contains text (any business, broad)",
+        RuleKind::NormalizedTokens => "Merchant words",
+        RuleKind::Substring => "Contains text",
         RuleKind::Regex => "Pattern (regex)",
-        RuleKind::Exact => "Exact description",
+        RuleKind::Exact => "Exact text",
     }
 }
 
@@ -374,7 +390,7 @@ pub fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
     let ents = app.entities.borrow().clone();
     // the same business only (the directory keeps FLOW and FLOW TAXI apart), or text anywhere, broadly
     let kinds: Vec<&str> = RuleKind::ALL.iter().map(|k| kind_label(*k)).collect();
-    let kind = adw::ComboRow::builder().title("Match").subtitle("Merchant words stay with one business; Contains text matches any business with that text").model(&gtk::StringList::new(&kinds)).build();
+    let kind = adw::ComboRow::builder().title("Match").tooltip_text("Merchant words stay with one business (FLOW never catches FLOW TAXI); Contains text matches any business with that text").model(&gtk::StringList::new(&kinds)).build();
     let pattern = adw::EntryRow::builder().title("Pattern (merchant words, text or regex)").build();
     let payee = adw::EntryRow::builder().title("Clean payee (optional)").build();
     let mut cat_names = vec!["(leave category)".to_string()];
@@ -408,8 +424,59 @@ pub fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
     for row in [kind.upcast_ref::<gtk::Widget>(), pattern.upcast_ref(), payee.upcast_ref(), category.upcast_ref(), scope.upcast_ref(), sub.upcast_ref(), transfer.upcast_ref(), business.upcast_ref(), amt_min.upcast_ref(), amt_max.upcast_ref()] {
         g.add(row);
     }
+    // the rule as the dialog stands, for the preview and for saving
+    let read: Rc<dyn Fn() -> Option<Rule>> = {
+        let (kind, pattern, payee, category, scope, sub, transfer, business, amt_min, amt_max) = (kind.clone(), pattern.clone(), payee.clone(), category.clone(), scope.clone(), sub.clone(), transfer.clone(), business.clone(), amt_min.clone(), amt_max.clone());
+        let (cats, ents, biz_ents) = (cats.clone(), ents.clone(), biz_ents.clone());
+        Rc::new(move || {
+            let text = pattern.text().trim().to_string();
+            let k = RuleKind::ALL[kind.selected() as usize];
+            if text.is_empty() || (k == RuleKind::Regex && !fingraph_core::rules::regex_ok(&text)) {
+                return None;
+            }
+            Some(Rule {
+                id: 0,
+                kind: k,
+                pattern: text,
+                clean_payee: Some(payee.text().trim().to_string()).filter(|s| !s.is_empty()),
+                category_id: (category.selected() as usize).checked_sub(1).and_then(|i| cats.get(i)).map(|c| c.id),
+                is_subscription: sub.is_active(),
+                is_transfer: transfer.is_active(),
+                expected_cadence: if sub.is_active() { Some(30) } else { None },
+                entity_id: (scope.selected() as usize).checked_sub(1).and_then(|i| ents.get(i)).map(|e| e.id),
+                business_entity_id: (business.selected() as usize).checked_sub(1).and_then(|i| biz_ents.get(i)).map(|e| e.id),
+                amount_min: fingraph_core::money::parse_user(&amt_min.text()).map(|d| d.abs()),
+                amount_max: fingraph_core::money::parse_user(&amt_max.text()).map(|d| d.abs()),
+            })
+        })
+    };
+    // what saving would do, worked out as you type: how many it matches and how many would move
+    let preview = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["caption"]).margin_bottom(8).build();
+    {
+        let rows = Rc::new(app.db.transactions(&fingraph_core::db::TxFilter::default()).unwrap_or_default());
+        let (read, preview) = (read.clone(), preview.clone());
+        let update: Rc<dyn Fn()> = Rc::new(move || {
+            preview.set_label(&match read() {
+                Some(r) => fingraph_core::rules::preview(&r, &rows).label(),
+                None => "Type a pattern to see which transactions it would match".into(),
+            });
+        });
+        update();
+        for e in [&pattern, &amt_min, &amt_max] {
+            let u = update.clone();
+            e.connect_changed(move |_| u());
+        }
+        for c in [&kind, &category, &scope] {
+            let u = update.clone();
+            c.connect_selected_notify(move |_| u());
+        }
+    }
+    // the preview first: it's the answer to "what will this do?", and the dialog scrolls
+    let extra = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+    extra.append(&preview);
+    extra.append(&g);
     let d = adw::AlertDialog::new(Some(if existing.as_ref().is_some_and(|r| r.id != 0) { "Edit Rule" } else { "New Rule" }), None);
-    d.set_extra_child(Some(&g));
+    d.set_extra_child(Some(&extra));
     d.add_responses(&[("cancel", "Cancel"), ("ok", "Save & Apply")]);
     d.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
     let w = Rc::downgrade(app);
@@ -418,23 +485,8 @@ pub fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
         if r != "ok" || pattern.text().trim().is_empty() {
             return;
         }
-        let k = RuleKind::ALL[kind.selected() as usize];
-        if k == RuleKind::Regex && !fingraph_core::rules::regex_ok(pattern.text().trim()) {
+        let Some(rule) = read() else {
             return a.toast("That regular expression doesn't parse");
-        }
-        let rule = Rule {
-            id: 0,
-            kind: k,
-            pattern: pattern.text().trim().to_string(),
-            clean_payee: Some(payee.text().trim().to_string()).filter(|s| !s.is_empty()),
-            category_id: (category.selected() as usize).checked_sub(1).and_then(|i| cats.get(i)).map(|c| c.id),
-            is_subscription: sub.is_active(),
-            is_transfer: transfer.is_active(),
-            expected_cadence: if sub.is_active() { Some(30) } else { None },
-            entity_id: (scope.selected() as usize).checked_sub(1).and_then(|i| ents.get(i)).map(|e| e.id),
-            business_entity_id: (business.selected() as usize).checked_sub(1).and_then(|i| biz_ents.get(i)).map(|e| e.id),
-            amount_min: fingraph_core::money::parse_user(&amt_min.text()).map(|d| d.abs()),
-            amount_max: fingraph_core::money::parse_user(&amt_max.text()).map(|d| d.abs()),
         };
         if let Some(old) = existing.as_ref().filter(|o| o.id != 0) {
             a.saved(a.db.delete_rule(old.id));
