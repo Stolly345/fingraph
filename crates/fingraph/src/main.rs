@@ -6,6 +6,7 @@ mod budget;
 mod changes;
 mod charts;
 mod close;
+mod server;
 mod dashboard;
 mod directory;
 mod export;
@@ -418,6 +419,10 @@ impl App {
         }
 
         let shot = cfg!(debug_assertions) && std::env::var_os("FINGRAPH_SHOT").is_some();
+        if !shot {
+            // Preferences → Server: fetch the server's ledger if newer, take the edit lease
+            server::start(&app);
+        }
         if !shot && app.db.setting("onboarded").is_none() {
             guide::open(&app);
         }

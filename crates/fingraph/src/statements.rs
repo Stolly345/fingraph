@@ -448,6 +448,9 @@ pub fn import_paths_with(app: &Rc<App>, paths: Vec<PathBuf>, on_each: Option<OnE
         a.reload_entities();
         // a statement in another currency needs its days' rates
         a.update_rates(false);
+        if files > 0 {
+            crate::server::changed(&a);
+        }
         if let Some(f) = on_done {
             return f();
         }
@@ -644,6 +647,7 @@ fn watched_file(a: &Rc<App>, p: &std::path::Path, k: &str, r: Result<(ScanResult
                 a.toast(&format!("{name}: couldn't keep a copy for rescanning ({e})"));
             }
             a.reload_entities();
+            crate::server::changed(a);
             if rep.held > 0 {
                 a.toast_action(&format!("{name} from your watched folder is waiting for review"), "Review", Rc::new(|a: &Rc<App>| a.show_view("statements")));
             } else {

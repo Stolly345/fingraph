@@ -7,9 +7,16 @@ environment:
   sdk: ^3.13.7
 
 dependencies:
+  crypto: ^3.0.8
   flutter:
     sdk: flutter
   flutter_rust_bridge: 2.11.1
+  flutter_secure_storage: ^11.2.0
+  image_picker: ^1.2.4
+  intl: ^0.20.3
+  local_auth: ^3.0.2
+  mobile_scanner: ^7.5.0
+  path_provider: ^2.1.6
   rust_lib_fingraph:
     path: rust_builder
 

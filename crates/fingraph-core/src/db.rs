@@ -147,6 +147,9 @@ pub struct TxFilter {
     pub by_account: bool,
 }
 
+/// The memo a purchase added on the phone carries until its statement's line replaces it.
+pub const PHONE_MEMO: &str = "Added on phone";
+
 #[derive(Debug, Clone, Default)]
 pub struct ImportReport {
     pub document_ids: Vec<i64>,
@@ -493,6 +496,12 @@ impl Db {
         db.seed()?;
         db.prefs().apply_globals();
         Ok(db)
+    }
+
+    /// How many rows this connection has changed since it opened: compared before and after, it tells
+    /// whether anything was written in between (the desktop sends its ledger to a server only then).
+    pub fn change_count(&self) -> u64 {
+        self.conn.total_changes()
     }
 
     /// Begin a (nestable) transaction.
@@ -1437,6 +1446,7 @@ impl Db {
             }
         }
         tx.commit()?;
+        self.settle_phone_rows(&rep.document_ids)?;
         self.match_transfers()?;
         self.mark_card_payments()?;
         self.mark_recurring()?;
@@ -2232,6 +2242,54 @@ impl Db {
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// A purchase added on the phone before its statement arrives (cash, or this week's card spending).
+    pub fn add_phone_purchase(&self, account_id: i64, posted: NaiveDate, payee: &str, amount: Decimal) -> Result<i64> {
+        self.add_manual(account_id, None, posted, payee, amount, PHONE_MEMO)
+    }
+
+    /// A purchase added on the phone gives way to the statement's own line when that arrives: same account,
+    /// same amount, posted from 3 days before to a week after. Its category, tag and receipts move across.
+    fn settle_phone_rows(&self, docs: &[i64]) -> Result<usize> {
+        if docs.is_empty() {
+            return Ok(0);
+        }
+        let mut st = self.conn.prepare("SELECT id, account_id, posted_date, amount_minor, category_id, sub_entity_tag, fitid FROM transactions WHERE document_id IS NULL AND memo = ?1 ORDER BY posted_date, id")?;
+        type Phone = (i64, i64, String, i64, Option<i64>, String, String);
+        let phone: Vec<Phone> = st.query_map([PHONE_MEMO], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?.collect::<rusqlite::Result<_>>()?;
+        if phone.is_empty() {
+            return Ok(0);
+        }
+        let in_docs = docs.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",");
+        let tx = self.sp()?;
+        let mut used: Vec<i64> = Vec::new();
+        for (id, account, posted, minor, category, tag, fitid) in phone {
+            let Ok(day) = posted.parse::<NaiveDate>() else { continue };
+            let skip = if used.is_empty() { "0".to_string() } else { used.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",") };
+            let found: Option<(i64, String)> = tx
+                .query_row(
+                    &format!(
+                        "SELECT id, fitid FROM transactions WHERE document_id IN ({in_docs}) AND account_id = ?1 AND amount_minor = ?2
+                         AND posted_date BETWEEN ?3 AND ?4 AND id NOT IN ({skip}) ORDER BY ABS(julianday(posted_date) - julianday(?5)), id LIMIT 1"
+                    ),
+                    params![account, minor, (day - chrono::Duration::days(3)).to_string(), (day + chrono::Duration::days(7)).to_string(), posted],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let Some((statement_row, statement_fitid)) = found else { continue };
+            tx.execute(
+                "UPDATE transactions SET category_id = COALESCE(category_id, ?2),
+                     review_status = CASE WHEN category_id IS NULL AND ?2 IS NOT NULL THEN 'Confirmed' ELSE review_status END,
+                     sub_entity_tag = CASE WHEN sub_entity_tag = '' THEN ?3 ELSE sub_entity_tag END WHERE id = ?1",
+                params![statement_row, category, tag],
+            )?;
+            tx.execute("UPDATE attachments SET account_id = ?1, fitid = ?2 WHERE account_id = ?3 AND fitid = ?4", params![account, statement_fitid, account, fitid])?;
+            tx.execute("DELETE FROM transactions WHERE id = ?1", [id])?;
+            used.push(statement_row);
+        }
+        tx.commit()?;
+        Ok(used.len())
     }
 
     /// Deleted for good: a rescan or another copy of the statement doesn't bring them back.

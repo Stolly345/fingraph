@@ -2,7 +2,7 @@
 use crate::config::Config;
 use crate::ledger::Ledger;
 use crate::state::{Device, State};
-use crate::{backups, inbox, views};
+use crate::{backups, captures, inbox, views};
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path as UrlPath, Query, State as Ext};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -77,6 +77,8 @@ pub fn router(app: Shared) -> Router {
         .route("/api/v1/statements", post(upload_statement).layer(DefaultBodyLimit::max(200 << 20)))
         .route("/api/v1/statements/{sha}", get(download_statement))
         .route("/api/v1/view/{name}", get(view))
+        .route("/api/v1/captures/purchase", post(capture_purchase))
+        .route("/api/v1/captures/receipt", post(capture_receipt).layer(DefaultBodyLimit::max(30 << 20)))
         .with_state(app)
 }
 
@@ -344,6 +346,60 @@ async fn download_statement(Ext(app): Ext<Shared>, headers: HeaderMap, UrlPath(s
     let path = path.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "The server doesn't have that statement's file.".into()))?;
     let bytes = tokio::fs::read(&path).await.map_err(internal)?;
     Ok(([(header::CONTENT_TYPE, "application/pdf")], bytes).into_response())
+}
+
+// ---------------------------------------------------------------------- what the phone adds
+
+/// The lease, when a device other than `d` holds it: then captures wait.
+fn editing_elsewhere(app: &App, d: &Device) -> Option<crate::state::Lease> {
+    app.state().lease().filter(|l| l.device_id != d.id)
+}
+
+async fn capture_purchase(Ext(app): Ext<Shared>, headers: HeaderMap, Json(b): Json<captures::PurchaseBody>) -> ApiResult<Json<Value>> {
+    let d = device(&app, &headers)?;
+    let c = b.validate(chrono::Local::now().date_naive()).map_err(bad)?;
+    if let Some(l) = editing_elsewhere(&app, &d) {
+        captures::queue(&app.cfg.data, &c, &d.name, None).map_err(internal)?;
+        log(&format!("{} added a purchase; it waits until {} is done editing", d.name, l.device));
+        return Ok(Json(json!({ "queued": true, "editing": l.device })));
+    }
+    let c2 = c.clone();
+    let msg = app.ledger.call(move |db| captures::apply(db, &c2, None)).await.map_err(internal)?.map_err(bad)?;
+    let version = app.state().bump_ledger_version().map_err(internal)?;
+    log(&format!("{}: {msg}", d.name));
+    Ok(Json(json!({ "queued": false, "ledger_version": version })))
+}
+
+#[derive(Deserialize)]
+struct ReceiptQuery {
+    transaction: i64,
+}
+
+async fn capture_receipt(Ext(app): Ext<Shared>, headers: HeaderMap, Query(q): Query<ReceiptQuery>, body: Body) -> ApiResult<Json<Value>> {
+    let d = device(&app, &headers)?;
+    let bytes = axum::body::to_bytes(body, 30 << 20).await.map_err(|e| bad(format!("the photo didn't arrive: {e}")))?;
+    let image = bytes.starts_with(&[0xFF, 0xD8, 0xFF]) || bytes.starts_with(b"\x89PNG");
+    if !image {
+        return Err(bad("That isn't a photo (JPEG or PNG)."));
+    }
+    let c = captures::Capture::Receipt { transaction: q.transaction };
+    if let Some(l) = editing_elsewhere(&app, &d) {
+        captures::queue(&app.cfg.data, &c, &d.name, Some(&bytes)).map_err(internal)?;
+        return Ok(Json(json!({ "queued": true, "editing": l.device })));
+    }
+    // kept under a readable name, which the ledger shows as the receipt's file name
+    let dir = tmp_dir(&app.cfg).join(crate::state::sha256_hex(&crate::state::random_bytes::<8>()));
+    std::fs::create_dir_all(&dir).map_err(internal)?;
+    let ext = if bytes.starts_with(&[0xFF, 0xD8]) { "jpg" } else { "png" };
+    let photo = dir.join(format!("Receipt {}.{ext}", chrono::Local::now().format("%Y-%m-%d %H%M")));
+    std::fs::write(&photo, &bytes).map_err(internal)?;
+    let p2 = photo.clone();
+    let r = app.ledger.call(move |db| captures::apply(db, &c, Some(&p2))).await.map_err(internal)?;
+    let _ = std::fs::remove_dir_all(&dir);
+    let msg = r.map_err(bad)?;
+    let version = app.state().bump_ledger_version().map_err(internal)?;
+    log(&format!("{}: {msg}", d.name));
+    Ok(Json(json!({ "queued": false, "ledger_version": version })))
 }
 
 // ---------------------------------------------------------------------- what the screens show

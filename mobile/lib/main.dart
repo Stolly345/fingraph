@@ -1,74 +1,103 @@
 import 'package:flutter/material.dart';
-import 'package:fingraph/src/rust/api/hello.dart';
-import 'package:fingraph/src/rust/frb_generated.dart';
+
+import 'src/capture.dart';
+import 'src/connection.dart';
+import 'src/data.dart';
+import 'src/lock.dart';
+import 'src/pages/budget.dart';
+import 'src/pages/connect.dart';
+import 'src/pages/more.dart';
+import 'src/pages/summary.dart';
+import 'src/pages/transactions.dart';
 
 Future<void> main() async {
-  await RustLib.init();
-  runApp(const FinGraphApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  await Privacy.instance.load();
+  final server = await Server.load();
+  runApp(FinGraphApp(app: AppState(server)));
 }
 
 class FinGraphApp extends StatelessWidget {
-  const FinGraphApp({super.key});
+  const FinGraphApp({super.key, required this.app});
+  final AppState app;
 
   @override
   Widget build(BuildContext context) {
     const seed = Color(0xFF1C6E8C);
     return MaterialApp(
       title: 'FinGraph',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(colorSchemeSeed: seed, useMaterial3: true),
       darkTheme: ThemeData(colorSchemeSeed: seed, brightness: Brightness.dark, useMaterial3: true),
-      home: const CoreCheckPage(),
-    );
-  }
-}
-
-/// Phase 0: shows that the FinGraph core runs on this phone.
-class CoreCheckPage extends StatelessWidget {
-  const CoreCheckPage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('FinGraph')),
-      body: FutureBuilder<CoreCheck>(
-        future: coreCheck(),
-        builder: (context, snap) {
-          if (snap.hasError) {
-            return _Message(icon: Icons.error_outline, text: 'The core didn\'t start: ${snap.error}');
-          }
-          final c = snap.data;
-          if (c == null) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          return ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              ListTile(leading: const Icon(Icons.check_circle_outline), title: const Text('Core version'), subtitle: Text(c.version)),
-              ListTile(leading: const Icon(Icons.store_outlined), title: const Text('Businesses in the directory'), subtitle: Text('${c.directory}')),
-              ListTile(
-                leading: const Icon(Icons.receipt_long_outlined),
-                title: const Text('Demo statements read and imported'),
-                subtitle: Text('${c.demoTransactions} transactions'),
-              ),
-              ListTile(leading: const Icon(Icons.search), title: const Text('Sample recognition'), subtitle: Text(c.sample)),
-            ],
-          );
-        },
+      home: LockGate(
+        child: ListenableBuilder(
+          listenable: app,
+          builder: (context, _) => app.server == null ? ConnectPage(app: app) : HomeShell(app: app),
+        ),
       ),
     );
   }
 }
 
-class _Message extends StatelessWidget {
-  const _Message({required this.icon, required this.text});
-  final IconData icon;
-  final String text;
+class HomeShell extends StatefulWidget {
+  const HomeShell({super.key, required this.app});
+  final AppState app;
 
   @override
-  Widget build(BuildContext context) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [Icon(icon, size: 48), const SizedBox(height: 12), Text(text, textAlign: TextAlign.center)]),
-        ),
-      );
+  State<HomeShell> createState() => _HomeShellState();
+}
+
+class _HomeShellState extends State<HomeShell> {
+  int _tab = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    // a statement shared to FinGraph, now or later
+    listenForShares((f) => sendStatement(context, widget.app, f));
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final f = await takeShared();
+      if (f != null && mounted) await sendStatement(context, widget.app, f);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = widget.app;
+    final pages = [SummaryPage(app: app), BudgetPage(app: app), TransactionsPage(app: app), MorePage(app: app)];
+    const titles = ['FinGraph', 'Budget', 'Transactions', 'More'];
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(titles[_tab]),
+        actions: [
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.add),
+            tooltip: 'Add',
+            onSelected: (v) async {
+              if (v == 'purchase') await quickAdd(context, app);
+              if (v == 'statement') {
+                final f = await pickPdf();
+                if (f != null && context.mounted) await sendStatement(context, app, f);
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'purchase', child: ListTile(leading: Icon(Icons.shopping_bag_outlined), title: Text('A purchase'))),
+              PopupMenuItem(value: 'statement', child: ListTile(leading: Icon(Icons.upload_file), title: Text('A statement PDF'))),
+            ],
+          ),
+        ],
+      ),
+      body: SafeArea(top: false, child: IndexedStack(index: _tab, children: pages)),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _tab,
+        onDestinationSelected: (i) => setState(() => _tab = i),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.space_dashboard_outlined), selectedIcon: Icon(Icons.space_dashboard), label: 'Summary'),
+          NavigationDestination(icon: Icon(Icons.pie_chart_outline), selectedIcon: Icon(Icons.pie_chart), label: 'Budget'),
+          NavigationDestination(icon: Icon(Icons.receipt_long_outlined), selectedIcon: Icon(Icons.receipt_long), label: 'Transactions'),
+          NavigationDestination(icon: Icon(Icons.more_horiz), label: 'More'),
+        ],
+      ),
+    );
+  }
 }

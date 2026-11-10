@@ -540,10 +540,13 @@ name = "fingraph"
 version = "0.2.30"
 dependencies = [
  "chrono",
+ "fingraph-client",
  "fingraph-core",
  "gtk4",
  "libadwaita",
  "rust_decimal",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

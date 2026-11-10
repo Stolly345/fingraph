@@ -9,6 +9,7 @@
 //! ```
 pub mod api;
 pub mod backups;
+pub mod captures;
 pub mod config;
 pub mod filing;
 pub mod inbox;
@@ -197,6 +198,18 @@ async fn inbox_loop(app: api::Shared) {
     let mut waiting_said = false;
     loop {
         tick.tick().await;
+        // what the phone added while a computer was editing, now that it's done
+        if app.state().lease().is_none() && !captures::waiting(&app.cfg.data).is_empty() {
+            let data = app.cfg.data.clone();
+            if let Ok((n, said)) = app.ledger.call(move |db| captures::apply_waiting(db, &data)).await {
+                for m in said {
+                    log(&m);
+                }
+                if n > 0 {
+                    let _ = app.state().bump_ledger_version();
+                }
+            }
+        }
         let files = inbox::ready_files(&app.cfg.inbox(), app.cfg.settle);
         if files.is_empty() {
             continue;

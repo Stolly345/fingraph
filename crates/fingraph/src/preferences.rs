@@ -121,8 +121,96 @@ pub(crate) fn show_at(app: &Rc<App>, page: &str) {
     dlg.add(&dashboard(app));
     dlg.add(&workspaces(app, &dlg));
     dlg.add(&data(app, &dlg));
+    dlg.add(&server_page(app, &dlg));
     dlg.set_visible_page_name(page);
     dlg.present(Some(&app.win));
+}
+
+// ──────────────────────────────────────────────────────────────── Server
+
+fn server_page(app: &Rc<App>, dlg: &adw::PreferencesDialog) -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::builder().name("server").title("Server").icon_name("network-server-symbolic").build();
+    let g = adw::PreferencesGroup::builder()
+        .title("FinGraph Server")
+        .description("Keep the ledger and your statement files on a FinGraph server (a Docker container on a machine that's always on), so the phone app and your other computers use the same ledger. One device edits at a time; this computer works on its own copy and sends it back after imports, after ten quiet minutes and on closing.")
+        .build();
+    page.add(&g);
+    // reopened to show the new state after connecting or disconnecting
+    let reopen = {
+        let dlg = dlg.clone();
+        Rc::new(move |a: &Rc<App>| {
+            dlg.close();
+            show_at(a, "server");
+        })
+    };
+    match crate::server::describe() {
+        None => {
+            let how = adw::ActionRow::builder().title("To pair this computer").subtitle("On the server, run  docker exec fingraph fingraph-server pair  and type its address and the code it shows.").subtitle_selectable(true).build();
+            let addr = adw::EntryRow::builder().title("Server address (192.168.1.20:8743)").build();
+            let code = adw::EntryRow::builder().title("Pairing code").build();
+            let go = adw::ButtonRow::builder().title("Connect").start_icon_name("network-transmit-receive-symbolic").build();
+            g.add(&how);
+            g.add(&addr);
+            g.add(&code);
+            g.add(&go);
+            let w = Rc::downgrade(app);
+            go.connect_activated(move |_| {
+                let Some(a) = w.upgrade() else { return };
+                let (address, c) = (addr.text().trim().to_string(), code.text().trim().to_string());
+                if address.is_empty() || c.is_empty() {
+                    return a.toast("Type the server's address and the pairing code");
+                }
+                let reopen = reopen.clone();
+                crate::server::connect(&a, address, c, Rc::new(move |a: &Rc<App>| {
+                    a.toast("Connected to FinGraph Server");
+                    reopen(a);
+                }));
+            });
+        }
+        Some((address, fingerprint, state)) => {
+            g.add(&adw::ActionRow::builder().title(address.as_str()).subtitle(format!("Fingerprint {fingerprint}")).subtitle_selectable(true).build());
+            g.add(&adw::ActionRow::builder().title("Status").subtitle(state.as_str()).build());
+            let actions = adw::PreferencesGroup::new();
+            page.add(&actions);
+            let sync = adw::ButtonRow::builder().title("Sync Now").start_icon_name("view-refresh-symbolic").build();
+            let send = adw::ButtonRow::builder().title("Send This Computer’s Ledger…").build();
+            let fetch = adw::ButtonRow::builder().title("Use the Server’s Ledger…").build();
+            let leave = adw::ButtonRow::builder().title("Disconnect…").build();
+            leave.add_css_class("destructive-action");
+            for r in [&sync, &send, &fetch, &leave] {
+                actions.add(r);
+            }
+            let w = Rc::downgrade(app);
+            sync.connect_activated(move |_| {
+                if let Some(a) = w.upgrade() {
+                    crate::server::sync_in(&a, false);
+                }
+            });
+            let w = Rc::downgrade(app);
+            send.connect_activated(move |_| {
+                if let Some(a) = w.upgrade() {
+                    confirm(&a, "Send This Computer’s Ledger?", "The ledger on the server is replaced by this computer’s, statements and receipts included. The server keeps a backup of what it had.", "Send", crate::server::send_ledger);
+                }
+            });
+            let w = Rc::downgrade(app);
+            fetch.connect_activated(move |_| {
+                if let Some(a) = w.upgrade() {
+                    confirm(&a, "Use the Server’s Ledger?", "This computer’s ledger is replaced by the server’s. It’s backed up first when automatic backups are on.", "Replace", crate::server::use_server_ledger);
+                }
+            });
+            let w = Rc::downgrade(app);
+            leave.connect_activated(move |_| {
+                if let Some(a) = w.upgrade() {
+                    let reopen = reopen.clone();
+                    confirm(&a, "Disconnect From the Server?", "This computer stops using FinGraph Server and keeps its own ledger as it is now. The server keeps its copy.", "Disconnect", move |a| {
+                        crate::server::disconnect(a);
+                        reopen(a);
+                    });
+                }
+            });
+        }
+    }
+    page
 }
 
 // ──────────────────────────────────────────────────────────────── General
