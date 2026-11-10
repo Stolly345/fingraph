@@ -3,6 +3,11 @@
 Written 9 November 2026, against 0.2.30. A plan, not a promise: estimates are rough and assume one
 developer working with an AI agent.
 
+**Decided (9 November 2026):** a read-only companion first; backups reach the phone through Syncthing,
+with the always-on home server as an encrypted (untrusted) peer with file versioning; **Flutter** for the
+app, Android only for now, so an iPhone version stays possible later; installed on the owner's phone and
+published as APKs on GitHub releases, both signed with one release key.
+
 ## 1. What it should be
 
 A phone companion to the desktop ledger, not a second, separate ledger. The phone is where you are
@@ -37,12 +42,19 @@ the recommendation below.
 
 ## 3. Decisions
 
-### UI: Kotlin and Jetpack Compose, with the Rust core through UniFFI
+### UI: Flutter, with the Rust core through flutter_rust_bridge (decided)
+
+An iPhone version may matter later, so one UI for both phones outweighs the native feel of Compose. Flutter is
+free and open source (BSD). Phone features come through maintained plugins (camera, receiving shared files,
+biometric lock, ML Kit text recognition), with small Kotlin pieces where a plugin is awkward. An iPhone build
+would still need a Mac and Apple's developer programme; nothing in the plan depends on it.
+
+The comparison as written before the decision:
 
 | Option | For | Against |
 |---|---|---|
-| **Kotlin + Compose + UniFFI** (recommended) | Native Material 3 feel; first-class share sheet, camera, file picker, biometric lock, WorkManager and on-device OCR (ML Kit); UniFFI generates the Kotlin bindings from Rust. | Android only (an iPhone app would need SwiftUI, though UniFFI generates Swift too). |
-| Flutter + flutter_rust_bridge | One UI for Android and iOS; Flutter is already installed. | Another language (Dart) and widget set; platform features through plugins. |
+| Kotlin + Compose + UniFFI | Native Material 3 feel; first-class share sheet, camera, file picker, biometric lock, WorkManager and on-device OCR (ML Kit); UniFFI generates the Kotlin bindings from Rust. | Android only (an iPhone app would need SwiftUI, though UniFFI generates Swift too). |
+| **Flutter + flutter_rust_bridge** (chosen) | One UI for Android and iOS; Flutter is already installed. | Another language (Dart) and widget set; platform features through plugins. |
 | Tauri 2 mobile | Web UI. | The desktop UI isn't web, so nothing is reused; heaviest runtime. |
 | GTK on Android | Reuse the desktop UI. | Not practical. |
 
@@ -54,27 +66,35 @@ the recommendation below.
   bank profile works unchanged.
 - `Ocr`: *tesseract* on the desktop; on Android the app hands page images to ML Kit Text Recognition
   (on-device, offline) and returns tokens to Rust.
-- `Http` for exchange rates: `curl` on the desktop, `ureq` with rustls on Android (or a Kotlin callback).
+- `Http` for exchange rates: `curl` on the desktop, `ureq` with rustls on Android (or a Dart callback).
 - Paths are passed in by the host: `Db::open(path)` already takes one; add a `set_data_dir` for the
   statements and attachments folders and the scratch folder.
 - Cargo features (`desktop`, `android`) choose the backends, so the desktop build doesn't change.
 
 ### FFI: a narrow facade, not 438 functions
 
-A new crate `crates/fingraph-ffi` exposes **screen-shaped** calls that return plain records, for example
+A new crate `crates/fingraph-ffi` (bound to Dart by flutter_rust_bridge) exposes **screen-shaped** calls that return plain records, for example
 `budget_overview(month)`, `transactions(filter, page)`, `triage_cards()`, `answer_card(...)`,
 `subscriptions()`, `outlook()`, `next_steps()`, `add_manual(...)`, `import_pdf(path)`. The view-model
 logic that lives in GTK files today (Summary's Next Steps, the budget snapshot) moves into the core, so
 desktop and phone share one source of truth. `Db` isn't thread-safe, so the facade owns it on one worker
-thread and the Kotlin side calls it from a coroutine dispatcher.
+thread and the Dart side calls it asynchronously.
 
 ### Data between devices: complete backups first, a journal second, sync last
+
+**Superseded (10 November 2026)** by [`SERVER-PLAN.md`](SERVER-PLAN.md): a FinGraph server in Docker holds the
+ledger and the statements, and the phone and desktop connect to it. Syncthing took too much setup. The text
+below is kept as the no-server fallback.
 
 Two devices writing the same SQLite file is how ledgers get corrupted. So, in order:
 
 1. **Phone reads a copy.** The desktop already writes complete backups (ledger + statements + receipts +
-   SHA-256 manifest). The phone opens the newest one from a folder you choose: Syncthing, a home server over
-   a VPN, or a manual share. Read-only, nothing to conflict.
+   SHA-256 manifest). A new desktop setting, *Copy for the phone*, writes one into a chosen folder after each
+   import and on close (keeping a few). That folder is shared by Syncthing between the desktop, the phone
+   (Syncthing-Fork) and the home server. The server holds it as an **untrusted** device, so it stores only
+   encrypted files it can't read, with **file versioning** on, so a deletion on one device can't erase the
+   history. The phone app reads the folder and needs no network permission of its own. Opening a backup file
+   shared by hand stays as a fallback. Read-only, nothing to conflict.
 2. **Phone captures into a journal.** Manual purchases, receipt photos and shared statements go into an
    append-only *inbox* file (JSON lines plus attachments) beside the backup. The desktop imports the inbox
    at the next start (manual rows, receipts attached to their transactions, statements through the normal
@@ -94,10 +114,10 @@ exchange-rate downloads, which you can switch off as on the desktop.
 
 | Phase | Delivers | Main work | Rough size |
 |---|---|---|---|
-| **0. Toolchain** | An empty Compose app calling one Rust function on the test phone. | JDK 17, SDK cmdline-tools + platform 35, NDK r27, Gradle wrapper; `cargo ndk -t arm64-v8a`; UniFFI hello-world; `adb install`. | 1 day |
+| **0. Toolchain** | An empty Flutter app calling one Rust function on the test phone, release-signed. | Flutter pointed at the Android SDK, NDK and JDK 17; `flutter_rust_bridge` hello-world over `fingraph-core`; release key; `adb install`; Syncthing on the desktop. | 1 day |
 | **1. Portable core** | `fingraph-core` builds for Android; desktop unchanged. | `TokenSource` / `Ocr` / `Http` traits and features; path injection; a **parity test** that reads every sample and demo PDF with both poppler and PDFium and requires the same transactions and reconciliation. | 3–5 days |
-| **2. Read-only companion** | Budget, Transactions (search, detail), Subscriptions status, Outlook summary, Next Steps, from a backup. | `fingraph-ffi` facade; move Next Steps and the budget snapshot into the core; five Compose screens; backup picker; app lock. | 2–3 weeks |
-| **3. Capture** | Quick-add purchase, receipt camera, *Share PDF to FinGraph* from the bank app; desktop imports the inbox. | Inbox format and desktop importer (with tests); CameraX; share intent; Material date and amount entry. | 1–2 weeks |
+| **2. Read-only companion** | Budget, Transactions (search, detail), Subscriptions status, Outlook summary, Next Steps, from a backup. | `fingraph-ffi` facade; move Next Steps and the budget snapshot into the core; desktop *Copy for the phone* setting; five Flutter screens; Syncthing folder picker; app lock. | 2–3 weeks |
+| **3. Capture** | Quick-add purchase, receipt camera, *Share PDF to FinGraph* from the bank app; desktop imports the inbox. | Inbox format and desktop importer (with tests); camera plugin; receiving shared files; Material date and amount entry. | 1–2 weeks |
 | **4. Review on the phone** | To Review cards (swipe to answer, with the same explanations), rule preview, refund links. | Triage facade; card UI; the inbox carries answers too, applied on the desktop as rules. | 1–2 weeks |
 | **5. Import on the phone** (optional) | Statements read and proven on the phone. | PDFium and ML Kit backends live; reconciliation and review holds as on the desktop; SQLCipher; the phone keeps its own ledger, merged through the inbox. | 2–3 weeks |
 | **6. Polish and release** | Signed APK on the test phone, then GitHub releases. | Release signing key kept outside the public repo; R8; size check (PDFium adds about 5 MB); dark theme; tablet layout; README section. | 1 week |
@@ -116,9 +136,11 @@ installed on the test phone over `adb`, and nothing changed for desktop users.
 - **Effort is in the UI.** The core is shared; every screen is new. Keep the phone to the screens above.
 - **Public repo.** Signing keys, test ledgers and real statements never go in it (as with merchant hints).
 
-## 6. Questions for you
+## 6. Decisions
 
-1. Read-only companion first (recommended), or the phone importing statements on its own from the start?
-2. How should backups reach the phone: Syncthing, a home server over a VPN, or sharing a file by hand?
-3. Android only, or could an iPhone matter later (it would tip the choice toward Flutter)?
-4. Sideload to your own phone only, or publish APKs on GitHub releases like the desktop .deb?
+| Question | Answer |
+|---|---|
+| Companion or full import first? | Read-only companion first. |
+| How backups reach the phone | Syncthing: desktop, phone (Syncthing-Fork) and the home server as an encrypted, versioned, always-on peer. Not the Pi (SD card storage, no Syncthing there). |
+| Platforms | Android now; iPhone possibly later, hence Flutter. |
+| Distribution | The owner's phone and GitHub release APKs, signed with the same release key (kept outside the repo) so either installs over the other. |
