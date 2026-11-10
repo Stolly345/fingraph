@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/fingraph-core", "crates/fingraph", "crates/fingraph-ffi"]
+members = ["crates/fingraph-core", "crates/fingraph", "crates/fingraph-ffi", "crates/fingraph-server", "crates/fingraph-client"]
 
 [workspace.package]
 version = "0.2.30"

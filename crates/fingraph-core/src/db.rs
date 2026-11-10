@@ -712,6 +712,16 @@ impl Db {
         (file_sha256(&old).ok().as_deref() == Some(sha256)).then_some(old)
     }
 
+    /// Every statement file the ledger refers to, once each: its SHA-256, its original file name and the
+    /// latest period end read from it (demo statements, which have no file, left out).
+    pub fn statement_periods(&self) -> Result<Vec<(String, String, Option<NaiveDate>)>> {
+        let mut st = self.conn.prepare(
+            "SELECT sha256_hash, MIN(filename), MAX(period_end) FROM documents WHERE sha256_hash NOT LIKE 'demo-%' GROUP BY sha256_hash ORDER BY MAX(period_end), MIN(filename)",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().map(|(s, f, p)| (s, f, p.and_then(|p| p.parse().ok()))).collect())
+    }
+
     /// Move the kept PDFs to a new folder and remember it. Only FinGraph's own copies (`<sha256>.pdf`) ever
     /// move; a folder that already holds other things gets a `FinGraph Statements` folder inside it.
     /// Returns how many moved and the folder they're in now.

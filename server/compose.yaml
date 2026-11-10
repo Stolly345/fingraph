@@ -1,0 +1,19 @@
+# FinGraph Server. Put this file in a folder on the machine that's always on, then:
+#   docker compose up -d
+#   docker compose logs fingraph        (shows the first pairing code)
+services:
+  fingraph:
+    image: ghcr.io/stolly345/fingraph-server:latest
+    container_name: fingraph
+    ports:
+      - "8743:8743"
+    environment:
+      # your user and group on this machine (`id -u`, `id -g`), so the files belong to you
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "Etc/UTC"                        # your time zone, e.g. America/Cayman
+      FINGRAPH_ADDRESS: "192.168.1.20:8743" # how your phone reaches this machine (for the QR code)
+    volumes:
+      - ./fingraph-data:/data              # the ledger, settings and nightly backups
+      - ./statements:/statements           # every statement, filed as 2026/10 Oct/…; drop new ones in inbox/
+    restart: unless-stopped

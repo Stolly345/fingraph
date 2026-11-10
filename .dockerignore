@@ -1,0 +1,6 @@
+target/*
+!target/release/fingraph-server
+mobile
+.git
+**/*.db
+AI_HANDOFF.txt
