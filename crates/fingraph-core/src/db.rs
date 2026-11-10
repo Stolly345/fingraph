@@ -540,6 +540,96 @@ impl Db {
         Ok(true)
     }
 
+    /// Move what's saved by merchant name (cancelled services, billing cycles you set, the big-bill
+    /// lists, a fund's merchant) from the old way of cleaning names to the new one. An old name that
+    /// now reads as several (two payees that used to share their first four words) keeps its choice
+    /// for each of them, as before; a fund takes the commonest. Names no transaction has are left as
+    /// they are. Returns how many saved names changed.
+    pub(crate) fn migrate_merchant_keys(&self) -> Result<usize> {
+        use crate::rules::{StemVersion, merchant_stem_v, payer_key_v};
+        let mut map: std::collections::HashMap<String, std::collections::BTreeMap<String, usize>> = Default::default();
+        {
+            let mut st = self.conn.prepare("SELECT raw_description, memo FROM transactions")?;
+            for row in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+                let (raw, memo) = row?;
+                for (old, new) in [
+                    (merchant_stem_v(&raw, &memo, StemVersion::V1), merchant_stem_v(&raw, &memo, StemVersion::V2)),
+                    (payer_key_v(&raw, &memo, StemVersion::V1), payer_key_v(&raw, &memo, StemVersion::V2)),
+                ] {
+                    *map.entry(old).or_default().entry(new).or_default() += 1;
+                }
+            }
+        }
+        let moved = |k: &str| -> Option<Vec<String>> { map.get(k).filter(|n| !(n.len() == 1 && n.contains_key(k))).map(|n| n.keys().cloned().collect()) };
+        let mut changed = 0;
+        let tx = self.sp()?;
+        if let Some(mut p) = self.setting("preferences").and_then(|j| serde_json::from_str::<Prefs>(&j).ok()) {
+            let mut c2 = std::collections::BTreeMap::new();
+            for (k, v) in &p.cancelled {
+                match moved(k) {
+                    Some(news) => {
+                        changed += 1;
+                        for n in news {
+                            c2.entry(n).or_insert_with(|| v.clone());
+                        }
+                    }
+                    None => {
+                        c2.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            let mut s2 = std::collections::BTreeMap::new();
+            for (k, v) in &p.subscription_cadence {
+                match moved(k) {
+                    Some(news) => {
+                        changed += 1;
+                        for n in news {
+                            s2.entry(n).or_insert(*v);
+                        }
+                    }
+                    None => {
+                        s2.insert(k.clone(), *v);
+                    }
+                }
+            }
+            if c2 != p.cancelled || s2 != p.subscription_cadence {
+                p.cancelled = c2;
+                p.subscription_cadence = s2;
+                // straight to the setting: process-wide switches are set when the ledger is opened for use
+                tx.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('preferences', ?1)", [serde_json::to_string(&p)?])?;
+            }
+        }
+        for key in ["not_big_bills", "kept_big_bills"] {
+            let Some(list) = self.setting(key).and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok()) else { continue };
+            let mut out: Vec<String> = Vec::new();
+            for k in &list {
+                let news = moved(k).inspect(|_| changed += 1).unwrap_or_else(|| vec![k.clone()]);
+                for n in news {
+                    if !out.contains(&n) {
+                        out.push(n);
+                    }
+                }
+            }
+            if out != list {
+                tx.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", params![key, serde_json::to_string(&out)?])?;
+            }
+        }
+        let funds: Vec<(i64, String)> = {
+            let mut st = tx.prepare("SELECT id, stem FROM sinking_funds WHERE stem != ''")?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, stem) in funds {
+            if moved(&stem).is_some()
+                && let Some((best, _)) = map[&stem].iter().max_by_key(|(n, c)| (**c, std::cmp::Reverse((*n).clone())))
+            {
+                tx.execute("UPDATE sinking_funds SET stem = ?2 WHERE id = ?1", params![id, best])?;
+                changed += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
     // ---------------------------------------------------------------- preferences
 
     pub fn prefs(&self) -> Prefs {
@@ -694,6 +784,12 @@ impl Db {
         if self.setting("fitid_v2").is_none() {
             self.rekey_fitids()?;
             self.set_setting("fitid_v2", "1")?;
+        }
+        // 0.2.29 cleans merchant names differently (six words, "7 ELEVEN" keeps its 7): choices saved
+        // under the old names follow them, once
+        if self.setting("merchant_keys_v2").is_none() {
+            self.migrate_merchant_keys()?;
+            self.set_setting("merchant_keys_v2", "1")?;
         }
         for (slug, rev) in [("cnb_ky", "1"), ("scotiabank_ky", "2")] {
             let key = format!("profile_rev:{slug}");
@@ -2274,9 +2370,10 @@ impl Db {
 
     /// File uncategorized charges from businesses in the merchant directory (and, if allowed in
     /// Preferences, keyword guesses). Your rules always run first; a transaction you deliberately set
-    /// to Uncategorized is left alone. Only money going out: a deposit from a business in the
-    /// directory is usually pay or a refund (an airline's payroll is not a flight), so it's asked
-    /// about instead. Returns how many were filed.
+    /// to Uncategorized is left alone. Direction matters: payments only to spending entries, deposits
+    /// only to income entries (SALARY, INTEREST PAID); a deposit from a shop or airline is pay or a
+    /// refund, so it's asked about instead. A digital service is flagged a subscription only when its
+    /// charges come on a schedule. Returns how many were filed.
     pub fn apply_directory(&self) -> Result<usize> {
         let p = self.prefs();
         if !p.auto_directory {
@@ -2290,14 +2387,35 @@ impl Db {
             }
         }
         let rows = self.transactions(&TxFilter { uncategorized_only: true, ..Default::default() })?;
+        // a digital service is a subscription only when it actually bills on a schedule: the dates of
+        // every payment to each directory business, for `rules::cadence`
+        let mut dates: std::collections::HashMap<&'static str, Vec<NaiveDate>> = Default::default();
+        // digital charges filed earlier, before there were enough to show a schedule (statements come a month at a time)
+        let mut filed_digital: Vec<(i64, &'static str)> = Vec::new();
+        let digital = ids.get("Subscriptions & Digital").copied();
+        for t in self.transactions(&TxFilter::default())?.iter().filter(|t| t.amount.is_sign_negative() && t.split_seq.is_none()) {
+            if let Some(f) = crate::merchants::find_for(&format!("{} {}", rules::merchant_stem(&t.raw_description, &t.memo), t.raw_description), crate::merchants::Direction::Out) {
+                let name = f.merchant.name.as_str();
+                dates.entry(name).or_default().push(t.posted);
+                if t.review == ReviewStatus::AutoCategorized && !t.is_subscription && t.category_id.is_some() && t.category_id == digital && f.conflict.is_none() {
+                    filed_digital.push((t.id, name));
+                }
+            }
+        }
         let tx = self.sp()?;
+        for (id, name) in &filed_digital {
+            if dates.get(name).is_some_and(|d| rules::cadence(d).is_some()) {
+                tx.execute("UPDATE transactions SET is_subscription = 1 WHERE id = ?1", [id])?;
+            }
+        }
         let mut n = 0;
-        for t in rows.iter().filter(|t| t.review != ReviewStatus::Confirmed && t.amount.is_sign_negative()) {
-            let Some((cat, name)) = rules::auto_category(&t.raw_description, &t.memo, p.auto_keywords) else { continue };
+        for t in rows.iter().filter(|t| t.review != ReviewStatus::Confirmed) {
+            let Some((cat, name)) = rules::auto_category(&t.raw_description, &t.memo, t.amount, p.auto_keywords) else { continue };
             let Some(&id) = ids.get(cat) else { continue };
+            let recurring = cat == "Subscriptions & Digital" && name.and_then(|m| dates.get(m)).is_some_and(|d| rules::cadence(d).is_some());
             tx.execute(
                 "UPDATE transactions SET category_id = ?2, clean_payee = COALESCE(?3, clean_payee), is_subscription = is_subscription OR ?4, review_status = 'AutoCategorized' WHERE id = ?1",
-                params![t.id, id, name, cat == "Subscriptions & Digital"],
+                params![t.id, id, name, recurring],
             )?;
             n += 1;
         }
@@ -3160,6 +3278,51 @@ mod tests {
         db.save_prefs(&p).unwrap();
         db.reset_learning(&[]).unwrap();
         assert_eq!(db.apply_directory().unwrap(), 0);
+    }
+
+    /// One digital purchase is a purchase: the subscription flag waits for charges on a schedule.
+    #[test]
+    fn a_one_off_digital_purchase_is_not_a_subscription() {
+        let db = Db::open_in_memory().unwrap();
+        db.load_demo().unwrap();
+        assert!(db.transactions(&TxFilter { search: "NORDVPN".into(), ..Default::default() }).unwrap().is_empty());
+        let t = db.transactions(&TxFilter::default()).unwrap().into_iter().find(|t| t.amount.is_sign_negative() && t.transfer_peer.is_none() && t.split_seq.is_none()).unwrap();
+        db.conn.execute("UPDATE transactions SET raw_description = 'NORDVPN.COM AMSTERDAM', memo = '', category_id = NULL, is_subscription = 0, review_status = 'NeedsReview' WHERE id = ?1", [t.id]).unwrap();
+        db.apply_directory().unwrap();
+        let after = db.transaction(t.id).unwrap();
+        assert_eq!(after.category_name.as_deref(), Some("Subscriptions & Digital"));
+        assert!(!after.is_subscription, "one charge isn't a schedule");
+    }
+
+    /// Choices saved by merchant name follow the new way of cleaning names, once.
+    #[test]
+    fn saved_merchant_choices_follow_the_new_names() {
+        let db = Db::open_in_memory().unwrap();
+        db.load_demo().unwrap();
+        let out: Vec<i64> = db.transactions(&TxFilter::default()).unwrap().into_iter().filter(|t| t.amount.is_sign_negative() && t.transfer_peer.is_none()).map(|t| t.id).take(3).collect();
+        for (id, who) in out.iter().zip(["LANDSCAPING", "CLEANING", "LANDSCAPING"]) {
+            db.conn.execute("UPDATE transactions SET raw_description = 'MOBILE OB TRF DR', memo = ?2 WHERE id = ?1", params![id, format!("TRF TO: JOHN A SMITH JR {who}")]).unwrap();
+        }
+        let old = "JOHN A SMITH JR";
+        let mut p = db.prefs();
+        p.cancelled.insert(old.into(), "2026-09-01".into());
+        p.cancelled.insert("SOMEONE NOBODY PAID".into(), "2026-09-02".into());
+        p.subscription_cadence.insert(old.into(), 30);
+        db.save_prefs(&p).unwrap();
+        db.mark_not_big_bill(old).unwrap();
+        db.conn.execute("INSERT INTO sinking_funds (scope, name, amount, currency, every_months, next_due, stem) VALUES ('1,2', 'Yard', '100', 'KYD', 12, '2027-01-01', ?1)", [old]).unwrap();
+        assert!(db.migrate_merchant_keys().unwrap() >= 4);
+        let p = db.prefs();
+        let (land, clean) = ("JOHN A SMITH JR LANDSCAPING", "JOHN A SMITH JR CLEANING");
+        assert_eq!((p.cancelled.get(land), p.cancelled.get(clean)), (Some(&"2026-09-01".to_string()), Some(&"2026-09-01".to_string())), "both kept the choice made for both");
+        assert!(!p.cancelled.contains_key(old));
+        assert!(p.cancelled.contains_key("SOMEONE NOBODY PAID"), "a name no transaction has stays as it was");
+        assert_eq!(p.subscription_cadence.get(land), Some(&30));
+        assert!(db.not_big_bills().contains(&land.to_string()) && db.not_big_bills().contains(&clean.to_string()));
+        let stem: String = db.conn.query_row("SELECT stem FROM sinking_funds WHERE name = 'Yard'", [], |r| r.get(0)).unwrap();
+        assert_eq!(stem, land, "a fund follows the commonest");
+        // and running it again changes nothing
+        assert_eq!(db.migrate_merchant_keys().unwrap(), 0);
     }
 
     #[test]

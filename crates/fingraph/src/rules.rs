@@ -276,7 +276,7 @@ pub fn build(app: &Rc<App>, part: Part) -> (gtk::Widget, crate::Refresh) {
                     }
                     bits.push(scope);
                     let r = adw::ActionRow::builder()
-                        .title(glib::markup_escape_text(&format!("{}  “{}”", rule.kind.as_str(), rule.pattern)))
+                        .title(glib::markup_escape_text(&format!("{}  “{}”", kind_label(rule.kind), rule.pattern)))
                         .subtitle(glib::markup_escape_text(&bits.join(" · ")))
                         .activatable(true)
                         .build();
@@ -357,13 +357,24 @@ fn keep_scroll(page: &adw::PreferencesPage) {
     });
 }
 
+/// How each kind of match reads in the rule dialog.
+fn kind_label(k: RuleKind) -> &'static str {
+    match k {
+        RuleKind::NormalizedTokens => "Merchant words (this business only)",
+        RuleKind::Substring => "Contains text (any business, broad)",
+        RuleKind::Regex => "Pattern (regex)",
+        RuleKind::Exact => "Exact description",
+    }
+}
+
 /// New rule, or edit one (saved as a new rule replacing the old).
 /// Edit a rule, or (id 0) create one, optionally pre-filled from a transaction.
 pub fn rule_dialog(app: &Rc<App>, existing: Option<Rule>) {
     let cats = app.categories();
     let ents = app.entities.borrow().clone();
-    let kinds: Vec<&str> = RuleKind::ALL.iter().map(|k| k.as_str()).collect();
-    let kind = adw::ComboRow::builder().title("Match").model(&gtk::StringList::new(&kinds)).build();
+    // the same business only (the directory keeps FLOW and FLOW TAXI apart), or text anywhere, broadly
+    let kinds: Vec<&str> = RuleKind::ALL.iter().map(|k| kind_label(*k)).collect();
+    let kind = adw::ComboRow::builder().title("Match").subtitle("Merchant words stay with one business; Contains text matches any business with that text").model(&gtk::StringList::new(&kinds)).build();
     let pattern = adw::EntryRow::builder().title("Pattern (merchant words, text or regex)").build();
     let payee = adw::EntryRow::builder().title("Clean payee (optional)").build();
     let mut cat_names = vec!["(leave category)".to_string()];

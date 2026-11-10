@@ -51,6 +51,10 @@ pub fn dialog(app: &Rc<App>, tx_id: i64, on_closed: Option<Rc<dyn Fn()>>) {
     if t.splits > 0 {
         category.set_sensitive(false);
         category.set_subtitle("Split into lines — edit them with Split…");
+    } else if let Some(why) = fingraph_core::rules::explain(&app.db.rules().unwrap_or_default(), t.account_entity_id, &t.raw_description, &t.memo, t.amount) {
+        // what FinGraph would go by: your rule, the directory words, a keyword, or why it left it to you
+        category.set_subtitle(&glib::markup_escape_text(&why));
+        category.set_subtitle_lines(3);
     }
     {
         let (w, touch, outgoing) = (Rc::downgrade(app), touch.clone(), t.amount.is_sign_negative());

@@ -29,7 +29,7 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
     body.append(&biz);
 
     body.append(&heading("Keyword Guesses"));
-    body.append(&dim("When no business matches, these words suggest a category in To Review (or file it, if Preferences → Triage → keyword auto-filing is on). The first matching line wins; a * matches any ending."));
+    body.append(&dim("When no business matches, these words suggest a category in To Review (or file it, if Preferences → Triage → keyword auto-filing is on). The most specific match wins (EYE CLINIC over CLINIC); two equally specific words pointing different ways are left for you. A * matches any ending."));
     let kw = gtk::ListBox::builder().css_classes(["boxed-list"]).selection_mode(gtk::SelectionMode::None).build();
     for (words, cat) in KEYWORDS {
         let r = adw::ActionRow::builder().title(glib::markup_escape_text(&words.replace('|', " · "))).subtitle(glib::markup_escape_text(cat)).build();
@@ -71,7 +71,8 @@ pub fn build(app: &Rc<App>) -> (gtk::Widget, crate::Refresh) {
             let seen = seen_n.borrow().clone();
             biz.set_filter_func(move |r| {
                 let n = r.widget_name();
-                n.contains(q.as_str()) && (!only || r.downcast_ref::<adw::ActionRow>().is_some_and(|a| seen.contains_key(a.title().as_str())))
+                // by the business's own name, not the row title (escaped for display: Foster&apos;s)
+                n.contains(q.as_str()) && (!only || DIRECTORY.get(r.index().max(0) as usize).is_some_and(|m| seen.contains_key(&m.name)))
             });
             let q = search.text().to_lowercase();
             kw.set_filter_func(move |r| r.widget_name().contains(q.as_str()));

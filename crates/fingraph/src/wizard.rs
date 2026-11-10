@@ -281,6 +281,14 @@ pub fn card(app: &Rc<App>, content: &gtk::Box, g: &TriageGroup, next: Rc<dyn Fn(
         flow.insert(&b, -1);
     }
     chips_box.append(&flow);
+    // why the highlighted answer (or why there's none): the directory words, a keyword, or a conflict
+    if let Some(why) = &g.why {
+        let l = crate::dim(why);
+        l.add_css_class("caption");
+        l.set_wrap(true);
+        l.set_xalign(0.0);
+        chips_box.append(&l);
+    }
     // everything else: the same searchable picker as everywhere else in FinGraph
     let more = gtk::Button::builder()
         .child(&adw::ButtonContent::builder().icon_name("system-search-symbolic").label("Find Another Category…").build())

@@ -4,6 +4,7 @@
 
 use std::sync::LazyLock;
 
+#[derive(Debug)]
 pub struct Merchant {
     keys: Vec<Vec<String>>,
     pub name: String,
@@ -53,21 +54,110 @@ fn hit(words: &[String], key: &[String]) -> Option<usize> {
     })
 }
 
+/// Categories that are money coming in: a directory entry in one of these only ever names a deposit,
+/// and every other entry only a payment (an airline's payroll deposit is not a flight).
+pub const INCOME_CATEGORIES: &[&str] = &["Business Income", "Gifts Received", "Interest & Dividends", "Refunds", "Reimbursements", "Rental Income", "Salary", "Sales"];
+
+impl Merchant {
+    /// Names money coming in (pay, interest, rent) rather than a place you spend.
+    pub fn is_income(&self) -> bool {
+        INCOME_CATEGORIES.contains(&self.category.as_str())
+    }
+}
+
+/// Which way the money went, for matching that only makes sense one way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    In,
+    Out,
+}
+
+impl Direction {
+    pub fn of(amount: rust_decimal::Decimal) -> Self {
+        if amount.is_sign_negative() { Self::Out } else { Self::In }
+    }
+}
+
+/// A directory match and why: the alias that matched and, when the rest of the text points
+/// somewhere else (`PARAMOUNT PLUMBING`), the category those other words suggest.
+#[derive(Debug, Clone, Copy)]
+pub struct Found {
+    pub merchant: &'static Merchant,
+    /// The directory keyword that matched, as words.
+    pub alias: &'static [String],
+    /// Set when the match is a single brand word and other words in the text suggest an unrelated
+    /// category: the match isn't safe to file on its own.
+    pub conflict: Option<&'static str>,
+}
+
+impl Found {
+    pub fn alias_text(&self) -> String {
+        self.alias.join(" ")
+    }
+}
+
+/// Categories close enough that a keyword from one doesn't contradict a business in another
+/// (a supermarket's FOOD FAIR, a jerk centre's JERK).
+const FAMILIES: &[&[&str]] = &[
+    &["Groceries", "Restaurants", "Takeaway & Delivery", "Coffee & Snacks", "Liquor", "Food & Dining"],
+    &["Groceries", "Shopping", "Online Shopping", "Clothing & Shoes", "Electronics", "Appliances", "Furniture & Decor", "Office Supplies", "Pharmacy", "Pet Food & Supplies"],
+    &["Doctor & Dental", "Pharmacy", "Optical", "Health Insurance"],
+    &["Repairs & Maintenance", "Cleaning", "Pest Control", "Pool Service", "Landscaping", "Furniture & Decor", "Appliances"],
+    &["Vehicle Maintenance", "Fuel", "Parking", "Car Rental", "Taxi & Rideshare"],
+    &["Hotels", "Flights", "Car Rental", "Taxi & Rideshare", "Restaurants"],
+    &["School Fees & Tuition", "Childcare & Nanny"],
+    &["Vet", "Pet Food & Supplies"],
+    &["Hair & Beauty", "Spa & Massage", "Gym & Sports"],
+    &["Subscriptions & Digital", "Electronics", "Online Shopping", "Phone & Internet", "Events & Tickets"],
+    &["Taxes", "Stamp Duty", "Government & Fees", "Accounting", "Legal"],
+];
+
+/// The same category, or two from one family.
+pub fn related(a: &str, b: &str) -> bool {
+    a == b || FAMILIES.iter().any(|f| f.contains(&a) && f.contains(&b))
+}
+
 /// The directory entry naming this text. Statements print the merchant before any billing
 /// descriptor (`AUDIBLE*E47R, AMZN.COM/BILL`), so the earliest match wins; at the same spot the
 /// longest does (`FOSTERS PHARMACY` over `FOSTERS`, `FLOW TAXI` over `FLOW`).
 pub fn lookup(text: &str) -> Option<&'static Merchant> {
+    find(text).map(|f| f.merchant)
+}
+
+/// `lookup`, with the alias that matched and any contradiction from the other words.
+pub fn find(text: &str) -> Option<Found> {
+    find_where(text, |_| true)
+}
+
+/// `find`, among the entries that fit the money's direction: income entries for deposits, the rest
+/// for payments.
+pub fn find_for(text: &str, dir: Direction) -> Option<Found> {
+    find_where(text, |m| m.is_income() == (dir == Direction::In))
+}
+
+fn find_where(text: &str, keep: impl Fn(&Merchant) -> bool) -> Option<Found> {
     let words = tokens(text);
     let words = &words;
-    DIRECTORY
+    let (m, k) = DIRECTORY
         .iter()
-        .flat_map(|m| m.keys.iter().filter_map(move |k| hit(words, k).map(|at| ((!m.fallback, std::cmp::Reverse(at), k.len(), k.iter().map(String::len).sum::<usize>()), m))))
-        .max_by_key(|(score, _)| *score)
-        .map(|(_, m)| m)
+        .filter(|m| keep(m))
+        .flat_map(|m| m.keys.iter().filter_map(move |k| hit(words, k).map(|at| ((!m.fallback, std::cmp::Reverse(at), k.len(), k.iter().map(String::len).sum::<usize>()), m, k))))
+        .max_by_key(|(score, _, _)| *score)
+        .map(|(_, m, k)| (m, k))?;
+    // a lone brand word is only a guess when the rest of the name says something else entirely:
+    // PANDORA JEWELRY isn't the music service, PARAMOUNT PLUMBING isn't Paramount+
+    let conflict = (k.len() == 1)
+        .then(|| {
+            let rest: Vec<String> = words.iter().filter(|w| !(**w == k[0] || (w.len() == k[0].len() + 1 && w.starts_with(k[0].as_str()) && w.ends_with('S')))).cloned().collect();
+            keyword_match_words(&rest).map(|h| h.category).filter(|c| !related(c, &m.category))
+        })
+        .flatten();
+    Some(Found { merchant: m, alias: k.as_slice(), conflict })
 }
 
 /// (keyword, category). A keyword ending in `*` matches any word starting with it
-/// (INSURANCE* catches INSURANCEBROKERS). Whole words only, so MKT never matches MKTPL.
+/// (INSURANCE* catches INSURANCEBROKERS). Whole words only, so MKT never matches MKTPL. When several
+/// match, the one with the most words wins, so a specific phrase (EYE CLINIC) beats a broad word (CLINIC).
 pub const KEYWORDS: &[(&str, &str)] = &[
     ("DIGITAL|DGTL|DIGI|SOFTWARE|SAAS|APP STORE|APPS|SUBSCRIPTION|SUBSCR|STREAMING|VPN|HOSTING|DOMAINS", "Subscriptions & Digital"),
     ("MARKET|MKT|SUPERMARKET|SUPERMKT|SUPER MARKET|GROCERY|GROCERIES|GROCER|FOOD FAIR|SUPERCENTRE|SUPERCENTER|MINI MART|MINIMART", "Groceries"),
@@ -82,7 +172,7 @@ pub const KEYWORDS: &[(&str, &str)] = &[
     ("FREIGHT|SHIPPING|CARGO|COURIER|FORWARDING|FORWARDERS|LOGISTICS|CUSTOMS BROKER*", "Shipping & Freight"),
     ("RENT A CAR|CAR RENTAL|RENTACAR", "Car Rental"),
     ("TAXI|TAXIS|CAB|CABS|SHUTTLE", "Taxi & Rideshare"),
-    ("PARKING|PARKADE|TOLL|TOLLS", "Parking"),
+    ("PARKING|PARKADE|PARKING GARAGE|PARKING LOT|CAR PARK|TOLL|TOLLS", "Parking"),
     ("SALON|BARBER*|NAILS|NAIL BAR|BEAUTY|LASH|LASHES|COSMETIC*", "Hair & Beauty"),
     ("SPA|MASSAGE", "Spa & Massage"),
     ("GYM|FITNESS|CROSSFIT|YOGA|PILATES|BARRE|MARTIAL ARTS", "Gym & Sports"),
@@ -93,7 +183,7 @@ pub const KEYWORDS: &[(&str, &str)] = &[
     ("OPTICAL|OPTICIAN*|OPTOMETR*|EYE CARE|EYECARE|EYE CLINIC|EYEWEAR", "Optical"),
     ("SCHOOL|ACADEMY|PRESCHOOL|COLLEGE|UNIVERSITY|TUITION|MONTESSORI", "School Fees & Tuition"),
     ("DAYCARE|DAY CARE|CHILDCARE|CHILD CARE|NANNY|AFTERCARE|NURSERY SCHOOL", "Childcare & Nanny"),
-    ("VET|VETS|VETERINARY|ANIMAL HOSPITAL", "Vet"),
+    ("VET|VETS|VETERINARY|ANIMAL HOSPITAL|ANIMAL CLINIC", "Vet"),
     ("PET|PETS|PET SUPPLIES|KENNEL*", "Pet Food & Supplies"),
     ("CLEANING|JANITORIAL|MAID|MAIDS|LAUNDRY|DRY CLEAN*", "Cleaning"),
     ("PEST|TERMITE*|EXTERMINAT*", "Pest Control"),
@@ -104,7 +194,7 @@ pub const KEYWORDS: &[(&str, &str)] = &[
     ("APPLIANCE|APPLIANCES", "Appliances"),
     ("ELECTRONICS|COMPUTER|COMPUTERS|CELLULAR", "Electronics"),
     ("SHOES|BOUTIQUE|CLOTHING|APPAREL|FASHION|SHOE SHOP|MENSWEAR|SWIMWEAR", "Clothing & Shoes"),
-    ("BOOKS|BOOKSTORE|TOYS|GIFT SHOP|GIFTS|DUTY FREE|JEWELLERS|JEWELERS|DEPARTMENT STORE", "Shopping"),
+    ("BOOKS|BOOKSTORE|TOYS|GIFT SHOP|GIFTS|DUTY FREE|JEWELLERS|JEWELERS|JEWELRY|JEWELLERY|DEPARTMENT STORE", "Shopping"),
     ("GOVERNMENT|GOVT|REGISTRY", "Government & Fees"),
     ("STAMP DUTY", "Stamp Duty"),
     ("TAX|TAXES|TAX NETWORK|IRS|USATAXPYMT|EFTPS|TURBOTAX|TAXACT|H&R BLOCK|CRA", "Taxes"),
@@ -120,12 +210,23 @@ pub const KEYWORDS: &[(&str, &str)] = &[
 /// Each rule's alternatives, as words.
 type Keys = Vec<Vec<String>>;
 
-static KEYWORD_TOKENS: LazyLock<Vec<(Keys, &'static str)>> = LazyLock::new(|| {
-    KEYWORDS
-        .iter()
-        .map(|(ks, cat)| (ks.split('|').map(|k| k.split(' ').map(str::to_string).collect()).collect(), *cat))
-        .collect()
-});
+/// A keyword written in `KEYWORDS`, in the same words statement text is split into (so `H&R BLOCK`
+/// is `H R BLOCK` on both sides); a trailing `*` stays on the last word.
+fn keyword_tokens(k: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for w in k.split(' ') {
+        let star = w.ends_with('*');
+        let mut t = tokens(w.trim_end_matches('*'));
+        if star && let Some(last) = t.last_mut() {
+            last.push('*');
+        }
+        out.extend(t);
+    }
+    out
+}
+
+static KEYWORD_TOKENS: LazyLock<Vec<(Keys, &'static str)>> =
+    LazyLock::new(|| KEYWORDS.iter().map(|(ks, cat)| (ks.split('|').map(keyword_tokens).filter(|k| !k.is_empty()).collect(), *cat)).collect());
 
 fn keyword_hit(words: &[String], key: &[String]) -> bool {
     key.len() <= words.len()
@@ -137,10 +238,46 @@ fn keyword_hit(words: &[String], key: &[String]) -> bool {
         })
 }
 
-/// A category guessed from words in the merchant's name; the first rule that matches wins.
+/// A keyword guess and why: the words that matched and, when an equally specific keyword points at
+/// an unrelated category (`HOTEL RESTAURANT`), that other category.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeywordHit {
+    pub category: &'static str,
+    pub key: String,
+    pub conflict: Option<&'static str>,
+}
+
+/// The most specific keyword in the text: more words beat fewer (`ANIMAL HOSPITAL` → Vet over
+/// `HOSPITAL`, `PARKING GARAGE` → Parking over `GARAGE`); between equals the earlier line wins.
+pub fn keyword_match(text: &str) -> Option<KeywordHit> {
+    keyword_match_words(&tokens(text))
+}
+
+fn keyword_match_words(words: &[String]) -> Option<KeywordHit> {
+    // (words in the key, category, key) of the best so far, and an equally specific rival
+    let mut best: Option<(usize, &'static str, String)> = None;
+    let mut conflict = None;
+    for (keys, cat) in KEYWORD_TOKENS.iter() {
+        let Some(k) = keys.iter().filter(|k| keyword_hit(words, k)).max_by_key(|k| k.len()) else { continue };
+        match &best {
+            Some((len, c, _)) if k.len() == *len => {
+                if conflict.is_none() && !related(c, cat) {
+                    conflict = Some(*cat);
+                }
+            }
+            Some((len, _, _)) if k.len() < *len => {}
+            _ => {
+                best = Some((k.len(), cat, k.join(" ")));
+                conflict = None;
+            }
+        }
+    }
+    best.map(|(_, category, key)| KeywordHit { category, key, conflict })
+}
+
+/// A category guessed from words in the merchant's name: the most specific keyword wins.
 pub fn keyword_category(text: &str) -> Option<&'static str> {
-    let words = tokens(text);
-    KEYWORD_TOKENS.iter().find(|(keys, _)| keys.iter().any(|k| keyword_hit(&words, k))).map(|(_, c)| *c)
+    keyword_match(text).map(|h| h.category)
 }
 
 /// Where to manage or cancel a subscription, by a word in its name (checked in order, so a
@@ -241,5 +378,29 @@ mod tests {
         assert_eq!(keyword_category("IRS USATAXPYMT"), Some("Taxes"));
         assert_eq!(keyword_category("STAMP DUTY TAX"), Some("Stamp Duty"));
         assert_eq!(keyword_category("ISLAND TAXI"), Some("Taxi & Rideshare"));
+    }
+    /// The most specific keyword wins, and both sides are split into words the same way.
+    #[test]
+    fn specific_keywords_beat_broad_ones() {
+        assert_eq!(keyword_category("SEAVIEW ANIMAL HOSPITAL"), Some("Vet"));
+        assert_eq!(keyword_category("HARBOUR EYE CLINIC"), Some("Optical"));
+        assert_eq!(keyword_category("LITTLE STARS NURSERY SCHOOL"), Some("Childcare & Nanny"));
+        assert_eq!(keyword_category("ELGIN PARKING GARAGE"), Some("Parking"));
+        assert_eq!(keyword_category("H&R BLOCK 1234"), Some("Taxes"));
+        assert_eq!(keyword_category("H & R BLOCK"), Some("Taxes"));
+        assert_eq!(keyword_category("SAVANNAH NURSERY"), Some("Landscaping"));
+        // two equally specific words pointing different ways: a guess, flagged
+        let h = keyword_match("BAYSIDE AUTO SPA").unwrap();
+        assert!(h.conflict.is_some(), "{h:?}");
+        assert_eq!(keyword_match("BAYSIDE DENTAL CLINIC").unwrap().conflict, None, "same category isn't a conflict");
+    }
+
+    #[test]
+    fn directory_entries_match_one_way() {
+        assert!(lookup("SALARY").unwrap().is_income());
+        assert!(find_for("INTEREST PAID", Direction::Out).is_none());
+        assert!(find_for("CAYMAN AIRWAYS", Direction::In).is_none());
+        assert_eq!(find("FLOW TAXI").unwrap().merchant.name, "Flow Taxi");
+        assert_eq!(find("FLOW TAXI").unwrap().alias_text(), "FLOW TAXI");
     }
 }

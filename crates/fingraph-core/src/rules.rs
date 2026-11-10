@@ -17,6 +17,7 @@ pub fn set_fuzzy(on: bool) {
 }
 
 use crate::Currency;
+pub use crate::merchants::Direction;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuleKind {
@@ -86,9 +87,20 @@ impl Rule {
                 if pat.is_empty() {
                     return false;
                 }
+                let (pk, sk) = (known_key(&pat), known_key(&stem));
                 // the same well-known service however the bank printed it (HBO MAX / PAYPAL *HBOMAX)
-                if FUZZY.load(Ordering::Relaxed) && known_key(&pat).is_some() && known_key(&pat) == known_key(&stem) {
+                if FUZZY.load(Ordering::Relaxed) && pk.is_some() && pk.map(|f| f.merchant.name.as_str()) == sk.map(|f| f.merchant.name.as_str()) {
                     return true;
+                }
+                // a rule for one business never catches another the directory knows apart: FLOW isn't
+                // FLOW TAXI, AMAZON isn't AMAZON DIGITAL (a Contains-text or pattern rule matches broadly)
+                // (a rule written for a payment platform, PADDLE.NET, is about whatever it bills: left as it was)
+                let platform = crate::merchants::find(&pat).is_some_and(|f| f.merchant.fallback);
+                if let Some(s) = sk.filter(|s| !platform && pk.map(|f| f.merchant.name.as_str()) != Some(s.merchant.name.as_str())) {
+                    let pat_words = crate::merchants::tokens(&pat);
+                    if pk.is_some() || !s.alias.iter().all(|a| pat_words.contains(a)) {
+                        return false;
+                    }
                 }
                 // every pattern word appears, allowing for names the bank cut short (HELP / HEL / HE)
                 let words: Vec<&str> = stem.split(' ').collect();
@@ -126,7 +138,9 @@ pub fn same_merchant(a: &str, b: &str) -> bool {
     if !FUZZY.load(Ordering::Relaxed) {
         return false;
     }
-    if known_key(a).is_some() && known_key(a) == known_key(b) {
+    if let (Some(x), Some(y)) = (known_key(a), known_key(b))
+        && x.merchant.name == y.merchant.name
+    {
         return true;
     }
     let (wa, wb): (Vec<&str>, Vec<&str>) = (a.split(' ').collect(), b.split(' ').collect());
@@ -136,9 +150,10 @@ pub fn same_merchant(a: &str, b: &str) -> bool {
     n > 0 && !lone && wa[0].len() >= 3 && (0..n).all(|i| word_match(wa[i], wb[i], i == 0))
 }
 
-/// Which well-known merchant a stem names, if any. Short keys must be whole words ("FLOW" ≠ "FLOWERS").
-fn known_key(stem: &str) -> Option<&'static str> {
-    crate::merchants::lookup(stem).map(|m| m.name.as_str())
+/// Which well-known merchant a stem names, if any. Short keys must be whole words ("FLOW" ≠ "FLOWERS"),
+/// and a lone brand word the rest of the name contradicts (PARAMOUNT PLUMBING) names nobody.
+fn known_key(stem: &str) -> Option<crate::merchants::Found> {
+    crate::merchants::find(stem).filter(|f| f.conflict.is_none() && !f.merchant.fallback)
 }
 
 pub fn regex_ok(pattern: &str) -> bool {
@@ -193,17 +208,41 @@ static NOISE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .collect()
 });
 
+/// The paying bank's name printed after a transfer's payee ("TRF TO: ACME BANK OF BUTTERFIELD INTL"):
+/// only when something comes before it, so a payment *to* the bank keeps its name.
+static BANK_SUFFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s(bank of butterfield|cayman national bank|royal bank of canada|scotiabank)\b.*$").unwrap());
+
+/// A short number that is part of a name ("7 ELEVEN", "345 VETS"), kept where a reference would be dropped.
+static LEADING_NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{1,3})\s+[A-Z]").unwrap());
+
+/// How names were cleaned: version 1 (up to 0.2.28) kept four words and dropped every number; version 2
+/// keeps six words, a leading number that is part of the name, and the bank's own name when it is the payee.
+/// Saved choices keyed by the old cleaning are moved over once (`Db::migrate_merchant_keys`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StemVersion {
+    V1,
+    V2,
+}
+
 /// Who a payment is from or to, ignoring reference numbers: a bank that prints a new reference on
 /// every deposit ("100004512, HARBOUR FREIGHT DIR PAY") still reads as one payer. For spotting rhythms
 /// (pay, bills); rules keep matching on `merchant_stem`.
 pub fn payer_key(raw: &str, memo: &str) -> String {
-    let stem = merchant_stem(raw, memo);
+    payer_key_v(raw, memo, StemVersion::V2)
+}
+
+pub fn payer_key_v(raw: &str, memo: &str, v: StemVersion) -> String {
+    let stem = merchant_stem_v(raw, memo, v);
     let kept: Vec<&str> = stem.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty() && !w.chars().any(|c| c.is_ascii_digit())).collect();
     if kept.is_empty() { stem } else { kept.join(" ") }
 }
 
 /// `POS PURCHASE` / `FOSTER'S FOOD FAIR #12 CAMANA BAY` → `FOSTER'S FOOD FAIR`. Upper-case words, single-spaced.
 pub fn merchant_stem(raw: &str, memo: &str) -> String {
+    merchant_stem_v(raw, memo, StemVersion::V2)
+}
+
+pub fn merchant_stem_v(raw: &str, memo: &str, v: StemVersion) -> String {
     let raw = raw.trim();
     let first_memo = memo.split(" | ").next().unwrap_or("").trim();
     let base = if (GENERIC.is_match(raw) || raw.is_empty()) && !first_memo.is_empty() && !first_memo.starts_with("Ref ") { first_memo } else { raw };
@@ -213,7 +252,19 @@ pub fn merchant_stem(raw: &str, memo: &str) -> String {
     }
     // BODDEN MOTORS1USD: the card's currency glued to the name, which the reference filter would take with it
     s = GLUED_CCY.replace_all(&s, "$1").to_string();
-    for re in NOISE.iter() {
+    let mut lead = None;
+    if v == StemVersion::V2 {
+        if let Some(c) = LEADING_NUMBER.captures(s.trim_start()) {
+            let n = c[1].to_string();
+            s = s.trim_start()[n.len()..].to_string();
+            lead = Some(n);
+        }
+        s = BANK_SUFFIX.replace(&s, "").to_string();
+    }
+    for (i, re) in NOISE.iter().enumerate() {
+        if i == 2 && v == StemVersion::V2 {
+            continue;
+        }
         s = re.replace_all(&s, " ").to_string();
     }
     // trailing location words can repeat ("CAMANA BAY GRAND CAYMAN")
@@ -221,7 +272,12 @@ pub fn merchant_stem(raw: &str, memo: &str) -> String {
         s = NOISE[9].replace_all(s.trim(), "").to_string();
     }
     let words: Vec<&str> = s.split(|c: char| c.is_whitespace() || c == '*' || c == '/' || c == '-').map(|w| w.trim_matches(|c: char| c == '.' || c == ',' || c == ':')).filter(|w| w.chars().any(char::is_alphanumeric)).collect();
-    let stem = words.iter().take(4).copied().collect::<Vec<_>>().join(" ");
+    let limit = if v == StemVersion::V1 { 4 } else { 6 };
+    let words: Vec<&str> = match &lead {
+        Some(n) if !words.is_empty() => std::iter::once(n.as_str()).chain(words).collect(),
+        _ => words,
+    };
+    let stem = words.iter().take(limit).copied().collect::<Vec<_>>().join(" ");
     if stem.is_empty() { base.to_uppercase() } else { stem }
 }
 
@@ -276,12 +332,23 @@ pub fn looks_like_transfer(raw: &str, memo: &str) -> bool {
     TRANSFER_HINT.is_match(raw) || TRANSFER_HINT.is_match(memo)
 }
 
-/// A friendlier payee and a category suggestion (by name) for a stem.
+static REFUND: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(refunds?|refunded|rfnd|reversal|reversed|returns?|returned|chargeback|credit voucher|merchandise credit)\b").unwrap());
+
+/// Wording that says money came back from a purchase.
+pub fn is_refund(raw: &str, memo: &str) -> bool {
+    REFUND.is_match(raw) || REFUND.is_match(memo)
+}
+
+/// A friendlier payee and a category suggestion (by name) for a stem, whichever way the money went.
 pub fn known_merchant(stem: &str, raw: &str) -> (String, Option<&'static str>) {
     let hay = format!("{stem} {raw}");
     // the directory names it (a confident match) ...
-    if let Some(m) = crate::merchants::lookup(&hay) {
-        return (m.name.clone(), Some(m.category.as_str()));
+    if let Some(f) = crate::merchants::find(&hay) {
+        // ... unless the rest of the name says otherwise: PARAMOUNT PLUMBING is a plumber, not Paramount+
+        if let Some(c) = f.conflict {
+            return (title_case(stem), Some(c));
+        }
+        return (f.merchant.name.clone(), Some(f.merchant.category.as_str()));
     }
     if FEE_HINT.is_match(&hay) {
         return (title_case(stem), Some("Bank Fees & Interest"));
@@ -290,15 +357,91 @@ pub fn known_merchant(stem: &str, raw: &str) -> (String, Option<&'static str>) {
     (title_case(stem), crate::merchants::keyword_category(stem))
 }
 
-/// A category FinGraph is sure enough of to file on its own: a directory match, or (when allowed)
-/// a keyword guess. Returns the category name and the merchant's proper name when known.
-pub fn auto_category(raw: &str, memo: &str, keywords_too: bool) -> Option<(&'static str, Option<&'static str>)> {
+/// `known_merchant` for money going one way: a deposit is only ever pay, interest or rent from the
+/// directory, or a refund from a shop (which takes back from that shop's category); a payment never
+/// lands in an income category.
+pub fn known_merchant_for(stem: &str, raw: &str, memo: &str, dir: Direction) -> (String, Option<&'static str>) {
+    let hay = format!("{stem} {raw}");
+    match dir {
+        Direction::Out => match crate::merchants::find_for(&hay, Direction::Out) {
+            Some(f) if f.conflict.is_none() => (f.merchant.name.clone(), Some(f.merchant.category.as_str())),
+            Some(f) => (title_case(stem), f.conflict),
+            None if FEE_HINT.is_match(&hay) => (title_case(stem), Some("Bank Fees & Interest")),
+            None => (title_case(stem), crate::merchants::keyword_category(stem)),
+        },
+        Direction::In => {
+            if let Some(f) = crate::merchants::find_for(&hay, Direction::In) {
+                return (f.merchant.name.clone(), Some(f.merchant.category.as_str()));
+            }
+            match crate::merchants::find_for(&hay, Direction::Out) {
+                Some(f) if f.conflict.is_none() => (f.merchant.name.clone(), is_refund(raw, memo).then_some(f.merchant.category.as_str())),
+                _ => (title_case(stem), None),
+            }
+        }
+    }
+}
+
+/// A category FinGraph is sure enough of to file on its own: a directory match that fits the money's
+/// direction and that nothing in the name contradicts, or (when allowed) an uncontested keyword guess
+/// on a payment. Returns the category name and the merchant's proper name when known. Refunds and
+/// other money in from shops are left for you.
+pub fn auto_category(raw: &str, memo: &str, amount: Decimal, keywords_too: bool) -> Option<(&'static str, Option<&'static str>)> {
     let stem = merchant_stem(raw, memo);
     let hay = format!("{stem} {raw}");
-    if let Some(m) = crate::merchants::lookup(&hay) {
-        return Some((m.category.as_str(), Some(m.name.as_str())));
+    let dir = Direction::of(amount);
+    if let Some(f) = crate::merchants::find_for(&hay, dir) {
+        return f.conflict.is_none().then_some((f.merchant.category.as_str(), Some(f.merchant.name.as_str())));
     }
-    keywords_too.then(|| crate::merchants::keyword_category(&stem)).flatten().map(|c| (c, None))
+    if dir == Direction::In || crate::merchants::find_for(&hay, Direction::In).is_some() {
+        return None;
+    }
+    if !keywords_too {
+        return None;
+    }
+    crate::merchants::keyword_match(&stem).filter(|h| h.conflict.is_none()).map(|h| (h.category, None))
+}
+
+/// Why a transaction was (or would be) filed where it is, in a sentence: your rule, the directory
+/// entry and the words that matched, a keyword, or what stopped FinGraph from deciding.
+pub fn explain(rules: &[Rule], entity_id: i64, raw: &str, memo: &str, amount: Decimal) -> Option<String> {
+    if let Some(r) = first_match(rules, entity_id, raw, memo, amount) {
+        let how = match r.kind {
+            RuleKind::NormalizedTokens => "the words",
+            RuleKind::Substring => "text containing",
+            RuleKind::Regex => "the pattern",
+            RuleKind::Exact => "exactly",
+        };
+        return Some(format!("Your rule for {how} \u{201c}{}\u{201d}", r.pattern));
+    }
+    let stem = merchant_stem(raw, memo);
+    let hay = format!("{stem} {raw}");
+    let dir = Direction::of(amount);
+    if let Some(f) = crate::merchants::find_for(&hay, dir) {
+        let m = f.merchant;
+        return Some(match f.conflict {
+            Some(c) => format!("\u{201c}{}\u{201d} is {} ({}) in the directory, but the rest of the name suggests {c}, so it\u{2019}s left for you", f.alias_text(), m.name, m.category),
+            None => format!("Directory: {} ({}), matched \u{201c}{}\u{201d}", m.name, m.category, f.alias_text()),
+        });
+    }
+    if dir == Direction::In {
+        return crate::merchants::find_for(&hay, Direction::Out).map(|f| {
+            if is_refund(raw, memo) {
+                format!("A refund from {}: it would take back from {}, but money in is left for you", f.merchant.name, f.merchant.category)
+            } else {
+                format!("Money in from {}, a business you pay: pay or a refund, so it\u{2019}s left for you", f.merchant.name)
+            }
+        });
+    }
+    if crate::merchants::find_for(&hay, Direction::In).is_some() {
+        return Some("Its name is in the directory as income, but this is money out, so it\u{2019}s left for you".into());
+    }
+    if FEE_HINT.is_match(&hay) {
+        return Some("Worded like a bank fee or interest charge".into());
+    }
+    crate::merchants::keyword_match(&stem).map(|h| match h.conflict {
+        Some(c) => format!("Keyword \u{201c}{}\u{201d} suggests {}, but another word suggests {c}, so it\u{2019}s left for you", h.key, h.category),
+        None => format!("Keyword \u{201c}{}\u{201d} suggests {}", h.key, h.category),
+    })
 }
 
 /// Charges this regular (median gap 6–8, 13–16, 26–35 or 350–380 days, amounts within 25%) are recurring.
@@ -342,6 +485,8 @@ pub struct TriageGroup {
     /// What your own ledger suggests (category names, likeliest first; see `learn`), besides
     /// `suggested_category`.
     pub guesses: Vec<String>,
+    /// Why FinGraph suggests what it does (or nothing), in a sentence.
+    pub why: Option<String>,
     pub kind: TriageKind,
     pub tx_ids: Vec<i64>,
     pub entity_ids: Vec<i64>,
@@ -383,7 +528,10 @@ pub fn triage_groups(items: &[TriageInput]) -> Vec<TriageGroup> {
     let mut out: Vec<TriageGroup> = by
         .into_iter()
         .map(|(stem, v)| {
-            let (payee, cat) = known_merchant(&stem, &v[0].raw);
+            let all_out = v.iter().all(|t| t.amount.is_sign_negative());
+            let dir = if all_out { Direction::Out } else { Direction::In };
+            let (payee, cat) = known_merchant_for(&stem, &v[0].raw, &v[0].memo, dir);
+            let why = explain(&[], 0, &v[0].raw, &v[0].memo, v[0].amount);
             let dates: Vec<NaiveDate> = v.iter().map(|t| t.posted).collect();
             let cad = cadence(&dates);
             let mut totals: BTreeMap<Currency, Decimal> = BTreeMap::new();
@@ -391,7 +539,6 @@ pub fn triage_groups(items: &[TriageInput]) -> Vec<TriageGroup> {
                 *totals.entry(t.currency).or_default() += t.amount;
             }
             let latest = v.iter().max_by_key(|t| t.posted).unwrap();
-            let all_out = v.iter().all(|t| t.amount.is_sign_negative());
             // a known service, or the very same price on a steady schedule (bills and fees vary or say so)
             let same_price = v.windows(2).all(|w| w[0].amount == w[1].amount);
             let excluded = v.iter().any(|t| NOT_SUBSCRIPTION.is_match(&format!("{} {}", t.raw, t.memo)) || is_bank_fee(&t.raw, &t.memo));
@@ -411,6 +558,7 @@ pub fn triage_groups(items: &[TriageInput]) -> Vec<TriageGroup> {
                 // a known digital service defaults to Subscriptions & Digital
                 suggested_category: cat.or_else(|| SUBSCRIPTION_HINT.is_match(&stem).then_some("Subscriptions & Digital")),
                 guesses: Vec::new(),
+                why,
                 kind,
                 tx_ids: v.iter().map(|t| t.id).collect(),
                 entity_ids,
@@ -557,5 +705,78 @@ mod tests {
         for s in ["CHEQUE BOOK FEE", "INCOMING WIRE BLUE WATER", "MONTHLY FEE", "KIRK MARKET"] {
             assert!(!varied_payee(s), "{s}");
         }
+    }
+    /// Probes from the 0.2.29 matching review, all made-up names: each pair must match or stay apart.
+    #[test]
+    fn a_rule_for_one_business_never_catches_another() {
+        let flow = Rule { pattern: "FLOW".into(), category_id: Some(1), ..Default::default() };
+        // (the directory check comes before, and doesn't depend on, the truncated-spelling preference;
+        // that switch is process-wide, so tests leave it alone)
+        assert!(flow.matches("FLOW WEB PMT", ""));
+        assert!(!flow.matches("FLOW TAXI, GEORGE TOWN", ""), "Flow Taxi is its own business");
+        // a rule from a stem the directory doesn't know never swallows a business it does
+        let seven = Rule { pattern: "SEVEN MILE".into(), ..Default::default() };
+        assert!(!seven.matches("SEVEN MILE DENTAL", ""));
+        assert!(seven.matches("SEVEN MILE TRADING", ""));
+        // matching every business with the text is still there, asked for by name
+        // a rule you wrote for a payment platform still covers what it billed
+        let paddle = Rule { pattern: "PADDLE.NET".into(), ..Default::default() };
+        assert!(paddle.matches("PADDLE.NET* INCOGNI", ""));
+        let broad = Rule { kind: RuleKind::Substring, pattern: "FLOW".into(), ..Default::default() };
+        assert!(broad.matches("FLOW TAXI", ""));
+    }
+
+    #[test]
+    fn a_brand_word_the_rest_of_the_name_contradicts_is_left_for_you() {
+        let out: Decimal = "-80.00".parse().unwrap();
+        assert_eq!(auto_category("PANDORA JEWELRY MIAMI", "", out, true), None);
+        assert_eq!(known_merchant(&merchant_stem("PANDORA JEWELRY MIAMI", ""), "PANDORA JEWELRY MIAMI"), ("Pandora Jewelry Miami".into(), Some("Shopping")));
+        assert_eq!(auto_category("PARAMOUNT PLUMBING LTD", "", out, true), None);
+        assert_eq!(known_merchant_for("PARAMOUNT PLUMBING", "PARAMOUNT PLUMBING LTD", "", Direction::Out).1, Some("Repairs & Maintenance"));
+        assert!(explain(&[], 1, "PARAMOUNT PLUMBING LTD", "", out).unwrap().contains("left for you"));
+        // the services themselves still file
+        assert_eq!(auto_category("PARAMOUNTPLUS.COM", "", out, false).map(|c| c.0), Some("Subscriptions & Digital"));
+        assert_eq!(auto_category("PANDORA MEDIA", "", out, false).map(|c| c.0), Some("Subscriptions & Digital"));
+        // a related word isn't a contradiction: a grocer's FOOD FAIR, a jerk centre's JERK
+        assert_eq!(auto_category("POS PURCHASE", "FOSTER'S FOOD FAIR #12 CAMANA BAY", out, false).map(|c| c.0), Some("Groceries"));
+        assert_eq!(auto_category("MARLEY JERK CENTRE", "", out, false).map(|c| c.0), Some("Takeaway & Delivery"));
+    }
+
+    #[test]
+    fn names_keep_what_tells_them_apart() {
+        assert!(merchant_stem("7 ELEVEN 12345, MIAMI", "").starts_with("7 ELEVEN"));
+        let a = merchant_stem("MOBILE OB TRF DR", "TRF TO: JOHN A SMITH JR LANDSCAPING BANK OF BUTTERFIELD INTL");
+        let b = merchant_stem("MOBILE OB TRF DR", "TRF TO: JOHN A SMITH JR CLEANING BANK OF BUTTERFIELD INTL");
+        assert_eq!(a, "JOHN A SMITH JR LANDSCAPING");
+        assert_ne!(a, b);
+        assert!(!same_merchant(&a, &b));
+        // the old cleaning, kept for moving saved choices over, merged them
+        assert_eq!(merchant_stem_v("MOBILE OB TRF DR", "TRF TO: JOHN A SMITH JR CLEANING", StemVersion::V1), "JOHN A SMITH JR");
+        // a payment to the bank itself keeps the bank's name
+        assert_eq!(merchant_stem("CAYMAN NATIONAL BANK LOAN", ""), "CAYMAN NATIONAL BANK LOAN");
+    }
+
+    #[test]
+    fn money_in_and_money_out_are_matched_their_own_way() {
+        let (inn, out): (Decimal, Decimal) = ("1200.00".parse().unwrap(), "-1200.00".parse().unwrap());
+        assert_eq!(auto_category("INTEREST PAID", "", inn, false).map(|c| c.0), Some("Interest & Dividends"));
+        assert_ne!(auto_category("INTEREST PAID", "", out, true).map(|c| c.0), Some("Interest & Dividends"));
+        assert_eq!(auto_category("ELECTRONIC CREDIT", "ACME HOLDINGS DIR PAY", inn, false).map(|c| c.0), Some("Salary"));
+        // an airline's deposit: pay or a refund, never a flight, and never filed on its own
+        assert_eq!(auto_category("ELECTRONIC CREDIT, CAYMAN AIRWAYS REFUND", "", inn, true), None);
+        assert_eq!(known_merchant_for("CAYMAN AIRWAYS REFUND", "CAYMAN AIRWAYS REFUND", "", Direction::In).1, Some("Flights"), "a refund takes back from Flights");
+        assert_eq!(known_merchant_for("CAYMAN AIRWAYS", "CAYMAN AIRWAYS", "", Direction::In).1, None);
+        assert!(explain(&[], 1, "CAYMAN AIRWAYS REFUND", "", inn).unwrap().starts_with("A refund from"));
+        // keywords are about spending: a deposit with MARKET in it isn't groceries
+        assert_eq!(auto_category("ISLAND MARKET LTD", "", inn, true), None);
+    }
+
+    #[test]
+    fn explanations_name_what_matched() {
+        let out: Decimal = "-9.99".parse().unwrap();
+        assert_eq!(explain(&[], 1, "NETFLIX.COM", "", out).as_deref(), Some("Directory: Netflix (Subscriptions & Digital), matched \u{201c}NETFLIX\u{201d}"));
+        assert_eq!(explain(&[], 1, "HARBOUR EYE CLINIC", "", out).as_deref(), Some("Keyword \u{201c}EYE CLINIC\u{201d} suggests Optical"));
+        let r = Rule { pattern: "NETFLIX".into(), category_id: Some(1), ..Default::default() };
+        assert!(explain(&[r], 1, "NETFLIX.COM", "", out).unwrap().starts_with("Your rule"));
     }
 }
